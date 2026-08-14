@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 from uuid import UUID
 
 import pytest
+
 from nextgen_memory.neon_utility import NODE_UTILITY_SELECT_SQL, NodeUtilityReader
 
 SPACE_ID = UUID("279c0edc-e75d-5c7e-a857-2f461b4ba61e")
