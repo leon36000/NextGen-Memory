@@ -1,0 +1,172 @@
+name: Verify RED and publish Learning Evidence API
+
+on:
+  push:
+    branches: [bootstrap/learning-evidence-api-green]
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/learning-evidence-reader-v0
+          fetch-depth: 0
+
+      - name: Guard the checked-out feature head
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          CURRENT=$(gh api repos/${{ github.repository }}/git/ref/heads/feat/learning-evidence-reader-v0 --jq '.object.sha')
+          test "$(git rev-parse HEAD)" = "$CURRENT"
+          echo "TARGET_SHA=$CURRENT" >> "$GITHUB_ENV"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install development tools
+        run: python -m pip install -e '.[dev]'
+
+      - name: Normalize feature-local formatting in the disposable workspace
+        run: |
+          ruff format \
+            src/nextgen_memory/learning_evidence.py \
+            tests/test_learning_evidence.py \
+            tests/test_learning_evidence_sql.py \
+            tests/test_learning_evidence_properties.py \
+            tests/test_learning_evidence_public_api.py
+          ruff check \
+            src/nextgen_memory/learning_evidence.py \
+            tests/test_learning_evidence.py \
+            tests/test_learning_evidence_sql.py \
+            tests/test_learning_evidence_properties.py \
+            tests/test_learning_evidence_public_api.py \
+            --fix
+          ruff check .
+
+      - name: Require internal GREEN before public export
+        run: |
+          python -m pytest \
+            tests/test_learning_evidence.py \
+            tests/test_learning_evidence_sql.py \
+            tests/test_learning_evidence_properties.py \
+            -q
+
+      - name: Require exact public API RED
+        run: |
+          set +e
+          python -m pytest tests/test_learning_evidence_public_api.py -q > /tmp/api-red.txt 2>&1
+          STATUS=$?
+          set -e
+          cat /tmp/api-red.txt
+          test "$STATUS" -ne 0
+          grep -F 'test_package_exports_stable_learning_evidence_reader_v0_api' /tmp/api-red.txt
+          grep -E 'AttributeError|has no attribute' /tmp/api-red.txt
+          test "$(grep -Eo '[0-9]+ failed' /tmp/api-red.txt | tail -n 1 | awk '{print $1}')" = "1"
+
+      - name: Add only the stable public exports
+        run: |
+          python - <<'PY'
+          from __future__ import annotations
+
+          import ast
+          from pathlib import Path
+
+          path = Path('src/nextgen_memory/__init__.py')
+          text = path.read_text(encoding='utf-8')
+          import_block = '''from .learning_evidence import (
+              LEARNING_EVIDENCE_SELECT_SQL,
+              DirectUtilityEvidence,
+              InheritedUtilityEvidence,
+              LearningEvidenceCursor,
+              LearningEvidenceReadConflictError,
+              LearningEvidenceValidationError,
+              NeonLearningEvidenceReader,
+              NodeLearningEvidence,
+          )
+          '''
+          import_block = '\n'.join(line[10:] if line.startswith('          ') else line for line in import_block.splitlines()) + '\n'
+          if 'from .learning_evidence import (' not in text:
+              marker = 'from .mongodb_retrieval import ('
+              if text.count(marker) != 1:
+                  raise SystemExit('unable to locate stable import insertion point')
+              text = text.replace(marker, import_block + marker, 1)
+
+          module = ast.parse(text)
+          assignment = next(
+              node
+              for node in module.body
+              if isinstance(node, ast.Assign)
+              and any(isinstance(target, ast.Name) and target.id == '__all__' for target in node.targets)
+          )
+          if not isinstance(assignment.value, (ast.List, ast.Tuple)):
+              raise SystemExit('__all__ is not a static sequence')
+          current = [ast.literal_eval(item) for item in assignment.value.elts]
+          additions = [
+              'LEARNING_EVIDENCE_SELECT_SQL',
+              'DirectUtilityEvidence',
+              'InheritedUtilityEvidence',
+              'LearningEvidenceCursor',
+              'LearningEvidenceReadConflictError',
+              'LearningEvidenceValidationError',
+              'NeonLearningEvidenceReader',
+              'NodeLearningEvidence',
+          ]
+          names = sorted(set(current).union(additions))
+          replacement = '__all__ = [\n' + ''.join(f'    {name!r},\n' for name in names) + ']'
+          start = assignment.lineno - 1
+          end = assignment.end_lineno
+          lines = text.splitlines()
+          lines[start:end] = replacement.splitlines()
+          path.write_text('\n'.join(lines) + '\n', encoding='utf-8')
+          PY
+          ruff format src/nextgen_memory/__init__.py
+          ruff check src/nextgen_memory/__init__.py --fix
+
+      - name: Verify final GREEN on the complete tree
+        run: |
+          set -euo pipefail
+          ruff check .
+          python -m pytest -q
+          python -m compileall -q src
+          git diff --check
+
+      - name: Verify exact publication scope
+        run: |
+          set -euo pipefail
+          git diff --name-only | sort > /tmp/actual
+          cat > /tmp/allowed <<'EOF'
+          src/nextgen_memory/__init__.py
+          src/nextgen_memory/learning_evidence.py
+          tests/test_learning_evidence.py
+          tests/test_learning_evidence_properties.py
+          tests/test_learning_evidence_public_api.py
+          tests/test_learning_evidence_sql.py
+          EOF
+          while read -r path; do grep -Fx "$path" /tmp/allowed >/dev/null; done < /tmp/actual
+
+      - name: Commit and push fast-forward
+        run: |
+          set -euo pipefail
+          if git diff --quiet; then
+            echo 'No changes to publish' >&2
+            exit 1
+          fi
+          git config user.name 'NextGen Memory Automation'
+          git config user.email 'actions@users.noreply.github.com'
+          git add \
+            src/nextgen_memory/__init__.py \
+            src/nextgen_memory/learning_evidence.py \
+            tests/test_learning_evidence.py \
+            tests/test_learning_evidence_sql.py \
+            tests/test_learning_evidence_properties.py \
+            tests/test_learning_evidence_public_api.py
+          git commit -m 'feat: publish learning evidence reader v0 API'
+          test "$(git rev-parse HEAD^)" = "$TARGET_SHA"
+          git push origin HEAD:feat/learning-evidence-reader-v0
