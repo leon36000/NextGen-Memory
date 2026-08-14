@@ -1,7 +1,7 @@
 # Provenance Credit v0 Design
 
-**Date:** 2026-08-14  
-**Status:** approved for implementation  
+**Date:** 2026-08-14
+**Status:** approved for implementation
 **Base:** `feat/interaction-credit-v0`
 
 ## 1. Goal
