@@ -4,7 +4,6 @@ from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 import pytest
-
 from nextgen_memory.execution_ledger import (
     AppendOnlyExecutionLedger,
     ExecutionEventKind,
@@ -130,7 +129,7 @@ def test_event_idempotency_conflict_is_rejected() -> None:
         kind=ExecutionEventKind.TEST,
         outcome=ExecutionOutcome.SUCCESS,
         action_key="pytest.execution-ledger",
-        started_at=NOW + timedelta(seconds=1),
+        started_at=NOW + timedlta(seconds=1),
         idempotency_key="event:test:001",
         output_hash=OUTPUT_HASH,
     )
