@@ -1,0 +1,187 @@
++    assert ledger.status(run.run_id) is expected_status
++
++
++def test_append_rejects_non_enum_kind_and_outcome_with_validation_error() -> None:
++    ledger = AppendOnlyExecutionLedger()
++    run = begin(ledger)
++
++    with pytest.raises(ExecutionLedgerValidationError, match="kind"):
++        ledger.append(
++            run_id=run.run_id,
++            kind="test",
++            outcome=ExecutionOutcome.SUCCESS,
++            action_key="pytest.execution-ledger",
++            started_at=NOW + timedelta(seconds=1),
++            idempotency_key="event:bad-kind",
++        )
++    with pytest.raises(ExecutionLedgerValidationError, match="outcome"):
++        ledger.append(
++            run_id=run.run_id,
++            kind=ExecutionEventKind.TEST,
++            outcome="success",
++            action_key="pytest.execution-ledger",
++            started_at=NOW + timedelta(seconds=1),
++            idempotency_key="event:bad-outcome",
++        )
++
++
++def test_execution_event_contract_rejects_semantically_invalid_shapes() -> None:
++    with pytest.raises(ExecutionLedgerValidationError, match="first execution event"):
++        direct_event(kind=ExecutionEventKind.TEST)
++    with pytest.raises(ExecutionLedgerValidationError, match="terminal execution outcome"):
++        direct_event(
++            sequence=2,
++            previous_event_id=UUID("10000000-0000-0000-0000-000000000000"),
++            kind=ExecutionEventKind.RUN_COMPLETED,
++            outcome=ExecutionOutcome.FAILURE,
++            ended_at=NOW,
++        )
++    with pytest.raises(ExecutionLedgerValidationError, match="require ended_at"):
++        direct_event(
++            sequence=2,
++            previous_event_id=UUID("10000000-0000-0000-0000-000000000000"),
++            kind=ExecutionEventKind.RUN_FAILED,
++            outcome=ExecutionOutcome.FAILURE,
++        )
++
++
+ def test_metadata_is_safe_deeply_immutable_and_finite() -> None:
+     ledger = AppendOnlyExecutionLedger()
+     metadata = {"nested": {"policy": "v1"}, "labels": ["safe"]}
+@@ -155,6 +253,100 @@ def test_metadata_is_safe_deeply_immutable_and_finite() -> None:
+         )
+ 
+ 
++@pytest.mark.parametrize(
++    "forbidden_key",
++    [
++        "access token",
++        "api.token",
++        "accessToken",
++        "query text",
++        "APIKey",
++        "stdOut",
++        "queryText",
++        "rawPayload",
++        "commandText",
++    ],
++)
++def test_metadata_rejects_forbidden_segments_across_common_key_styles(
++    forbidden_key: str,
++) -> None:
++    ledger = AppendOnlyExecutionLedger()
++
++    with pytest.raises(ExecutionLedgerValidationError, match="forbidden metadata key"):
++        begin(
++            ledger,
++            idempotency_key=f"run:forbidden-style:{forbidden_key}",
++            metadata={forbidden_key: "sensitive"},
++        )
++
++
++def test_metadata_rejects_keys_that_normalize_to_empty() -> None:
++    ledger = AppendOnlyExecutionLedger()
++
++    with pytest.raises(ExecutionLedgerValidationError, match="metadata key"):
++        begin(
++            ledger,
++            idempotency_key="run:empty-normalized-key",
++            metadata={"!!!": "invalid"},
++        )
++
++
++def test_metadata_rejects_keys_that_collide_after_normalization() -> None:
++    ledger = AppendOnlyExecutionLedger()
++
++    with pytest.raises(ExecutionLedgerValidationError, match="duplicate metadata key"):
++        begin(
++            ledger,
++            idempotency_key="run:metadata-key-collision",
++            metadata={"policy": "v1", " policy ": "v2"},
++        )
++
++
++def test_empty_non_mapping_metadata_is_not_silently_coerced() -> None:
++    ledger = AppendOnlyExecutionLedger()
++
++    with pytest.raises(ExecutionLedgerValidationError, match="JSON object"):
++        begin(
++            ledger,
++            idempotency_key="run:empty-list-metadata",
++            metadata=[],
++        )
++
++
++def test_cyclic_metadata_is_rejected_as_non_json() -> None:
++    ledger = AppendOnlyExecutionLedger()
++    metadata: dict[str, object] = {}
++    metadata["cycle"] = metadata
++
++    with pytest.raises(ExecutionLedgerValidationError, match="cyclic metadata"):
++        begin(
++            ledger,
++            idempotency_key="run:cyclic-metadata",
++            metadata=metadata,
++        )
++
++
++def test_verify_chain_recomputes_content_hash_and_event_identity() -> None:
++    ledger = AppendOnlyExecutionLedger()
++    run = begin(ledger)
++    append_test(ledger, run.run_id)
++
++    assert ledger.verify_chain(run.run_id) is True
++
++    original = ledger.events(run.run_id)[1]
++    ledger._events[run.run_id][1] = replace(
++        original,
++        action_key="pytest.execution-ledger.tampered",
++    )
++    assert ledger.verify_chain(run.run_id) is False
++
++    ledger._events[run.run_id][1] = replace(
++        original,
++        event_id=UUID("30000000-0000-0000-0000-000000000001"),
++    )
++    assert ledger.verify_chain(run.run_id) is False
++
++
+ def test_artifacts_are_idempotent_and_linked_to_an_event() -> None:
+     ledger = AppendOnlyExecutionLedger()
+     run = begin(ledger)
+ diff --git a/tests/test_execution_ledger_migration.py b/tests/test_execution_ledger_migration.py
+ index 3aa225e..670ca19 100644
+--- a/tests/test_execution_ledger_migration.py
++++ b/tests/test_execution_ledger_migration.py
+@@ -15,7 +15,14 @@ def test_execution_ledger_migration_is_append_only_ordered_and_tamper_evident()
+     assert "execution_metadata_is_safe" in sql
+     assert "run_started input_hash must equal execution run request_hash" in sql
+     assert "NEW.event_hash := encode(" in sql
++    assert "storage_content_hash" in sql
++    assert "NEW.storage_content_hash := encode(" in sql
++    assert "NEW.storage_content_hash := v_existing.storage_content_hash" in sql
++    assert "NEW.content_hash := encode(" not in sql
++    assert "expected_storage_content_hash" in sql
++    assert "storage_content_hash IS DISTINCT FROM expected_storage_content_hash" in sql
+     assert "digest(coalesce(v_latest.event_hash" in sql
++    assert "terminal execution events require ended_at" in sql
+     assert "CREATE OR REPLACE VIEW ngm.execution_chain_drift" in sql
+     assert "ON DELETE RESTRICT" in sql
+     assert "conrelid = 'ngm.execution_runs'::regclass" in sql
+@@ -29,3 +36,16 @@ def test_execution_ledger_migration_forbids_raw_sensitive_metadata_keys() -> Non
+ 
+     for forbidden in ("query_text", "stdout", "stderr", "prompt", "secret", "token"):
+         assert f"'{forbidden}'" in sql
++
++
++def test_execution_metadata_key_normalization_handles_punctuation_and_camel_case() -> None:
++    sql = MIGRATION.read_text(encoding="utf-8")
++
++    assert "regexp_replace" in sql
++    assert "([A-Z]+)([A-Z][a-z])" in sql
++    assert "([a-z0-9])([A-Z])" in sql
++    assert "[^A-Za-z0-9]+" in sql
++    assert "v_seen text[]" in sql
++    assert "v_compact text" in sql
++    assert "replace(v_normalized, '_', '')" in sql
++    assert "v_normalized = ANY(v_seen)" in sql
