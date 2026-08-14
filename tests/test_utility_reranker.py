@@ -10,6 +10,7 @@ from nextgen_memory.utility_reranker import (
     UtilityRerankCandidate,
     UtilityRerankerConfig,
 )
+
 from nextgen_memory.retrieval import ResearchRetrievalHit
 
 MEMORY_A = UUID("00000000-0000-5000-8000-000000000001")
