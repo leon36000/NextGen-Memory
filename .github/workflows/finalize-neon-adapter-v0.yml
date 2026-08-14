@@ -1,0 +1,147 @@
+name: Finalize Neon adapter v0 verification
+
+on:
+  push:
+    branches: [bootstrap/adapter-v0-autofix]
+
+permissions:
+  actions: read
+  contents: write
+  pull-requests: write
+
+jobs:
+  finalize:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: leon36000/NextGen-Memory
+      TARGET_BRANCH: feat/neon-execution-ledger-adapter-v0
+    steps:
+      - name: Wait for successful CI on current target head
+        id: verified
+        run: |
+          for attempt in $(seq 1 120); do
+            HEAD_SHA=$(gh api "repos/$REPO/git/ref/heads/$TARGET_BRANCH" --jq '.object.sha')
+            RUN=$(gh api "repos/$REPO/actions/runs?head_sha=$HEAD_SHA&event=push&per_page=50" \
+              --jq '[.workflow_runs[] | select(.name == "CI")][0] // empty')
+            if [ -n "$RUN" ]; then
+              STATUS=$(printf '%s' "$RUN" | jq -r '.status')
+              CONCLUSION=$(printf '%s' "$RUN" | jq -r '.conclusion // ""')
+              RUN_ID=$(printf '%s' "$RUN" | jq -r '.id')
+              if [ "$STATUS" = "completed" ] && [ "$CONCLUSION" = "success" ]; then
+                echo "head_sha=$HEAD_SHA" >> "$GITHUB_OUTPUT"
+                echo "ci_run_id=$RUN_ID" >> "$GITHUB_OUTPUT"
+                exit 0
+              fi
+            fi
+            sleep 10
+          done
+          echo "No successful CI observed for target head" >&2
+          exit 1
+      - name: Verify both matrix jobs
+        run: |
+          RUN_ID='${{ steps.verified.outputs.ci_run_id }}'
+          gh api "repos/$REPO/actions/runs/$RUN_ID/jobs?per_page=100" > /tmp/jobs.json
+          jq -e '[.jobs[] | select(.name | contains("3.12")) | .conclusion] | length > 0 and all(. == "success")' /tmp/jobs.json
+          jq -e '[.jobs[] | select(.name | contains("3.13")) | .conclusion] | length > 0 and all(. == "success")' /tmp/jobs.json
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/neon-execution-ledger-adapter-v0
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install and reproduce broad verification
+        run: |
+          python -m pip install -e '.[dev]'
+          ruff check .
+          python -m pytest -q
+          python -m pytest --cov=nextgen_memory --cov-report=json -q
+          python -m compileall -q src
+          python -m pip wheel . --no-deps -w /tmp/wheel
+          python -m pip install --force-reinstall /tmp/wheel/*.whl
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          from nextgen_memory.neon_execution_ledger import INSERT_EVENT_SQL
+          assert "ngm.assert_same_execution_payload" in INSERT_EVENT_SQL
+          coverage = json.loads(Path("coverage.json").read_text())["totals"]["percent_covered_display"]
+          Path("/tmp/coverage.txt").write_text(str(coverage))
+          PY
+          sha256sum /tmp/wheel/*.whl | awk '{print $1}' > /tmp/wheel-sha.txt
+      - name: Resolve draft PR number
+        id: pr
+        run: |
+          PR_NUMBER=$(gh pr list --repo "$REPO" --head "$TARGET_BRANCH" --state open --json number --jq '.[0].number')
+          test -n "$PR_NUMBER"
+          echo "number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
+      - name: Update PR with exact evidence
+        run: |
+          COVERAGE=$(cat /tmp/coverage.txt)
+          WHEEL_SHA=$(cat /tmp/wheel-sha.txt)
+          TEST_COUNT=$(python -m pytest --collect-only -q | tail -n 1 | sed -E 's/^([0-9]+) tests collected.*/\1/')
+          cat > /tmp/body.md <<EOF
+          ## Objectif
+
+          Relier les contrats Python immuables d’Execution Ledger v0 au schéma Neon sans dépendance psycopg obligatoire et sans affaiblir les invariants append-only.
+
+          ## Implémentation
+
+          - SQL statique et paramétrée pour runs, événements et artéfacts;
+          - conflits exacts contrôlés par `ngm.assert_same_execution_payload`;
+          - transaction unique pour un bundle complet;
+          - validation du graphe run → événements → artéfacts avant ouverture de transaction;
+          - comparaison des `content_hash`, `event_hash` et `storage_content_hash` retournés;
+          - lecture indépendante de `execution_run_heads` et `execution_chain_drift`;
+          - protocoles structurels compatibles avec psycopg et doubles de test;
+          - métadonnées encodées en JSON canonique, sans wrapper spécifique au driver;
+          - rollback immédiat en cas de divergence d’identité ou de chaîne.
+
+          ## Validation GitHub Actions
+
+          - commit exact : `${{ steps.verified.outputs.head_sha }}`;
+          - workflow CI : `${{ steps.verified.outputs.ci_run_id }}`;
+          - Python 3.12 : Ruff et tests réussis;
+          - Python 3.13 : Ruff et tests réussis;
+          - conclusion : **success**.
+
+          ## Reproduction indépendante
+
+          - tests collectés : **$TEST_COUNT**;
+          - couverture globale : **$COVERAGE %**;
+          - compileall : réussi;
+          - wheel construit, réinstallé et importé;
+          - SHA-256 du wheel : `$WHEEL_SHA`.
+
+          ## Garde-fous
+
+          - PR empilée sur Execution Ledger v0;
+          - aucune migration appliquée à Neon main;
+          - aucune fusion automatique;
+          - la connexion et le pool restent injectés par l’application;
+          - retries réseau et orchestration Temporal restent hors du périmètre v0.
+          EOF
+          sed -i 's/^          //' /tmp/body.md
+          gh pr edit '${{ steps.pr.outputs.number }}' --repo "$REPO" --body-file /tmp/body.md
+      - name: Persist verification marker
+        run: |
+          COVERAGE=$(cat /tmp/coverage.txt)
+          WHEEL_SHA=$(cat /tmp/wheel-sha.txt)
+          TEST_COUNT=$(python -m pytest --collect-only -q | tail -n 1 | sed -E 's/^([0-9]+) tests collected.*/\1/')
+          jq -n \
+            --argjson pull_request '${{ steps.pr.outputs.number }}' \
+            --arg head_sha '${{ steps.verified.outputs.head_sha }}' \
+            --argjson ci_run_id '${{ steps.verified.outputs.ci_run_id }}' \
+            --argjson tests "$TEST_COUNT" \
+            --argjson coverage "$COVERAGE" \
+            --arg wheel_sha256 "$WHEEL_SHA" \
+            '{pull_request:$pull_request,branch:"feat/neon-execution-ledger-adapter-v0",head_sha:$head_sha,ci_run_id:$ci_run_id,conclusion:"success",python:["3.12","3.13"],tests:$tests,coverage_percent:$coverage,wheel_sha256:$wheel_sha256,neon_main_promoted:false,verified_at:(now|todate)}' > /tmp/marker.json
+          CONTENT=$(base64 -w0 /tmp/marker.json)
+          PATH_NAME='bootstrap/neon-adapter-v0-verification.json'
+          EXISTING_SHA=$(gh api "repos/$REPO/contents/$PATH_NAME?ref=bootstrap/adapter-v0-autofix" --jq '.sha' 2>/dev/null || true)
+          if [ -n "$EXISTING_SHA" ]; then
+            gh api --method PUT "repos/$REPO/contents/$PATH_NAME" -f message='chore: record Neon adapter v0 verification' -f branch='bootstrap/adapter-v0-autofix' -f sha="$EXISTING_SHA" -f content="$CONTENT" >/dev/null
+          else
+            gh api --method PUT "repos/$REPO/contents/$PATH_NAME" -f message='chore: record Neon adapter v0 verification' -f branch='bootstrap/adapter-v0-autofix' -f content="$CONTENT" >/dev/null
+          fi
