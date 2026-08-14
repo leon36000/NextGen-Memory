@@ -1,0 +1,261 @@
++        'ended_at', NEW.ended_at,
++        'command_fingerprint', NEW.command_fingerprint,
++        'input_hash', NEW.input_hash,
++        'output_hash', NEW.output_hash,
++        'backend_ref', NEW.backend_ref,
++        'idempotency_key', NEW.idempotency_key,
++        'content_hash', NEW.content_hash,
++        'metadata', NEW.metadata
++      )::text,
++      'sha256'
++    ),
++    'hex'
++  );
+   NEW.event_hash := encode(
+     digest(coalesce(v_latest.event_hash, '') || ':' || NEW.content_hash, 'sha256'),
+     'hex'
+@@ -406,7 +513,32 @@ WITH ordered AS (
+     ) AS expected_previous_event_id,
+     lag(events.event_hash) OVER (
+       PARTITION BY events.space_id, events.run_id ORDER BY events.sequence
+-    ) AS expected_previous_event_hash
++    ) AS expected_previous_event_hash,
++    encode(
++      digest(
++        jsonb_build_object(
++          'event_id', events.id,
++          'space_id', events.space_id,
++          'run_id', events.run_id,
++          'sequence', events.sequence,
++          'previous_event_id', events.previous_event_id,
++          'kind', events.kind,
++          'outcome', events.outcome,
++          'action_key', events.action_key,
++          'started_at', events.started_at,
++          'ended_at', events.ended_at,
++          'command_fingerprint', events.command_fingerprint,
++          'input_hash', events.input_hash,
++          'output_hash', events.output_hash,
++          'backend_ref', events.backend_ref,
++          'idempotency_key', events.idempotency_key,
++          'content_hash', events.content_hash,
++          'metadata', events.metadata
++        )::text,
++        'sha256'
++      ),
++      'hex'
++    ) AS expected_storage_content_hash
+   FROM ngm.execution_events AS events
+ ), checked AS (
+   SELECT
+@@ -428,11 +560,15 @@ SELECT
+   expected_sequence,
+   previous_event_id,
+   expected_previous_event_id,
++  content_hash,
++  storage_content_hash,
++  expected_storage_content_hash,
+   event_hash,
+   expected_event_hash
+ FROM checked
+ WHERE sequence <> expected_sequence
+    OR previous_event_id IS DISTINCT FROM expected_previous_event_id
++   OR storage_content_hash IS DISTINCT FROM expected_storage_content_hash
+    OR event_hash IS DISTINCT FROM expected_event_hash;
+ 
+ INSERT INTO ngm.schema_meta (schema_key, schema_version, metadata)
+@@ -446,7 +582,9 @@ VALUES (
+       'ordered_events',
+       'artifact_provenance',
+       'tamper_evident_chain',
+-      'idempotent_retries'
++      'idempotent_retries',
++      'cross_layer_content_identity',
++      'storage_payload_drift_detection'
+     )
+   )
+ )
+diff --git a/src/nextgen_memory/execution_ledger.py b/src/nextgen_memory/execution_ledger.py
+index 55f7266..53365fb 100644
+--- a/src/nextgen_memory/execution_ledger.py
++++ b/src/nextgen_memory/execution_ledger.py
+@@ -18,6 +18,9 @@ _HASH_RE = re.compile(r"^[0-9a-f]{64}$")
+ _ACTION_RE = re.compile(r"^[a-z0-9][a-z0-9_.:-]{0,127}$")
+ _DIGEST_ALGORITHM_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
+ _DIGEST_RE = re.compile(r"^[0-9a-f]{16,128}$")
++_ACRONYM_BOUNDARY = re.compile(r"(?<=[A-Z])(?=[A-Z][a-z])")
++_CAMEL_CASE_BOUNDARY = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
++_NON_ALPHANUMERIC = re.compile(r"[^A-Za-z0-9]+")
+ _FORBIDDEN_METADATA_KEYS = frozenset(
+     {
+         "api_key",
+@@ -41,6 +44,9 @@ _FORBIDDEN_METADATA_KEYS = frozenset(
+         "token",
+     }
+ )
++_FORBIDDEN_METADATA_COMPACT = frozenset(
++    key.replace("_", "") for key in _FORBIDDEN_METADATA_KEYS
++)
+ _ALLOWED_ARTIFACT_ROLES = frozenset(
+     {
+         "material",
+@@ -133,6 +139,60 @@ class ExecutionEvent:
+     metadata: Mapping[str, Any]
+ 
+     def __post_init__(self) -> None:
++        if not isinstance(self.kind, ExecutionEventKind):
++            raise ExecutionLedgerValidationError("kind must be an ExecutionEventKind")
++        if not isinstance(self.outcome, ExecutionOutcome):
++            raise ExecutionLedgerValidationError("outcome must be an ExecutionOutcome")
++        if self.sequence <= 0:
++            raise ExecutionLedgerValidationError("sequence must be positive")
++        if self.sequence == 1:
++            if (
++                self.previous_event_id is not None
++                or self.kind is not ExecutionEventKind.RUN_STARTED
++            ):
++                raise ExecutionLedgerValidationError(
++                    "first execution event must be run_started without a predecessor"
++                )
++        elif self.previous_event_id is None or self.kind is ExecutionEventKind.RUN_STARTED:
++            raise ExecutionLedgerValidationError(
++                "non-initial events require a predecessor and cannot be run_started"
++            )
++        _require_aware("started_at", self.started_at)
++        if self.ended_at is not None:
++            _require_aware("ended_at", self.ended_at)
++            if self.ended_at < self.started_at:
++                raise ExecutionLedgerValidationError(
++                    "ended_at cannot precede started_at"
++                )
++        terminal_outcome = _terminal_outcome(self.kind)
++        if terminal_outcome is not None:
++            if self.outcome is not terminal_outcome:
++                raise ExecutionLedgerValidationError(
++                    "terminal execution outcome mismatch"
++                )
++            if self.ended_at is None:
++                raise ExecutionLedgerValidationError(
++                    "terminal execution events require ended_at"
++                )
++        if (
++            self.kind is ExecutionEventKind.RUN_STARTED
++            and self.outcome is not ExecutionOutcome.UNKNOWN
++        ):
++            raise ExecutionLedgerValidationError(
++                "run_started must use unknown outcome"
++            )
++        if _ACTION_RE.fullmatch(self.action_key) is None or not self.idempotency_key.strip():
++            raise ExecutionLedgerValidationError(
++                "action_key or event idempotency_key is invalid"
++            )
++        for name, value in (
++            ("command_fingerprint", self.command_fingerprint),
++            ("input_hash", self.input_hash),
++            ("output_hash", self.output_hash),
++            ("content_hash", self.content_hash),
++            ("event_hash", self.event_hash),
++        ):
++            _require_hash(name, value)
+         object.__setattr__(self, "metadata", _freeze_metadata(self.metadata))
+ 
+ 
+@@ -193,8 +253,26 @@ def _normalize_optional(value: str | None) -> str | None:
+     return value.strip() or None
+ 
+ 
++def _normalize_metadata_key(key: str) -> str:
++    with_acronyms = _ACRONYM_BOUNDARY.sub("_", key.strip())
++    with_boundaries = _CAMEL_CASE_BOUNDARY.sub("_", with_acronyms)
++    return _NON_ALPHANUMERIC.sub("_", with_boundaries).strip("_").lower()
++
++
++def _metadata_key_is_forbidden(key: str) -> bool:
++    normalized = _normalize_metadata_key(key)
++    if normalized in _FORBIDDEN_METADATA_KEYS:
++        return True
++    compact = normalized.replace("_", "")
++    if compact in _FORBIDDEN_METADATA_COMPACT:
++        return True
++    segments = {segment for segment in normalized.split("_") if segment}
++    return bool(segments & _FORBIDDEN_METADATA_KEYS)
++
++
+ def _freeze_metadata(metadata: Mapping[str, Any] | None) -> Mapping[str, Any]:
+-    frozen = _freeze_json(metadata or {})
++    source: Any = {} if metadata is None else metadata
++    frozen = _freeze_json(source, set(), "metadata")
+     if not isinstance(frozen, Mapping):
+         raise ExecutionLedgerValidationError("metadata must be a JSON object")
+     if len(_canonical_json(frozen).encode("utf-8")) > 8192:
+@@ -202,21 +280,57 @@ def _freeze_metadata(metadata: Mapping[str, Any] | None) -> Mapping[str, Any]:
+     return frozen
+ 
+ 
+-def _freeze_json(value: Any) -> Any:
++def _freeze_json(value: Any, active_ids: set[int], path: str) -> Any:
+     if isinstance(value, Mapping):
+-        frozen: dict[str, Any] = {}
+-        for key, nested in value.items():
+-            if not isinstance(key, str):
+-                raise ExecutionLedgerValidationError("metadata keys must be strings")
+-            normalized = key.lower()
+-            if normalized in _FORBIDDEN_METADATA_KEYS:
+-                raise ExecutionLedgerValidationError(
+-                    f"forbidden metadata key: {normalized}"
++        identity = id(value)
++        if identity in active_ids:
++            raise ExecutionLedgerValidationError(f"cyclic metadata at {path}")
++        active_ids.add(identity)
++        try:
++            frozen: dict[str, Any] = {}
++            normalized_keys: set[str] = set()
++            for key, nested in value.items():
++                if not isinstance(key, str):
++                    raise ExecutionLedgerValidationError(
++                        "metadata keys must be strings"
++                    )
++                stored_key = key.strip()
++                if not stored_key:
++                    raise ExecutionLedgerValidationError(
++                        f"metadata key must not be empty at {path}"
++                    )
++                normalized_key = _normalize_metadata_key(stored_key)
++                if not normalized_key:
++                    raise ExecutionLedgerValidationError(
++                        f"metadata key normalizes to empty: {path}.{stored_key}"
++                    )
++                if stored_key in frozen or normalized_key in normalized_keys:
++                    raise ExecutionLedgerValidationError(
++                        f"duplicate metadata key after normalization: {path}.{stored_key}"
++                    )
++                if _metadata_key_is_forbidden(stored_key):
++                    raise ExecutionLedgerValidationError(
++                        f"forbidden metadata key: {_normalize_metadata_key(stored_key)}"
++                    )
++                normalized_keys.add(normalized_key)
++                frozen[stored_key] = _freeze_json(
++                    nested,
++                    active_ids,
++                    f"{path}.{stored_key}",
+                 )
+-            frozen[key] = _freeze_json(nested)
+-        return MappingProxyType(frozen)
++            return MappingProxyType(frozen)
++        finally:
++            active_ids.remove(identity)
+     if isinstance(value, (list, tuple)):
+-        return tuple(_freeze_json(item) for item in value)
++        identity = id(value)
++        if identity in active_ids:
++            raise ExecutionLedgerValidationError(f"cyclic metadata at {path}")
++        active_ids.add(identity)
++        try:
++            return tuple(
++                _freeze_json(item, active_ids, f"{path}[{index}]")
++                for index, item in enumerate(value)
++            )
++        finally:
++            active_ids.remove(identity)
+     if value is None or isinstance(value, (str, bool, int)):
+         return value
