@@ -7,17 +7,6 @@ from typing import Any
 from uuid import UUID
 
 import pytest
-
-from nextgen_memory.provenance_credit import (
-    ConservativeProvenancePropagator,
-    CreditSourceKind,
-    DirectCreditEvidence,
-    PropagationConfig,
-    ProvenanceEdge,
-    ProvenanceNode,
-    TypedProvenanceGraph,
-    project_relation_policies_v0,
-)
 from nextgen_memory.provenance_credit_persistence import (
     INHERITED_ACCOUNTING_INSERT_SQL,
     INHERITED_ACCOUNTING_SELECT_SQL,
@@ -38,6 +27,17 @@ from nextgen_memory.provenance_credit_persistence import (
     build_provenance_credit_batch,
     fingerprint_provenance_graph,
     fingerprint_provenance_policy,
+)
+
+from nextgen_memory.provenance_credit import (
+    ConservativeProvenancePropagator,
+    CreditSourceKind,
+    DirectCreditEvidence,
+    PropagationConfig,
+    ProvenanceEdge,
+    ProvenanceNode,
+    TypedProvenanceGraph,
+    project_relation_policies_v0,
 )
 
 SPACE = UUID("11111111-1111-1111-1111-111111111111")
