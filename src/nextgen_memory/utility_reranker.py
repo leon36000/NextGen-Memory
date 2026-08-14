@@ -34,12 +34,11 @@ class UtilityEvidence:
                 raise ValueError("avg_reward must be finite when supplied")
             if self.feedback_count == 0:
                 raise ValueError("avg_reward requires at least one feedback observation")
-        if self.last_feedback_at is not None:
-            if (
-                self.last_feedback_at.tzinfo is None
-                or self.last_feedback_at.utcoffset() is None
-            ):
-                raise ValueError("last_feedback_at must be timezone-aware")
+        if self.last_feedback_at is not None and (
+            self.last_feedback_at.tzinfo is None
+            or self.last_feedback_at.utcoffset() is None
+        ):
+            raise ValueError("last_feedback_at must be timezone-aware")
 
     @classmethod
     def neutral(cls, memory_id: UUID) -> UtilityEvidence:
@@ -164,7 +163,11 @@ class UtilityAwareReranker:
         if limit is not None:
             _validate_positive_integer("limit", limit)
 
-        positive_scores = [candidate.hit.score for candidate in candidates if candidate.hit.score > 0]
+        positive_scores = [
+            candidate.hit.score
+            for candidate in candidates
+            if candidate.hit.score > 0
+        ]
         max_positive_score = max(positive_scores, default=0.0)
         scored: list[
             tuple[UtilityRerankCandidate, UtilityScoreBreakdown, float]
