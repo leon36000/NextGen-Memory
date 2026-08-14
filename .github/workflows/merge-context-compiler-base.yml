@@ -17,6 +17,10 @@ jobs:
           fetch-depth: 0
       - name: Verify Context Compiler head
         run: test "$(git rev-parse HEAD)" = "19314595d5e15e1ca55e305d53fd8e432e1afb8b"
+      - name: Configure merge identity
+        run: |
+          git config user.name "NextGen Memory Automation"
+          git config user.email "actions@users.noreply.github.com"
       - name: Merge current reranker base
         run: |
           git fetch origin feat/utility-aware-reranker-v0 bootstrap/merge-context-compiler-base
@@ -52,7 +56,5 @@ jobs:
       - name: Commit and push merge
         run: |
           git add README.md src/nextgen_memory/__init__.py
-          git config user.name "NextGen Memory Automation"
-          git config user.email "actions@users.noreply.github.com"
           git commit -m "merge: align Context Compiler with final reranker base"
           git push origin HEAD:feat/context-compiler-v0
