@@ -1,5 +1,18 @@
 """Public API for the NextGen Memory kernel."""
 
+from .context_compiler import (
+    CompiledEvidence,
+    ContextBudgetError,
+    ContextCompiler,
+    ContextCompileRequest,
+    ContextCompilerValidationError,
+    ContextEvidence,
+    ContextPacket,
+    EvidenceFidelity,
+    OmissionReason,
+    OmittedEvidence,
+    SelectionPhase,
+)
 from .domain import (
     EvidenceNeed,
     ExactnessNeed,
@@ -49,8 +62,16 @@ from .utility_reranker import (
 __all__ = [
     "NODE_UTILITY_SELECT_SQL",
     "RETRIEVAL_EVENT_INSERT_SQL",
+    "CompiledEvidence",
+    "ContextBudgetError",
+    "ContextCompileRequest",
+    "ContextCompiler",
+    "ContextCompilerValidationError",
+    "ContextEvidence",
+    "ContextPacket",
     "DeterministicMemoryRouter",
     "EligibilityResult",
+    "EvidenceFidelity",
     "EvidenceNeed",
     "ExactnessNeed",
     "ExpertAllocation",
@@ -60,6 +81,8 @@ __all__ = [
     "MongoResearchIndexConfig",
     "MongoResearchRetriever",
     "NodeUtilityReader",
+    "OmissionReason",
+    "OmittedEvidence",
     "PlanPhase",
     "RerankedMemory",
     "ResearchRetrievalHit",
@@ -72,6 +95,7 @@ __all__ = [
     "RoutingRequest",
     "RoutingScope",
     "RoutingTelemetryRecord",
+    "SelectionPhase",
     "Sensitivity",
     "TaskKind",
     "TemporalIntent",
