@@ -1,0 +1,159 @@
+name: Add inherited credit accounting link v3
+
+on:
+  push:
+    branches: [bootstrap/inherited-credit-accounting-link-v3]
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/inherited-credit-ledger-v0
+          fetch-depth: 0
+      - name: Verify target head
+        run: test "$(git rev-parse HEAD)" = "27857311b373c69b25c1e8dddfe1f7f4ac1b3d3a"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Patch accounting identity inside exact sections
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path("src/nextgen_memory/provenance_credit_persistence.py")
+          text = path.read_text(encoding="utf-8")
+
+          def replace_region(start_marker, end_marker, old, new, label):
+              global text
+              start = text.index(start_marker)
+              end = text.index(end_marker, start)
+              region = text[start:end]
+              count = region.count(old)
+              if count != 1:
+                  raise SystemExit(f"{label}: expected one match, found {count}")
+              text = text[:start] + region.replace(old, new, 1) + text[end:]
+
+          def replace_once(old, new, label):
+              global text
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f"{label}: expected one match, found {count}")
+              text = text.replace(old, new, 1)
+
+          replace_region(
+              "INHERITED_EVALUATION_INSERT_SQL =",
+              "INHERITED_EVALUATION_SELECT_SQL =",
+              "    status,\n    result_hash,\n    content_hash\n",
+              "    status,\n    result_hash,\n    accounting_id,\n    content_hash\n",
+              "evaluation insert columns",
+          )
+          replace_region(
+              "INHERITED_EVALUATION_INSERT_SQL =",
+              "INHERITED_EVALUATION_SELECT_SQL =",
+              "    %(status)s,\n    %(result_hash)s,\n    %(content_hash)s\n",
+              "    %(status)s,\n    %(result_hash)s,\n    %(accounting_id)s,\n    %(content_hash)s\n",
+              "evaluation insert values",
+          )
+          replace_region(
+              "INHERITED_EVALUATION_SELECT_SQL =",
+              "INHERITED_CONTRIBUTION_INSERT_SQL =",
+              "    status,\n    result_hash,\n    content_hash\n",
+              "    status,\n    result_hash,\n    accounting_id,\n    content_hash\n",
+              "evaluation select columns",
+          )
+          replace_region(
+              "class ProvenanceCreditEvaluationRecord:",
+              "class InheritedCreditContributionRecord:",
+              "    status: str\n    result_hash: str\n    content_hash: str\n",
+              "    status: str\n    result_hash: str\n    accounting_id: UUID\n    content_hash: str\n",
+              "evaluation dataclass field",
+          )
+          replace_region(
+              "class ProvenanceCreditEvaluationRecord:",
+              "class InheritedCreditContributionRecord:",
+              "            \"root_node_id\",\n        ):\n",
+              "            \"root_node_id\",\n            \"accounting_id\",\n        ):\n",
+              "evaluation UUID validation",
+          )
+          replace_region(
+              "class ProvenanceCreditEvaluationRecord:",
+              "class InheritedCreditContributionRecord:",
+              "            \"result_hash\": self.result_hash,\n            \"content_hash\": self.content_hash,\n",
+              "            \"result_hash\": self.result_hash,\n            \"accounting_id\": self.accounting_id,\n            \"content_hash\": self.content_hash,\n",
+              "evaluation DB params",
+          )
+          replace_once(
+              "            \"status\": \"propagated\" if contribution_records else \"abstained\",\n        }\n",
+              "            \"status\": \"propagated\" if contribution_records else \"abstained\",\n            \"accounting_id\": str(accounting_record.id),\n        }\n",
+              "evaluation hash payload",
+          )
+          replace_once(
+              "                status=evaluation_base[\"status\"],\n                result_hash=result_hash,\n                content_hash=_hash_payload(evaluation_payload),\n",
+              "                status=evaluation_base[\"status\"],\n                result_hash=result_hash,\n                accounting_id=accounting_record.id,\n                content_hash=_hash_payload(evaluation_payload),\n",
+              "evaluation record construction",
+          )
+          replace_region(
+              "def _normalize_evaluation_row",
+              "def _normalize_contribution_row",
+              "        \"result_hash\": str(row[\"result_hash\"]),\n        \"content_hash\": str(row[\"content_hash\"]),\n",
+              "        \"result_hash\": str(row[\"result_hash\"]),\n        \"accounting_id\": _parse_uuid(\"accounting_id\", row[\"accounting_id\"]),\n        \"content_hash\": str(row[\"content_hash\"]),\n",
+              "evaluation readback normalization",
+          )
+          path.write_text(text, encoding="utf-8")
+          PY
+      - name: Make SQL contract assertions whitespace-insensitive
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path("tests/test_inherited_credit_migration.py")
+          text = path.read_text(encoding="utf-8")
+          old = '''def test_migration_creates_four_separate_append_only_evidence_tables() -> None:
+              sql = migration_sql()
+
+              for table in (
+          '''
+          new = '''def test_migration_creates_four_separate_append_only_evidence_tables() -> None:
+              sql = migration_sql()
+              compact_sql = " ".join(sql.split())
+
+              for table in (
+          '''
+          if text.count(old) != 1:
+              raise SystemExit("unable to locate migration trigger test header")
+          text = text.replace(old, new, 1)
+          old_assert = '''        assert f"DROP TRIGGER IF EXISTS {trigger_name} ON {table}" in sql
+          '''
+          new_assert = '''        assert f"DROP TRIGGER IF EXISTS {trigger_name} ON {table}" in compact_sql
+          '''
+          if text.count(old_assert) != 1:
+              raise SystemExit("unable to locate migration trigger assertion")
+          path.write_text(text.replace(old_assert, new_assert, 1), encoding="utf-8")
+          PY
+      - name: Install and verify
+        run: |
+          python -m pip install -e '.[dev]'
+          ruff format src/nextgen_memory/provenance_credit_persistence.py tests/test_inherited_credit_migration.py tests/test_provenance_credit_accounting_link.py
+          ruff check .
+          python -m pytest tests/test_provenance_credit_accounting_link.py tests/test_provenance_credit_persistence.py tests/test_inherited_credit_migration.py -q
+          python -m pytest -q
+          python -m compileall -q src
+          git diff --check
+      - name: Verify exact patch scope
+        run: |
+          printf '%s\n' src/nextgen_memory/provenance_credit_persistence.py tests/test_inherited_credit_migration.py > /tmp/expected
+          git diff --name-only | sort > /tmp/actual
+          diff -u /tmp/expected /tmp/actual
+      - name: Commit and push fast-forward
+        run: |
+          git config user.name "NextGen Memory Automation"
+          git config user.email "actions@users.noreply.github.com"
+          git add src/nextgen_memory/provenance_credit_persistence.py tests/test_inherited_credit_migration.py
+          git commit -m "feat: bind inherited evaluations to exact accounting rows"
+          git push origin HEAD:feat/inherited-credit-ledger-v0
