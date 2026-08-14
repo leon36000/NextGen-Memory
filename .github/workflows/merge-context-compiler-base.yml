@@ -1,0 +1,58 @@
+name: Merge final reranker base into Context Compiler
+
+on:
+  push:
+    branches: [bootstrap/merge-context-compiler-base]
+
+permissions:
+  contents: write
+
+jobs:
+  merge:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/context-compiler-v0
+          fetch-depth: 0
+      - name: Verify Context Compiler head
+        run: test "$(git rev-parse HEAD)" = "19314595d5e15e1ca55e305d53fd8e432e1afb8b"
+      - name: Merge current reranker base
+        run: |
+          git fetch origin feat/utility-aware-reranker-v0 bootstrap/merge-context-compiler-base
+          set +e
+          git merge --no-commit --no-ff origin/feat/utility-aware-reranker-v0
+          merge_status=$?
+          set -e
+          if [ "$merge_status" -ne 0 ]; then
+            git diff --name-only --diff-filter=U | sort > /tmp/conflicts
+            printf '%s\n' README.md src/nextgen_memory/__init__.py > /tmp/expected-conflicts
+            diff -u /tmp/expected-conflicts /tmp/conflicts
+          fi
+      - name: Apply reviewed conflict resolutions
+        run: |
+          git show origin/bootstrap/merge-context-compiler-base:bootstrap/context_compiler_merged_init.py > src/nextgen_memory/__init__.py
+          git show origin/bootstrap/merge-context-compiler-base:bootstrap/context_compiler_merged_README.md > README.md
+          git add README.md src/nextgen_memory/__init__.py
+          test -z "$(git diff --name-only --diff-filter=U)"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install project tools
+        run: python -m pip install -e '.[dev]'
+      - name: Normalize merged public imports
+        run: ruff check src/nextgen_memory/__init__.py --select I001 --fix
+      - name: Verify merged tree
+        run: |
+          ruff check .
+          python -m pytest -q
+          python -m compileall -q src
+          git diff --check
+      - name: Commit and push merge
+        run: |
+          git add README.md src/nextgen_memory/__init__.py
+          git config user.name "NextGen Memory Automation"
+          git config user.email "actions@users.noreply.github.com"
+          git commit -m "merge: align Context Compiler with final reranker base"
+          git push origin HEAD:feat/context-compiler-v0
