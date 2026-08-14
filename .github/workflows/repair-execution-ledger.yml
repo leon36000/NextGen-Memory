@@ -1,0 +1,50 @@
+name: Repair execution-ledger source
+
+on:
+  push:
+    branches: [bootstrap/repair-execution-ledger-fa7]
+
+permissions:
+  contents: write
+
+jobs:
+  repair:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/execution-ledger-v0
+          fetch-depth: 0
+      - name: Verify target head
+        run: test "$(git rev-parse HEAD)" = "fa7cdfa5a140529fb4bff9b7bea0020e1d70e805"
+      - name: Restore complete base source
+        run: git show 0c7b950c6a30634fd33dc8bfc1289c72958d79b5:src/nextgen_memory/execution_ledger.py > src/nextgen_memory/execution_ledger.py
+      - name: Fetch deterministic repair script
+        run: |
+          git fetch origin bootstrap/repair-execution-ledger-fa7
+          git show origin/bootstrap/repair-execution-ledger-fa7:bootstrap/repair_execution_ledger.py > /tmp/repair_execution_ledger.py
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Apply repair
+        run: python /tmp/repair_execution_ledger.py
+      - name: Install project and development tools
+        run: python -m pip install -e '.[dev]'
+      - name: Lint
+        run: ruff check .
+      - name: Test
+        run: python -m pytest -q
+      - name: Compile
+        run: python -m compileall -q src
+      - name: Verify scope
+        run: |
+          git diff --check
+          git add src/nextgen_memory/execution_ledger.py
+          test "$(git diff --cached --name-only)" = "src/nextgen_memory/execution_ledger.py"
+      - name: Commit and push fast-forward repair
+        run: |
+          git config user.name "NextGen Memory Automation"
+          git config user.email "actions@users.noreply.github.com"
+          git commit -m "fix: restore complete execution ledger implementation"
+          git push origin HEAD:feat/execution-ledger-v0
