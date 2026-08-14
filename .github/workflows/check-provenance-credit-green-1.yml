@@ -1,0 +1,35 @@
+name: Diagnose Provenance Credit GREEN 1
+
+on:
+  push:
+    branches: [bootstrap/provenance-credit-green-check-1]
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/provenance-credit-v0
+          fetch-depth: 0
+      - name: Verify target head
+        run: test "$(git rev-parse HEAD)" = "a6036465368e6e3d87db93c420d738760d60af0b"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install development tools
+        run: python -m pip install -e '.[dev]'
+      - name: Apply mechanical Ruff fixes in the disposable workspace
+        run: |
+          ruff check src/nextgen_memory/provenance_credit.py tests/test_provenance_credit.py --fix
+          ruff format src/nextgen_memory/provenance_credit.py tests/test_provenance_credit.py
+      - name: Lint complete tree
+        run: ruff check .
+      - name: Run focused provenance tests
+        run: python -m pytest tests/test_provenance_credit.py -q
+      - name: Run complete suite
+        run: python -m pytest -q
