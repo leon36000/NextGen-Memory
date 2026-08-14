@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nextgen-memory"
+version = "0.1.0"
+description = "A sparse Mixture-of-Memory-Experts kernel for long-horizon LLM agents"
+readme = "README.md"
+requires-python = ">=3.12"
+authors = [{ name = "NextGen Memory contributors" }]
+dependencies = []
+classifiers = [
+  "Development Status :: 2 - Pre-Alpha",
+  "Intended Audience :: Developers",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.3,<10",
+  "pytest-cov>=6,<8",
+  "ruff>=0.12,<1",
+]
+postgres = ["psycopg[binary]>=3.2,<4"]
+mongodb = ["pymongo>=4.10,<5"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+addopts = "-ra"
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
