@@ -1,0 +1,45 @@
+name: Format inherited credit property tests
+
+on:
+  push:
+    branches: [bootstrap/inherited-credit-properties-format]
+
+permissions:
+  contents: write
+
+jobs:
+  format:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/inherited-credit-ledger-v0
+          fetch-depth: 0
+      - name: Verify target head
+        run: test "$(git rev-parse HEAD)" = "2d729c8ae10551e1dc02ee6b6585ac9369a52a62"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install development tools
+        run: python -m pip install -e '.[dev]'
+      - name: Format the generated-property test
+        run: |
+          ruff format tests/test_provenance_credit_persistence_properties.py
+          ruff check tests/test_provenance_credit_persistence_properties.py --fix
+      - name: Verify complete tree
+        run: |
+          ruff check .
+          python -m pytest tests/test_provenance_credit_persistence_properties.py -q
+          python -m pytest -q
+          python -m compileall -q src
+          git diff --check
+      - name: Verify exact scope
+        run: test "$(git diff --name-only)" = "tests/test_provenance_credit_persistence_properties.py"
+      - name: Commit and push fast-forward
+        run: |
+          git config user.name "NextGen Memory Automation"
+          git config user.email "actions@users.noreply.github.com"
+          git add tests/test_provenance_credit_persistence_properties.py
+          git commit -m "style: format inherited credit property tests"
+          git push origin HEAD:feat/inherited-credit-ledger-v0
