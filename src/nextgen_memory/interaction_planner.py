@@ -397,7 +397,7 @@ def _prefixes(order: Sequence[UUID]) -> tuple[frozenset[UUID], ...]:
 def _request_key(coalition: frozenset[UUID]) -> str:
     members = ":".join(sorted(str(memory_id) for memory_id in coalition))
     return hashlib.sha256(
-        f"interaction-credit-v0:{members}".encode("utf-8")
+        f"interaction-credit-v0:{members}".encode()
     ).hexdigest()
 
 
