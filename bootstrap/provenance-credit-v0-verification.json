@@ -1,0 +1,30 @@
+{
+  "pull_request": 12,
+  "branch": "feat/provenance-credit-v0",
+  "base_sha": "64662d25f98d457d031cd33447107cedf8aa6689",
+  "head_sha": "37ed27903fce26c7d9d7aa536b951da9a7a68e54",
+  "ci_run_id": 31844959632,
+  "conclusion": "success",
+  "python": [
+    "3.12.13",
+    "3.13.15"
+  ],
+  "tests": 201,
+  "coverage_percent": 90.77669902912622,
+  "property_cases": 5000,
+  "changed_files": 11,
+  "simulation": {
+    "naive_branch_inflation_ratio": 2.0,
+    "conservative_branch_inflation_ratio": 1.0,
+    "naive_blocked_relation_false_credit": 0.5,
+    "conservative_blocked_relation_false_credit": 0.0,
+    "naive_negative_false_blame": 0.5,
+    "conservative_negative_false_blame": 0.0,
+    "conservative_max_conservation_residual": 0.0,
+    "sha256": "5f20421739cfc6d7b30f9d90d348d2b43e76d25bf6da083d65fa78bb6cb22082"
+  },
+  "wheel_sha256": "a24d2734c6f27ff72ce079504d5f70b1313c14d4c6c38dbf728ed0a22302ab05",
+  "database_changed": false,
+  "merged": false,
+  "verified_at": "2026-08-14T22:05:32Z"
+}
