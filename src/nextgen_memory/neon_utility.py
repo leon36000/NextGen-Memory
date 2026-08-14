@@ -49,18 +49,6 @@ class UtilityCursor(Protocol):
         ...
 
 
-class UtilitySnapshotProvider(Protocol):
-    """Provider contract used by utility-aware retrieval composition."""
-
-    def get_many(
-        self,
-        space_id: UUID,
-        memory_ids: Sequence[UUID],
-    ) -> Mapping[UUID, UtilityEvidence]:
-        """Return aggregate evidence for zero or more canonical memories."""
-        ...
-
-
 class NodeUtilityReader:
     """Map scoped `ngm.node_utility` rows to immutable utility evidence."""
 
