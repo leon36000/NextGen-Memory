@@ -1,0 +1,286 @@
+name: Publish Learning Evidence Reader documentation
+
+on:
+  push:
+    branches: [bootstrap/learning-evidence-docs-publish]
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      FEATURE_BRANCH: feat/learning-evidence-reader-v0
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Wait for the public API GREEN commit
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 90); do
+            CONTENT=$(gh api "repos/${{ github.repository }}/contents/src/nextgen_memory/__init__.py?ref=$FEATURE_BRANCH" --jq '.content' | tr -d '\n' | base64 -d)
+            if printf '%s' "$CONTENT" | grep -q 'from .learning_evidence import (' \
+              && printf '%s' "$CONTENT" | grep -q 'NeonLearningEvidenceReader' \
+              && printf '%s' "$CONTENT" | grep -q 'LEARNING_EVIDENCE_SELECT_SQL'; then
+              exit 0
+            fi
+            sleep 10
+          done
+          echo 'Learning Evidence public exports did not become available' >&2
+          exit 1
+
+      - name: Check out the exact current feature head
+        run: |
+          set -euo pipefail
+          git fetch origin "$FEATURE_BRANCH"
+          git checkout -B learning-evidence-work "origin/$FEATURE_BRANCH"
+          TARGET_SHA=$(git rev-parse HEAD)
+          CURRENT=$(gh api "repos/${{ github.repository }}/git/ref/heads/$FEATURE_BRANCH" --jq '.object.sha')
+          test "$TARGET_SHA" = "$CURRENT"
+          echo "TARGET_SHA=$TARGET_SHA" >> "$GITHUB_ENV"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Verify feature GREEN before documentation
+        run: |
+          set -euo pipefail
+          python -m pip install -e '.[dev]'
+          ruff check .
+          python -m pytest -q
+          python -m compileall -q src
+
+      - name: Publish the operating contract
+        run: |
+          cat > docs/learning-evidence-reader-v0.md <<'EOF'
+          # Learning Evidence Reader v0
+
+          ## Purpose
+
+          Learning Evidence Reader v0 reads direct task feedback and inherited provenance evidence from Neon while keeping both evidence classes separate in Python.
+
+          It is a neutral read boundary. It does not calculate a combined score, change retrieval order, write feedback, or alter `NodeUtilityReader`.
+
+          ## Read path
+
+          ```text
+          ngm.memory_feedback
+            → ngm.node_utility
+            → DirectUtilityEvidence
+
+          ngm.inherited_credit_contributions
+            → ngm.node_inherited_credit
+            → InheritedUtilityEvidence
+
+          both analytical views
+            → ngm.node_learning_evidence
+            → NeonLearningEvidenceReader
+            → NodeLearningEvidence
+          ```
+
+          The reader is additive. Existing direct-only consumers continue to use `NodeUtilityReader` unchanged.
+
+          ## Contracts
+
+          ### `DirectUtilityEvidence`
+
+          Direct evidence contains:
+
+          - feedback count;
+          - optional average reward;
+          - positive and negative verdict counts;
+          - optional last-feedback timestamp.
+
+          A memory with no direct feedback is explicit:
+
+          ```text
+          feedback_count = 0
+          average_reward = null
+          positive_count = 0
+          negative_count = 0
+          last_feedback_at = null
+          ```
+
+          The reader never fabricates a zero reward for absent feedback.
+
+          ### `InheritedUtilityEvidence`
+
+          Inherited evidence contains:
+
+          - contribution count;
+          - optional signed value sum;
+          - optional absolute value sum;
+          - optional conservative standard-error sum;
+          - optional minimum structural confidence;
+          - optional last inherited-credit timestamp.
+
+          A memory with no inherited evidence has zero count and null aggregates. When contributions exist, every aggregate and the timestamp are required.
+
+          The absolute sum must be non-negative and at least the absolute signed sum. Structural confidence remains bounded to `[0, 1]`.
+
+          ### `NodeLearningEvidence`
+
+          One immutable snapshot contains:
+
+          ```python
+          NodeLearningEvidence(
+              space_id=...,
+              memory_id=...,
+              direct=DirectUtilityEvidence(...),
+              inherited=InheritedUtilityEvidence(...),
+          )
+          ```
+
+          It exposes only:
+
+          - `has_direct_evidence`;
+          - `has_inherited_evidence`.
+
+          There is no `score`, `utility`, or `combined_utility` property.
+
+          ## Scoped SQL
+
+          `NeonLearningEvidenceReader` executes one static parameterized query against `ngm.node_learning_evidence`:
+
+          ```sql
+          SELECT
+            space_id,
+            node_id,
+            direct_feedback_count,
+            direct_avg_reward,
+            direct_positive_count,
+            direct_negative_count,
+            last_direct_feedback_at,
+            inherited_contribution_count,
+            inherited_value_sum,
+            inherited_absolute_value_sum,
+            inherited_standard_error_sum,
+            minimum_structural_confidence,
+            last_inherited_credit_at
+          FROM ngm.node_learning_evidence
+          WHERE space_id = %(space_id)s
+            AND node_id = ANY(%(memory_ids)s::uuid[])
+          ORDER BY node_id
+          ```
+
+          Request UUIDs are deduplicated and sorted. Empty input performs no SQL.
+
+          ## Fail-closed behavior
+
+          Every requested memory UUID must be returned exactly once.
+
+          The reader rejects:
+
+          - missing rows;
+          - unexpected rows;
+          - duplicate rows;
+          - cross-space rows;
+          - non-mapping rows;
+          - missing columns;
+          - malformed counts, numbers, UUIDs, or timestamps;
+          - internally inconsistent neutral/non-neutral states.
+
+          A missing database row is not interpreted as “no evidence.” A canonical memory with no evidence must still exist in the view with explicit zero/null fields.
+
+          Backend exceptions propagate. The reader never falls back to direct-only evidence after a failed combined read.
+
+          ## Determinism
+
+          For the same requested UUID set and stored rows:
+
+          - SQL parameters are sorted UUIDs;
+          - result iteration order is stable;
+          - request-order and database-row-order permutations produce equal mappings;
+          - neutral evidence remains explicit;
+          - no scoring policy is hidden in the reader.
+
+          ## Privacy boundary
+
+          The query and result contain only:
+
+          - space and memory UUIDs;
+          - counts;
+          - aggregate numeric evidence;
+          - timestamps;
+          - structural confidence.
+
+          They contain no query text, prompt, answer, memory content, command, stdout, stderr, patch, environment, token, secret, path fingerprint, relation path, or feedback note.
+
+          ## Isolated Neon validation
+
+          The exact SQL was validated only on the temporary branch:
+
+          ```text
+          br-soft-cherry-a6pv1ag2
+          ```
+
+          Verified cases:
+
+          1. inherited target memory:
+             - direct feedback count `0`;
+             - inherited contribution count `1`;
+             - inherited value and absolute value `0.5`;
+             - conservative standard-error sum `0.05`;
+             - minimum structural confidence `0.85`.
+          2. neutral canonical memory:
+             - direct feedback count `0`;
+             - inherited contribution count `0`;
+             - all reward, inherited aggregate, confidence, and timestamp fields null.
+          3. missing UUID:
+             - zero rows returned;
+             - the Python reader treats this as a conflict.
+
+          No query targeted Neon main.
+
+          ## Future scoring gate
+
+          A later reranker may consume inherited evidence only through a separate reviewed policy that:
+
+          - declares an explicit bounded coefficient;
+          - preserves direct and inherited score components separately;
+          - shrinks inherited evidence by count, uncertainty, and structural confidence;
+          - cannot authorize an otherwise ineligible memory;
+          - cannot silently replace direct utility;
+          - retains a complete deterministic score breakdown.
+
+          That scoring policy is outside v0.
+
+          ## Non-goals
+
+          Learning Evidence Reader v0 does not:
+
+          - modify `NodeUtilityReader`;
+          - change the utility reranker;
+          - compute a direct-plus-inherited score;
+          - write direct or inherited feedback;
+          - apply migration `0006`;
+          - read path-level provenance rows;
+          - learn coefficients;
+          - hide missing rows as neutral evidence.
+          EOF
+          sed -i 's/^          //' docs/learning-evidence-reader-v0.md
+
+      - name: Verify documentation commit
+        run: |
+          set -euo pipefail
+          ruff check .
+          python -m pytest -q
+          python -m compileall -q src
+          git diff --check
+          test "$(git diff --name-only)" = 'docs/learning-evidence-reader-v0.md'
+
+      - name: Commit and push fast-forward
+        run: |
+          set -euo pipefail
+          git config user.name 'NextGen Memory Automation'
+          git config user.email 'actions@users.noreply.github.com'
+          git add docs/learning-evidence-reader-v0.md
+          git commit -m 'docs: publish learning evidence reader v0'
+          test "$(git rev-parse HEAD^)" = "$TARGET_SHA"
+          git push origin HEAD:$FEATURE_BRANCH
