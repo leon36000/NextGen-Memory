@@ -49,9 +49,9 @@ jobs:
               )
           path.write_text(text, encoding="utf-8")
           PY
-      - name: Apply safe Ruff fixes and formatting
+      - name: Apply Ruff fixes and formatting
         run: |
-          ruff check tests/test_research_read_pipeline.py tests/test_research_materialization.py --fix
+          ruff check tests/test_research_read_pipeline.py tests/test_research_materialization.py --fix --unsafe-fixes
           ruff format tests/test_research_read_pipeline.py tests/test_research_materialization.py
       - name: Verify lint and scope
         run: |
