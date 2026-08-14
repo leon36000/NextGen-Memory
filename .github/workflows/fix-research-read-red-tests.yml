@@ -1,0 +1,68 @@
+name: Normalize Research Read Pipeline RED tests
+
+on:
+  push:
+    branches: [bootstrap/fix-research-read-red-tests]
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/research-read-pipeline-v0
+          fetch-depth: 0
+      - name: Verify target head
+        run: test "$(git rev-parse HEAD)" = "81dfcba5388f7a6f6770615110d42db80518daf9"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install project tools
+        run: python -m pip install -e '.[dev]'
+      - name: Remove the built-in shadow in the fake collection
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path("tests/test_research_materialization.py")
+          text = path.read_text(encoding="utf-8")
+          old = '''    def find(
+              self,
+              filter: Mapping[str, Any],
+              projection: Mapping[str, int],
+          ) -> Iterable[Mapping[str, Any]]:
+              self.calls.append((filter, projection))
+          '''
+          new = '''    def find(
+              self,
+              filter_doc: Mapping[str, Any],
+              projection: Mapping[str, int],
+          ) -> Iterable[Mapping[str, Any]]:
+              self.calls.append((filter_doc, projection))
+          '''
+          if text.count(old) != 1:
+              raise SystemExit("expected one FakeCollection.find block")
+          path.write_text(text.replace(old, new), encoding="utf-8")
+          PY
+      - name: Apply safe Ruff fixes and formatting
+        run: |
+          ruff check tests/test_research_read_pipeline.py tests/test_research_materialization.py --fix
+          ruff format tests/test_research_read_pipeline.py tests/test_research_materialization.py
+      - name: Verify lint and scope
+        run: |
+          ruff check tests/test_research_read_pipeline.py tests/test_research_materialization.py
+          git diff --check
+          printf '%s\n' tests/test_research_materialization.py tests/test_research_read_pipeline.py > /tmp/expected
+          git diff --name-only | sort > /tmp/actual
+          diff -u /tmp/expected /tmp/actual
+      - name: Commit and push fast-forward
+        run: |
+          git config user.name "NextGen Memory Automation"
+          git config user.email "actions@users.noreply.github.com"
+          git add tests/test_research_read_pipeline.py tests/test_research_materialization.py
+          git commit -m "style: normalize research read pipeline RED tests"
+          git push origin HEAD:feat/research-read-pipeline-v0
