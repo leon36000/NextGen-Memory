@@ -1,13 +1,15 @@
-"""Dependency-aware coalition contracts for interaction credit."""
+"""Dependency-aware coalition contracts and interaction-credit estimation."""
 
 from __future__ import annotations
 
+import hashlib
 import re
 from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 from itertools import combinations
-from math import isfinite
+from math import isfinite, sqrt
+from statistics import fmean, stdev
 from types import MappingProxyType
 from uuid import UUID
 
@@ -316,8 +318,334 @@ class InteractionTrial:
         object.__setattr__(self, "outcomes", MappingProxyType(dict(normalized)))
 
 
+@dataclass(frozen=True, slots=True)
+class MemoryInteractionCredit:
+    """Stable per-memory value allocated across valid predecessor contexts."""
+
+    memory_id: UUID
+    score_value: float
+    score_standard_error: float
+    token_value: float
+    latency_value_ms: float
+    trial_count: int
+    order_count: int
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.memory_id, UUID):
+            raise ValueError("memory_id must be a UUID")
+        for name in (
+            "score_value",
+            "score_standard_error",
+            "token_value",
+            "latency_value_ms",
+        ):
+            if not isfinite(getattr(self, name)):
+                raise ValueError(f"{name} must be finite")
+        _validate_positive_integer("trial_count", self.trial_count)
+        _validate_positive_integer("order_count", self.order_count)
+
+
+@dataclass(frozen=True, slots=True)
+class MemoryInteractionAbstention:
+    """Explicit reason a player did not receive a stable value estimate."""
+
+    memory_id: UUID
+    reason: InteractionCreditAbstentionReason
+    usable_trial_count: int
+    score_standard_error: float | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.memory_id, UUID):
+            raise ValueError("memory_id must be a UUID")
+        _validate_nonnegative_integer("usable_trial_count", self.usable_trial_count)
+        if self.score_standard_error is not None and not isfinite(
+            self.score_standard_error
+        ):
+            raise ValueError("score_standard_error must be finite when supplied")
+
+
+@dataclass(frozen=True, slots=True)
+class InteractionCreditResult:
+    """Complete allocation, uncertainty, and closure evidence for one game."""
+
+    mode: InteractionEstimationMode
+    players: tuple[UUID, ...]
+    orders: tuple[tuple[UUID, ...], ...]
+    credits: tuple[MemoryInteractionCredit, ...]
+    abstentions: tuple[MemoryInteractionAbstention, ...]
+    usable_trial_count: int
+    full_lift: float
+    allocated_value: float
+    closure_residual: float
+    context_set_hash: str
+    continuation_set_hash: str
+
+    def __post_init__(self) -> None:
+        _validate_nonnegative_integer("usable_trial_count", self.usable_trial_count)
+        for name in ("full_lift", "allocated_value", "closure_residual"):
+            if not isfinite(getattr(self, name)):
+                raise ValueError(f"{name} must be finite")
+        _validate_hash("context_set_hash", self.context_set_hash)
+        _validate_hash("continuation_set_hash", self.continuation_set_hash)
+
+
+@dataclass(frozen=True, slots=True)
+class _TrialPlayerValue:
+    score: float
+    tokens: float
+    latency_ms: float
+
+
+class PrecedenceShapleyEstimator:
+    """Average marginal value across complete valid topological-order paths."""
+
+    def __init__(self, config: InteractionCreditConfig | None = None) -> None:
+        self.config = config or InteractionCreditConfig()
+
+    def estimate(
+        self,
+        graph: MemoryDependencyGraph,
+        trials: Sequence[InteractionTrial],
+        *,
+        orders: Sequence[Sequence[UUID]] | None = None,
+    ) -> InteractionCreditResult:
+        if not isinstance(graph, MemoryDependencyGraph):
+            raise ValueError("graph must be a MemoryDependencyGraph")
+        normalized_orders, mode = self._resolve_orders(graph, orders)
+        normalized_trials = tuple(trials)
+        self._validate_trials(graph, normalized_trials)
+
+        context_set_hash = _hash_fingerprint_set(
+            trial.context_hash for trial in normalized_trials
+        )
+        continuation_set_hash = _hash_fingerprint_set(
+            trial.continuation_hash for trial in normalized_trials
+        )
+        per_player: dict[UUID, list[_TrialPlayerValue]] = {
+            memory_id: [] for memory_id in graph.players
+        }
+        full_lifts: list[float] = []
+        contributing_orders: set[tuple[UUID, ...]] = set()
+
+        for trial in normalized_trials:
+            complete_orders = tuple(
+                order
+                for order in normalized_orders
+                if all(prefix in trial.outcomes for prefix in _prefixes(order))
+            )
+            if not complete_orders:
+                continue
+            contributing_orders.update(complete_orders)
+            full_lifts.append(
+                trial.outcomes[frozenset(graph.players)].score
+                - trial.outcomes[frozenset()].score
+            )
+            for memory_id in graph.players:
+                scores: list[float] = []
+                tokens: list[float] = []
+                latencies: list[float] = []
+                for order in complete_orders:
+                    before, after = _edge_for(order, memory_id)
+                    before_outcome = trial.outcomes[before]
+                    after_outcome = trial.outcomes[after]
+                    scores.append(after_outcome.score - before_outcome.score)
+                    tokens.append(after_outcome.tokens - before_outcome.tokens)
+                    latencies.append(
+                        after_outcome.latency_ms - before_outcome.latency_ms
+                    )
+                per_player[memory_id].append(
+                    _TrialPlayerValue(
+                        score=fmean(scores),
+                        tokens=fmean(tokens),
+                        latency_ms=fmean(latencies),
+                    )
+                )
+
+        usable_trial_count = len(full_lifts)
+        if usable_trial_count == 0:
+            return InteractionCreditResult(
+                mode=mode,
+                players=graph.players,
+                orders=normalized_orders,
+                credits=(),
+                abstentions=tuple(
+                    MemoryInteractionAbstention(
+                        memory_id=memory_id,
+                        reason=InteractionCreditAbstentionReason.NO_COMPLETE_PATH,
+                        usable_trial_count=0,
+                    )
+                    for memory_id in graph.players
+                ),
+                usable_trial_count=0,
+                full_lift=0.0,
+                allocated_value=0.0,
+                closure_residual=0.0,
+                context_set_hash=context_set_hash,
+                continuation_set_hash=continuation_set_hash,
+            )
+
+        means: dict[UUID, _TrialPlayerValue] = {}
+        standard_errors: dict[UUID, float] = {}
+        for memory_id, values in per_player.items():
+            if len(values) != usable_trial_count:
+                raise ValueError("complete order paths must cover every memory player")
+            score_values = [value.score for value in values]
+            means[memory_id] = _TrialPlayerValue(
+                score=fmean(score_values),
+                tokens=fmean(value.tokens for value in values),
+                latency_ms=fmean(value.latency_ms for value in values),
+            )
+            standard_errors[memory_id] = (
+                stdev(score_values) / sqrt(len(score_values))
+                if len(score_values) > 1
+                else float("inf")
+            )
+
+        full_lift = fmean(full_lifts)
+        allocated_value = sum(value.score for value in means.values())
+        closure_residual = allocated_value - full_lift
+        if abs(closure_residual) > self.config.closure_tolerance:
+            raise ValueError(
+                "interaction credit closure residual exceeds closure_tolerance"
+            )
+
+        credits: list[MemoryInteractionCredit] = []
+        abstentions: list[MemoryInteractionAbstention] = []
+        order_count = len(contributing_orders)
+        for memory_id in graph.players:
+            if usable_trial_count < self.config.min_trials:
+                abstentions.append(
+                    MemoryInteractionAbstention(
+                        memory_id=memory_id,
+                        reason=(
+                            InteractionCreditAbstentionReason.INSUFFICIENT_TRIALS
+                        ),
+                        usable_trial_count=usable_trial_count,
+                    )
+                )
+                continue
+            standard_error = standard_errors[memory_id]
+            if standard_error > self.config.max_standard_error:
+                abstentions.append(
+                    MemoryInteractionAbstention(
+                        memory_id=memory_id,
+                        reason=InteractionCreditAbstentionReason.HIGH_VARIANCE,
+                        usable_trial_count=usable_trial_count,
+                        score_standard_error=standard_error,
+                    )
+                )
+                continue
+            value = means[memory_id]
+            credits.append(
+                MemoryInteractionCredit(
+                    memory_id=memory_id,
+                    score_value=value.score,
+                    score_standard_error=standard_error,
+                    token_value=value.tokens,
+                    latency_value_ms=value.latency_ms,
+                    trial_count=usable_trial_count,
+                    order_count=order_count,
+                )
+            )
+
+        return InteractionCreditResult(
+            mode=mode,
+            players=graph.players,
+            orders=normalized_orders,
+            credits=tuple(credits),
+            abstentions=tuple(abstentions),
+            usable_trial_count=usable_trial_count,
+            full_lift=full_lift,
+            allocated_value=allocated_value,
+            closure_residual=closure_residual,
+            context_set_hash=context_set_hash,
+            continuation_set_hash=continuation_set_hash,
+        )
+
+    def _resolve_orders(
+        self,
+        graph: MemoryDependencyGraph,
+        orders: Sequence[Sequence[UUID]] | None,
+    ) -> tuple[tuple[tuple[UUID, ...], ...], InteractionEstimationMode]:
+        all_orders = graph.topological_orders()
+        if orders is None:
+            if len(graph.players) > self.config.exact_player_limit:
+                raise ValueError(
+                    "sampled orders are required above exact_player_limit"
+                )
+            return all_orders, InteractionEstimationMode.EXACT
+
+        normalized = tuple(tuple(order) for order in orders)
+        if not normalized:
+            raise ValueError("at least one sampled order is required")
+        if len(normalized) > self.config.max_sampled_orders:
+            raise ValueError("orders exceed max_sampled_orders")
+        if len(set(normalized)) != len(normalized):
+            raise ValueError("orders must not contain duplicates")
+        if any(not graph.is_valid_order(order) for order in normalized):
+            raise ValueError("every order must be a valid topological order")
+        normalized = tuple(sorted(normalized, key=_order_sort_key))
+        mode = (
+            InteractionEstimationMode.EXACT
+            if len(graph.players) <= self.config.exact_player_limit
+            and normalized == all_orders
+            else InteractionEstimationMode.SAMPLED
+        )
+        return normalized, mode
+
+    @staticmethod
+    def _validate_trials(
+        graph: MemoryDependencyGraph,
+        trials: tuple[InteractionTrial, ...],
+    ) -> None:
+        seen_keys: set[str] = set()
+        context_hashes: set[str] = set()
+        for trial in trials:
+            if not isinstance(trial, InteractionTrial):
+                raise ValueError("trials must contain InteractionTrial instances")
+            if trial.trial_key in seen_keys:
+                raise ValueError("duplicate trial_key")
+            seen_keys.add(trial.trial_key)
+            context_hashes.add(trial.context_hash)
+            for coalition in trial.outcomes:
+                graph.validate_coalition(coalition)
+        if len(context_hashes) > 1:
+            raise ValueError("all trials must share one context_hash")
+
+
+def _prefixes(order: Sequence[UUID]) -> tuple[frozenset[UUID], ...]:
+    prefix: set[UUID] = set()
+    values: list[frozenset[UUID]] = [frozenset()]
+    for memory_id in order:
+        prefix.add(memory_id)
+        values.append(frozenset(prefix))
+    return tuple(values)
+
+
+def _edge_for(
+    order: Sequence[UUID],
+    memory_id: UUID,
+) -> tuple[frozenset[UUID], frozenset[UUID]]:
+    prefix: set[UUID] = set()
+    for current in order:
+        before = frozenset(prefix)
+        prefix.add(current)
+        if current == memory_id:
+            return before, frozenset(prefix)
+    raise ValueError("memory_id is absent from topological order")
+
+
+def _hash_fingerprint_set(values: Collection[str] | Sequence[str] | object) -> str:
+    ordered = sorted(set(values))
+    return hashlib.sha256(":".join(ordered).encode("utf-8")).hexdigest()
+
+
 def _coalition_sort_key(coalition: frozenset[UUID]) -> tuple[int, tuple[str, ...]]:
     return len(coalition), tuple(sorted(str(memory_id) for memory_id in coalition))
+
+
+def _order_sort_key(order: Sequence[UUID]) -> tuple[str, ...]:
+    return tuple(str(memory_id) for memory_id in order)
 
 
 def _validate_hash(name: str, value: str) -> None:
@@ -328,6 +656,11 @@ def _validate_hash(name: str, value: str) -> None:
 def _validate_positive_integer(name: str, value: int) -> None:
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
         raise ValueError(f"{name} must be a positive integer")
+
+
+def _validate_nonnegative_integer(name: str, value: int) -> None:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError(f"{name} must be a non-negative integer")
 
 
 def _validate_nonnegative_finite(name: str, value: float) -> None:
