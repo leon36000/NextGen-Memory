@@ -1,0 +1,72 @@
+name: Verify Learning Evidence API RED
+
+on:
+  push:
+    branches: [bootstrap/learning-evidence-api-red-check]
+
+permissions:
+  contents: write
+
+jobs:
+  verify:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/learning-evidence-reader-v0
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Install development tools
+        run: python -m pip install -e '.[dev]'
+      - name: Apply mechanical formatting in disposable workspace
+        run: |
+          ruff format src/nextgen_memory/learning_evidence.py tests/test_learning_evidence.py tests/test_learning_evidence_sql.py tests/test_learning_evidence_properties.py tests/test_learning_evidence_public_api.py
+          ruff check src/nextgen_memory/learning_evidence.py tests/test_learning_evidence.py tests/test_learning_evidence_sql.py tests/test_learning_evidence_properties.py tests/test_learning_evidence_public_api.py --fix
+          ruff check .
+      - name: Require internal GREEN
+        run: |
+          python -m pytest \
+            tests/test_learning_evidence.py \
+            tests/test_learning_evidence_sql.py \
+            tests/test_learning_evidence_properties.py \
+            -q
+      - name: Require exact public API RED
+        run: |
+          set +e
+          python -m pytest -q > /tmp/full.txt 2>&1
+          status=$?
+          set -e
+          cat /tmp/full.txt
+          test "$status" -ne 0
+          grep -F 'test_package_exports_stable_learning_evidence_reader_v0_api' /tmp/full.txt
+          grep -E 'AttributeError|has no attribute' /tmp/full.txt
+          FAILURES=$(grep -Eo '[0-9]+ failed' /tmp/full.txt | tail -n 1 | awk '{print $1}')
+          test "$FAILURES" = "1"
+      - name: Verify formatting scope
+        run: |
+          git diff --check
+          git diff --name-only | sort > /tmp/actual
+          if [ -s /tmp/actual ]; then
+            cat > /tmp/allowed <<'EOF'
+          src/nextgen_memory/learning_evidence.py
+          tests/test_learning_evidence.py
+          tests/test_learning_evidence_properties.py
+          tests/test_learning_evidence_public_api.py
+          tests/test_learning_evidence_sql.py
+          EOF
+            while read -r path; do grep -Fx "$path" /tmp/allowed >/dev/null; done < /tmp/actual
+          fi
+      - name: Publish formatting correction when needed
+        run: |
+          if git diff --quiet; then
+            exit 0
+          fi
+          git config user.name "NextGen Memory Automation"
+          git config user.email "actions@users.noreply.github.com"
+          git add src/nextgen_memory/learning_evidence.py tests/test_learning_evidence.py tests/test_learning_evidence_sql.py tests/test_learning_evidence_properties.py tests/test_learning_evidence_public_api.py
+          git commit -m "style: format learning evidence reader v0"
+          git push origin HEAD:feat/learning-evidence-reader-v0
