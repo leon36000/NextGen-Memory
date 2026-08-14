@@ -16,6 +16,17 @@ from .domain import (
     TemporalIntent,
 )
 from .eligibility import EligibilityResult, evaluate_candidate_eligibility
+from .execution_ledger import (
+    AppendOnlyExecutionLedger,
+    ExecutionArtifact,
+    ExecutionEvent,
+    ExecutionEventKind,
+    ExecutionLedgerConflictError,
+    ExecutionLedgerValidationError,
+    ExecutionOutcome,
+    ExecutionRun,
+    ExecutionStatus,
+)
 from .mongodb_retrieval import (
     MongoResearchIndexConfig,
     MongoResearchRetriever,
@@ -37,10 +48,19 @@ from .telemetry import (
 
 __all__ = [
     "RETRIEVAL_EVENT_INSERT_SQL",
+    "AppendOnlyExecutionLedger",
     "DeterministicMemoryRouter",
     "EligibilityResult",
     "EvidenceNeed",
     "ExactnessNeed",
+    "ExecutionArtifact",
+    "ExecutionEvent",
+    "ExecutionEventKind",
+    "ExecutionLedgerConflictError",
+    "ExecutionLedgerValidationError",
+    "ExecutionOutcome",
+    "ExecutionRun",
+    "ExecutionStatus",
     "ExpertAllocation",
     "ExpertKey",
     "InMemoryRoutingDecisionSink",
