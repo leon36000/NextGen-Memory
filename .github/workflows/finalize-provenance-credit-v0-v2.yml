@@ -1,0 +1,241 @@
+name: Finalize Provenance Credit v0 v2
+
+on:
+  push:
+    branches: [bootstrap/provenance-credit-v0-finalize-v2]
+
+permissions:
+  actions: read
+  contents: write
+  pull-requests: write
+
+jobs:
+  finalize:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: leon36000/NextGen-Memory
+      TARGET_BRANCH: feat/provenance-credit-v0
+      TARGET_SHA: 37ed27903fce26c7d9d7aa536b951da9a7a68e54
+      BASE_SHA: 64662d25f98d457d031cd33447107cedf8aa6689
+      CI_RUN_ID: 31844959632
+      MARKER_BRANCH: bootstrap/provenance-credit-v0-finalize-v2
+    steps:
+      - name: Verify exact head and ordinary PR matrix
+        run: |
+          test "$(gh api "repos/$REPO/git/ref/heads/$TARGET_BRANCH" --jq '.object.sha')" = "$TARGET_SHA"
+          RUN=$(gh api "repos/$REPO/actions/runs/$CI_RUN_ID")
+          test "$(printf '%s' "$RUN" | jq -r '.head_sha')" = "$TARGET_SHA"
+          test "$(printf '%s' "$RUN" | jq -r '.event')" = "pull_request"
+          test "$(printf '%s' "$RUN" | jq -r '.conclusion')" = "success"
+          gh api "repos/$REPO/actions/runs/$CI_RUN_ID/jobs?per_page=100" > /tmp/jobs.json
+          jq -e '[.jobs[] | select(.name | contains("3.12")) | .conclusion] | length > 0 and all(. == "success")' /tmp/jobs.json
+          jq -e '[.jobs[] | select(.name | contains("3.13")) | .conclusion] | length > 0 and all(. == "success")' /tmp/jobs.json
+
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/provenance-credit-v0
+          fetch-depth: 0
+
+      - name: Verify scoped diff
+        run: |
+          test "$(git rev-parse HEAD)" = "$TARGET_SHA"
+          git diff --check "$BASE_SHA...$TARGET_SHA"
+          git diff --name-only "$BASE_SHA...$TARGET_SHA" | sort > /tmp/files.txt
+          cat > /tmp/expected-files.txt <<'EOF'
+          docs/provenance-credit-v0-red.md
+          docs/provenance-credit-v0.md
+          docs/superpowers/plans/2026-08-14-provenance-credit-v0.md
+          docs/superpowers/specs/2026-08-14-provenance-credit-v0-design.md
+          scripts/simulate_provenance_credit.py
+          src/nextgen_memory/__init__.py
+          src/nextgen_memory/provenance_credit.py
+          tests/test_provenance_credit.py
+          tests/test_provenance_credit_properties.py
+          tests/test_provenance_credit_public_api.py
+          tests/test_provenance_credit_simulation.py
+          EOF
+          diff -u /tmp/expected-files.txt /tmp/files.txt
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Reproduce lint, tests, coverage and wheel
+        run: |
+          python -m pip install -e '.[dev]'
+          ruff check .
+          python -m pytest -q
+          python -m pytest --cov=nextgen_memory --cov-report=json -q
+          python -m compileall -q src scripts
+          python -m pip wheel . --no-deps -w /tmp/wheel
+          python -m pip install --force-reinstall /tmp/wheel/*.whl
+          python - <<'PY'
+          from nextgen_memory import ConservativeProvenancePropagator
+          assert ConservativeProvenancePropagator.__name__ == "ConservativeProvenancePropagator"
+          PY
+          python -m pytest --collect-only -q > /tmp/collect.txt
+          python - <<'PY'
+          import re
+          from pathlib import Path
+          text = Path('/tmp/collect.txt').read_text(encoding='utf-8')
+          matches = re.findall(r'(\d+) tests? collected', text)
+          if not matches:
+              raise SystemExit('unable to parse collected test count')
+          Path('/tmp/tests.txt').write_text(matches[-1], encoding='utf-8')
+          PY
+          jq -r '.totals.percent_covered' coverage.json > /tmp/coverage.txt
+          sha256sum /tmp/wheel/*.whl | awk '{print $1}' > /tmp/wheel-sha.txt
+
+      - name: Verify deterministic simulation and privacy boundary
+        run: |
+          python -m scripts.simulate_provenance_credit > /tmp/simulation-1.json
+          python -m scripts.simulate_provenance_credit > /tmp/simulation-2.json
+          cmp /tmp/simulation-1.json /tmp/simulation-2.json
+          sha256sum /tmp/simulation-1.json | awk '{print $1}' > /tmp/simulation-sha.txt
+          jq -e '.naive_branch_inflation_ratio == 2.0' /tmp/simulation-1.json
+          jq -e '.conservative_branch_inflation_ratio == 1.0' /tmp/simulation-1.json
+          jq -e '.naive_blocked_relation_false_credit == 0.5' /tmp/simulation-1.json
+          jq -e '.conservative_blocked_relation_false_credit == 0.0' /tmp/simulation-1.json
+          jq -e '.naive_negative_false_blame == 0.5' /tmp/simulation-1.json
+          jq -e '.conservative_negative_false_blame == 0.0' /tmp/simulation-1.json
+          jq -e '.conservative_max_conservation_residual == 0.0' /tmp/simulation-1.json
+          python - <<'PY'
+          from uuid import UUID
+          from nextgen_memory import (
+              ConservativeProvenancePropagator,
+              CreditSourceKind,
+              DirectCreditEvidence,
+              ProvenanceEdge,
+              ProvenanceNode,
+              TypedProvenanceGraph,
+              project_relation_policies_v0,
+          )
+          space = UUID('11111111-1111-1111-1111-111111111111')
+          root = UUID('aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa')
+          target = UUID('bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb')
+          result = ConservativeProvenancePropagator().propagate(
+              TypedProvenanceGraph(
+                  nodes=(ProvenanceNode(root, space), ProvenanceNode(target, space)),
+                  edges=(ProvenanceEdge(UUID('cccccccc-cccc-cccc-cccc-cccccccccccc'), space, root, target, 'supported_by'),),
+              ),
+              (DirectCreditEvidence(
+                  direct_credit_id=UUID('dddddddd-dddd-dddd-dddd-dddddddddddd'),
+                  evidence_group_id=UUID('eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee'),
+                  space_id=space,
+                  root_memory_id=root,
+                  source_kind=CreditSourceKind.INTERACTION,
+                  value=1.0,
+                  standard_error=0.1,
+                  trial_count=3,
+                  context_set_hash='a' * 64,
+                  continuation_set_hash='b' * 64,
+              ),),
+              project_relation_policies_v0(),
+          )
+          serialized = result.render_json().lower()
+          for forbidden in ('query', 'prompt', 'answer', 'command', 'stdout', 'stderr', 'secret', 'token', 'patch', 'environment', 'content'):
+              assert forbidden not in serialized, forbidden
+          PY
+
+      - name: Scan changed files for high-signal secrets
+        run: |
+          if git diff "$BASE_SHA...$TARGET_SHA" | grep -E '(sk-[A-Za-z0-9]{20,}|ghp_[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16}|mongodb\+srv://|postgres(ql)?://|BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY)'; then
+            echo 'High-signal secret pattern found' >&2
+            exit 1
+          fi
+
+      - name: Compute verification facts
+        id: facts
+        run: |
+          echo "tests=$(cat /tmp/tests.txt)" >> "$GITHUB_OUTPUT"
+          echo "coverage=$(cat /tmp/coverage.txt)" >> "$GITHUB_OUTPUT"
+          echo "wheel_sha=$(cat /tmp/wheel-sha.txt)" >> "$GITHUB_OUTPUT"
+          echo "simulation_sha=$(cat /tmp/simulation-sha.txt)" >> "$GITHUB_OUTPUT"
+
+      - name: Update draft PR with exact evidence
+        run: |
+          cat > /tmp/pr-body.md <<EOF
+          ## Résumé
+
+          Ajoute **Provenance Credit v0**, une propagation typée, positive-first et à masse conservée du crédit mémoire direct vers des mémoires de provenance.
+
+          La PR reste empilée sur `feat/interaction-credit-v0`, brouillon et non fusionnée.
+
+          ## Garanties
+
+          - aucune sémantique de propagation implicite;
+          - `supported_by` positif autorisé; relations chronologiques et de gouvernance bloquées;
+          - interaction directe prioritaire sur causal direct dans un même groupe, sans addition;
+          - budget partagé entre branches sans création de masse;
+          - chemins convergents conservés séparément;
+          - crédit direct et crédit hérité restent distincts;
+          - autorisation et validité sont des hard gates;
+          - cycles, politiques contradictoires et arêtes cross-space échouent fermé;
+          - crédit négatif désactivé par défaut et exigeant une attribution locale prouvée lorsqu’il est activé;
+          - incertitude statistique et confiance structurelle séparées;
+          - JSON déterministe sans requête, prompt, réponse, commande, sortie, secret ou contenu mémoire brut;
+          - aucune migration et aucune écriture dans `memory_feedback`.
+
+          ## TDD
+
+          - RED noyau : Ruff vert, puis module `nextgen_memory.provenance_credit` absent;
+          - RED simulation : Ruff vert, puis module `scripts.simulate_provenance_credit` absent;
+          - RED API : 200 tests verts, puis exports racine absents;
+          - GREEN final : **${{ steps.facts.outputs.tests }} tests**.
+
+          ## Vérification GitHub Actions
+
+          - commit exact : `$TARGET_SHA`;
+          - workflow CI : `$CI_RUN_ID`;
+          - Python 3.12.13 : Ruff et **201 tests** réussis;
+          - Python 3.13.15 : Ruff et **201 tests** réussis;
+          - conclusion globale : **success**.
+
+          ## Robustesse
+
+          - **5 000 DAGs déterministes** : conservation, scope, hard gates, profondeur, agrégation et permutation invariance;
+          - naïf : inflation **2.00×**, faux crédit relationnel **0.50**, faux blâme **0.50**;
+          - conservateur : inflation **1.00×**, faux crédit **0.00**, faux blâme **0.00**, résidu maximal **0.00**;
+          - SHA-256 de simulation : `${{ steps.facts.outputs.simulation_sha }}`.
+
+          ## Reproduction indépendante
+
+          - couverture globale : **${{ steps.facts.outputs.coverage }} %**;
+          - compileall : réussi;
+          - wheel construit, réinstallé et importé;
+          - SHA-256 du wheel : `${{ steps.facts.outputs.wheel_sha }}`;
+          - diff limité aux **11 fichiers** prévus;
+          - scan de secrets à forte précision : propre.
+
+          ## Garde-fous
+
+          - aucune fusion;
+          - aucune modification de `main`;
+          - aucune modification Neon ou MongoDB;
+          - persistance des crédits hérités reportée à un contrat séparé;
+          - apprentissage des poids reporté jusqu’à disposer de feedback interventionnel calibré.
+          EOF
+          sed -i 's/^          //' /tmp/pr-body.md
+          gh pr edit 12 --repo "$REPO" --body-file /tmp/pr-body.md
+
+      - name: Persist machine-readable marker
+        run: |
+          jq -n \
+            --argjson pull_request 12 \
+            --arg head_sha "$TARGET_SHA" \
+            --argjson ci_run_id "$CI_RUN_ID" \
+            --argjson tests '${{ steps.facts.outputs.tests }}' \
+            --argjson coverage '${{ steps.facts.outputs.coverage }}' \
+            --arg wheel_sha256 '${{ steps.facts.outputs.wheel_sha }}' \
+            --arg simulation_sha256 '${{ steps.facts.outputs.simulation_sha }}' \
+            '{pull_request:$pull_request,branch:"feat/provenance-credit-v0",base_sha:"64662d25f98d457d031cd33447107cedf8aa6689",head_sha:$head_sha,ci_run_id:$ci_run_id,conclusion:"success",python:["3.12.13","3.13.15"],tests:$tests,coverage_percent:$coverage,property_cases:5000,changed_files:11,simulation:{naive_branch_inflation_ratio:2.0,conservative_branch_inflation_ratio:1.0,naive_blocked_relation_false_credit:0.5,conservative_blocked_relation_false_credit:0.0,naive_negative_false_blame:0.5,conservative_negative_false_blame:0.0,conservative_max_conservation_residual:0.0,sha256:$simulation_sha256},wheel_sha256:$wheel_sha256,database_changed:false,merged:false,verified_at:(now|todate)}' > /tmp/marker.json
+          CONTENT=$(base64 -w0 /tmp/marker.json)
+          PATH_NAME='bootstrap/provenance-credit-v0-verification.json'
+          EXISTING_SHA=$(gh api "repos/$REPO/contents/$PATH_NAME?ref=$MARKER_BRANCH" --jq '.sha' 2>/dev/null || true)
+          if [ -n "$EXISTING_SHA" ]; then
+            gh api --method PUT "repos/$REPO/contents/$PATH_NAME" -f message='chore: record Provenance Credit v0 verification' -f branch="$MARKER_BRANCH" -f sha="$EXISTING_SHA" -f content="$CONTENT" >/dev/null
+          else
+            gh api --method PUT "repos/$REPO/contents/$PATH_NAME" -f message='chore: record Provenance Credit v0 verification' -f branch="$MARKER_BRANCH" -f content="$CONTENT" >/dev/null
+          fi
