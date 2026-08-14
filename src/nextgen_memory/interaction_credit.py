@@ -85,8 +85,8 @@ class MemoryDependencyGraph:
 
     __slots__ = (
         "_direct_prerequisites",
-        "_players",
         "_player_set",
+        "_players",
         "_prerequisites",
         "_topological_orders",
         "_valid_coalitions",
@@ -230,7 +230,7 @@ class MemoryDependencyGraph:
                     if self._direct_prerequisites[memory_id].issubset(prefix_set)
                 )
                 for memory_id in available:
-                    visit(prefix + (memory_id,), remaining.difference({memory_id}))
+                    visit((*prefix, memory_id), remaining.difference({memory_id}))
 
             visit((), self._player_set)
             self._topological_orders = tuple(orders)
