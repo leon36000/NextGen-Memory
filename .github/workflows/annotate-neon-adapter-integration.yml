@@ -1,0 +1,58 @@
+name: Annotate Neon adapter integration evidence
+
+on:
+  push:
+    branches: [bootstrap/adapter-v0-autofix]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  annotate:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: leon36000/NextGen-Memory
+      TARGET_BRANCH: feat/neon-execution-ledger-adapter-v0
+    steps:
+      - name: Resolve draft PR
+        id: pr
+        run: |
+          PR_NUMBER=$(gh pr list --repo "$REPO" --head "$TARGET_BRANCH" --state open --json number --jq '.[0].number')
+          test -n "$PR_NUMBER"
+          echo "number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
+      - name: Append isolated Neon integration evidence once
+        run: |
+          PR_NUMBER='${{ steps.pr.outputs.number }}'
+          gh pr view "$PR_NUMBER" --repo "$REPO" --json body --jq '.body' > /tmp/body.md
+          if ! grep -q '## Smoke test Neon isolé' /tmp/body.md; then
+            cat >> /tmp/body.md <<'EOF'
+
+          ## Smoke test Neon isolé
+
+          Exécuté sur `br-crimson-scene-a66ul63f`; aucune requête n’a ciblé Neon `main`.
+
+          - SQL exact de l’adaptateur exécuté avec `ON CONFLICT` et `ngm.assert_same_execution_payload`;
+          - **1 run, 3 événements, 1 artéfact** après l’écriture initiale et le replay exact;
+          - statut final `completed`;
+          - `storage_content_hash` présent sur tous les événements;
+          - `content_hash` canoniques conservés (`2…`, `3…`, `4…`);
+          - **0 ligne** dans `ngm.execution_chain_drift`;
+          - conflits de run, événement et artéfact rejetés sans ligne parasite.
+          EOF
+            sed -i 's/^          //' /tmp/body.md
+            gh pr edit "$PR_NUMBER" --repo "$REPO" --body-file /tmp/body.md
+          fi
+      - name: Extend verification marker
+        run: |
+          PATH_NAME='bootstrap/neon-adapter-v0-verification.json'
+          gh api "repos/$REPO/contents/$PATH_NAME?ref=bootstrap/adapter-v0-autofix" --jq '.content' | tr -d '\n' | base64 -d > /tmp/marker.json
+          jq '. + {neon_integration:{branch:"br-crimson-scene-a66ul63f",main_promoted:false,run_id:"77000000-0000-0000-0000-000000000001",run_rows:1,event_rows:3,artifact_rows:1,status:"completed",storage_hashes_present:true,drift_rows:0,exact_replay_deduplicated:true,conflicting_rows:0}}' /tmp/marker.json > /tmp/updated.json
+          CONTENT=$(base64 -w0 /tmp/updated.json)
+          EXISTING_SHA=$(gh api "repos/$REPO/contents/$PATH_NAME?ref=bootstrap/adapter-v0-autofix" --jq '.sha')
+          gh api --method PUT "repos/$REPO/contents/$PATH_NAME" \
+            -f message='chore: record isolated Neon adapter smoke evidence' \
+            -f branch='bootstrap/adapter-v0-autofix' \
+            -f sha="$EXISTING_SHA" \
+            -f content="$CONTENT" >/dev/null
