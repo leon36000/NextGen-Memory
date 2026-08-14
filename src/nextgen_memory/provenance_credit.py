@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 from math import isfinite
@@ -95,17 +95,11 @@ class ProvenanceEdge:
         confidence = _probability("confidence", self.confidence)
         local_attribution = self.local_attribution
         if local_attribution is not None:
-            local_attribution = _probability(
-                "local_attribution", local_attribution
-            )
+            local_attribution = _probability("local_attribution", local_attribution)
             if self.evidence_id is None:
-                raise ProvenanceCreditValidationError(
-                    "local_attribution requires an evidence_id"
-                )
+                raise ProvenanceCreditValidationError("local_attribution requires an evidence_id")
         elif self.evidence_id is not None:
-            raise ProvenanceCreditValidationError(
-                "evidence_id requires local_attribution"
-            )
+            raise ProvenanceCreditValidationError("evidence_id requires local_attribution")
         if self.evidence_id is not None:
             _require_uuid("evidence_id", self.evidence_id)
         object.__setattr__(self, "relation", relation)
@@ -128,25 +122,17 @@ class ProvenanceRelationPolicy:
     def __post_init__(self) -> None:
         relation = _normalize_relation(self.relation)
         if not isinstance(self.direction, PropagationDirection):
-            raise ProvenanceCreditValidationError(
-                "direction must be a PropagationDirection"
-            )
+            raise ProvenanceCreditValidationError("direction must be a PropagationDirection")
         _require_bool("allow_positive", self.allow_positive)
         _require_bool("allow_negative", self.allow_negative)
-        relation_weight = _probability(
-            "relation_weight", self.relation_weight
-        )
-        _require_bool(
-            "requires_local_attribution", self.requires_local_attribution
-        )
+        relation_weight = _probability("relation_weight", self.relation_weight)
+        _require_bool("requires_local_attribution", self.requires_local_attribution)
         if self.maximum_depth is not None:
             _positive_integer("maximum_depth", self.maximum_depth)
         if self.direction is PropagationDirection.BLOCKED and (
             self.allow_positive or self.allow_negative
         ):
-            raise ProvenanceCreditValidationError(
-                "blocked relation policy cannot allow credit"
-            )
+            raise ProvenanceCreditValidationError("blocked relation policy cannot allow credit")
         if self.allow_negative and not self.requires_local_attribution:
             raise ProvenanceCreditValidationError(
                 "negative-credit policies require local attribution"
@@ -179,17 +165,11 @@ class DirectCreditEvidence:
         ):
             _require_uuid(name, getattr(self, name))
         if not isinstance(self.source_kind, CreditSourceKind):
-            raise ProvenanceCreditValidationError(
-                "source_kind must be a CreditSourceKind"
-            )
+            raise ProvenanceCreditValidationError("source_kind must be a CreditSourceKind")
         value = _finite_number("value", self.value)
-        standard_error = _finite_number(
-            "standard_error", self.standard_error
-        )
+        standard_error = _finite_number("standard_error", self.standard_error)
         if standard_error < 0:
-            raise ProvenanceCreditValidationError(
-                "standard_error must be non-negative"
-            )
+            raise ProvenanceCreditValidationError("standard_error must be non-negative")
         _positive_integer("trial_count", self.trial_count)
         _require_hash("context_set_hash", self.context_set_hash)
         _require_hash("continuation_set_hash", self.continuation_set_hash)
@@ -217,27 +197,17 @@ class PropagationConfig:
         ):
             object.__setattr__(self, name, _probability(name, getattr(self, name)))
         _positive_integer("maximum_depth", self.maximum_depth)
-        minimum_absolute_mass = _finite_number(
-            "minimum_absolute_mass", self.minimum_absolute_mass
-        )
+        minimum_absolute_mass = _finite_number("minimum_absolute_mass", self.minimum_absolute_mass)
         conservation_tolerance = _finite_number(
             "conservation_tolerance", self.conservation_tolerance
         )
         if minimum_absolute_mass < 0:
-            raise ProvenanceCreditValidationError(
-                "minimum_absolute_mass must be non-negative"
-            )
+            raise ProvenanceCreditValidationError("minimum_absolute_mass must be non-negative")
         if conservation_tolerance < 0:
-            raise ProvenanceCreditValidationError(
-                "conservation_tolerance must be non-negative"
-            )
+            raise ProvenanceCreditValidationError("conservation_tolerance must be non-negative")
         policy_version = _required_text("policy_version", self.policy_version)
-        object.__setattr__(
-            self, "minimum_absolute_mass", minimum_absolute_mass
-        )
-        object.__setattr__(
-            self, "conservation_tolerance", conservation_tolerance
-        )
+        object.__setattr__(self, "minimum_absolute_mass", minimum_absolute_mass)
+        object.__setattr__(self, "conservation_tolerance", conservation_tolerance)
         object.__setattr__(self, "policy_version", policy_version)
 
 
@@ -272,30 +242,18 @@ class PropagatedCreditContribution:
         ):
             _finite_number(name, getattr(self, name))
         if self.propagated_standard_error < 0:
-            raise ProvenanceCreditValidationError(
-                "propagated_standard_error must be non-negative"
-            )
+            raise ProvenanceCreditValidationError("propagated_standard_error must be non-negative")
         _probability("structural_confidence", self.structural_confidence)
-        _probability(
-            "minimum_edge_confidence", self.minimum_edge_confidence
-        )
+        _probability("minimum_edge_confidence", self.minimum_edge_confidence)
         _positive_integer("depth", self.depth)
         if len(self.relation_path) != self.depth:
-            raise ProvenanceCreditValidationError(
-                "relation_path length must equal depth"
-            )
+            raise ProvenanceCreditValidationError("relation_path length must equal depth")
         if len(self.edge_path) != self.depth:
-            raise ProvenanceCreditValidationError(
-                "edge_path length must equal depth"
-            )
+            raise ProvenanceCreditValidationError("edge_path length must equal depth")
         if any(_normalize_relation(item) != item for item in self.relation_path):
-            raise ProvenanceCreditValidationError(
-                "relation_path must contain normalized relations"
-            )
+            raise ProvenanceCreditValidationError("relation_path must contain normalized relations")
         if any(not isinstance(edge_id, UUID) for edge_id in self.edge_path):
-            raise ProvenanceCreditValidationError(
-                "edge_path must contain UUID values"
-            )
+            raise ProvenanceCreditValidationError("edge_path must contain UUID values")
         _require_hash("path_fingerprint", self.path_fingerprint)
 
 
@@ -318,13 +276,9 @@ class PropagatedTargetCredit:
         ):
             _require_uuid(name, getattr(self, name))
         _finite_number("propagated_value", self.propagated_value)
-        standard_error = _finite_number(
-            "propagated_standard_error", self.propagated_standard_error
-        )
+        standard_error = _finite_number("propagated_standard_error", self.propagated_standard_error)
         if standard_error < 0:
-            raise ProvenanceCreditValidationError(
-                "propagated_standard_error must be non-negative"
-            )
+            raise ProvenanceCreditValidationError("propagated_standard_error must be non-negative")
         _positive_integer("path_count", self.path_count)
 
 
@@ -352,9 +306,7 @@ class BlockedPropagation:
         ):
             _require_uuid(name, getattr(self, name))
         if not isinstance(self.reason, PropagationBlockReason):
-            raise ProvenanceCreditValidationError(
-                "reason must be a PropagationBlockReason"
-            )
+            raise ProvenanceCreditValidationError("reason must be a PropagationBlockReason")
         relation = _normalize_relation(self.relation)
         _nonnegative_integer("depth", self.depth)
         _require_hash("path_fingerprint", self.path_fingerprint)
@@ -416,28 +368,18 @@ class TypedProvenanceGraph:
         nodes = tuple(self.nodes)
         edges = tuple(self.edges)
         if not nodes:
-            raise ProvenanceCreditValidationError(
-                "provenance graph requires at least one node"
-            )
+            raise ProvenanceCreditValidationError("provenance graph requires at least one node")
         if any(not isinstance(item, ProvenanceNode) for item in nodes):
-            raise ProvenanceCreditValidationError(
-                "nodes must contain ProvenanceNode instances"
-            )
+            raise ProvenanceCreditValidationError("nodes must contain ProvenanceNode instances")
         if any(not isinstance(item, ProvenanceEdge) for item in edges):
-            raise ProvenanceCreditValidationError(
-                "edges must contain ProvenanceEdge instances"
-            )
+            raise ProvenanceCreditValidationError("edges must contain ProvenanceEdge instances")
 
         node_ids = [item.memory_id for item in nodes]
         if len(node_ids) != len(set(node_ids)):
-            raise ProvenanceCreditValidationError(
-                "duplicate provenance node memory_id"
-            )
+            raise ProvenanceCreditValidationError("duplicate provenance node memory_id")
         spaces = {item.space_id for item in nodes}
         if len(spaces) != 1:
-            raise ProvenanceCreditValidationError(
-                "provenance nodes must share one space"
-            )
+            raise ProvenanceCreditValidationError("provenance nodes must share one space")
         space_id = next(iter(spaces))
         known = set(node_ids)
 
@@ -450,13 +392,9 @@ class TypedProvenanceGraph:
                     "provenance edge space does not match graph space"
                 )
             if item.from_node_id not in known or item.to_node_id not in known:
-                raise ProvenanceCreditValidationError(
-                    "provenance edge references an unknown node"
-                )
+                raise ProvenanceCreditValidationError("provenance edge references an unknown node")
             if item.from_node_id == item.to_node_id:
-                raise ProvenanceCreditValidationError(
-                    "provenance self-edge is not allowed"
-                )
+                raise ProvenanceCreditValidationError("provenance self-edge is not allowed")
 
         object.__setattr__(
             self,
@@ -500,9 +438,7 @@ class ProvenanceCreditResult:
         mass_ledgers = tuple(self.mass_ledgers)
         direct_ids = [item.direct_credit_id for item in direct_credits]
         if len(direct_ids) != len(set(direct_ids)):
-            raise ProvenanceCreditValidationError(
-                "result direct credits must have unique IDs"
-            )
+            raise ProvenanceCreditValidationError("result direct credits must have unique IDs")
         if {item.direct_credit_id for item in mass_ledgers} != set(direct_ids):
             raise ProvenanceCreditValidationError(
                 "mass ledgers must cover every direct credit exactly once"
@@ -540,13 +476,9 @@ class ProvenanceCreditResult:
                     "root_memory_id": str(item.root_memory_id),
                     "target_memory_id": str(item.target_memory_id),
                     "propagated_value": item.propagated_value,
-                    "propagated_standard_error": (
-                        item.propagated_standard_error
-                    ),
+                    "propagated_standard_error": (item.propagated_standard_error),
                     "structural_confidence": item.structural_confidence,
-                    "minimum_edge_confidence": (
-                        item.minimum_edge_confidence
-                    ),
+                    "minimum_edge_confidence": (item.minimum_edge_confidence),
                     "depth": item.depth,
                     "relation_path": list(item.relation_path),
                     "edge_path": [str(edge_id) for edge_id in item.edge_path],
@@ -560,9 +492,7 @@ class ProvenanceCreditResult:
                     "root_memory_id": str(item.root_memory_id),
                     "target_memory_id": str(item.target_memory_id),
                     "propagated_value": item.propagated_value,
-                    "propagated_standard_error": (
-                        item.propagated_standard_error
-                    ),
+                    "propagated_standard_error": (item.propagated_standard_error),
                     "path_count": item.path_count,
                 }
                 for item in self.target_credits
@@ -645,9 +575,7 @@ class ConservativeProvenancePropagator:
         policies: Sequence[ProvenanceRelationPolicy],
     ) -> ProvenanceCreditResult:
         if not isinstance(graph, TypedProvenanceGraph):
-            raise ProvenanceCreditValidationError(
-                "graph must be a TypedProvenanceGraph"
-            )
+            raise ProvenanceCreditValidationError("graph must be a TypedProvenanceGraph")
         selected = select_preferred_direct_credits(direct_credits)
         policy_map = _normalize_policies(policies)
         node_map = graph.node_map
@@ -731,9 +659,7 @@ class ConservativeProvenancePropagator:
                 ProvenanceCreditAbstention(
                     direct_credit_id=direct.direct_credit_id,
                     root_memory_id=direct.root_memory_id,
-                    reason=(
-                        ProvenanceCreditAbstentionReason.ZERO_DIRECT_CREDIT
-                    ),
+                    reason=(ProvenanceCreditAbstentionReason.ZERO_DIRECT_CREDIT),
                 )
             )
         elif direct.value < 0 and self.config.negative_budget_fraction == 0.0:
@@ -741,9 +667,7 @@ class ConservativeProvenancePropagator:
                 ProvenanceCreditAbstention(
                     direct_credit_id=direct.direct_credit_id,
                     root_memory_id=direct.root_memory_id,
-                    reason=(
-                        ProvenanceCreditAbstentionReason.NEGATIVE_PROPAGATION_DISABLED
-                    ),
+                    reason=(ProvenanceCreditAbstentionReason.NEGATIVE_PROPAGATION_DISABLED),
                 )
             )
         elif budget != 0.0:
@@ -824,9 +748,7 @@ class ConservativeProvenancePropagator:
                                 edge.relation,
                             ),
                             edge_path=(*current.edge_path, edge.edge_id),
-                            structural_confidence=(
-                                current.structural_confidence * edge.confidence
-                            ),
+                            structural_confidence=(current.structural_confidence * edge.confidence),
                             minimum_edge_confidence=min(
                                 current.minimum_edge_confidence,
                                 edge.confidence,
@@ -903,15 +825,10 @@ def select_preferred_direct_credits(
                 unique.append(item)
         preferred_kind = (
             CreditSourceKind.INTERACTION
-            if any(
-                item.source_kind is CreditSourceKind.INTERACTION
-                for item in unique
-            )
+            if any(item.source_kind is CreditSourceKind.INTERACTION for item in unique)
             else CreditSourceKind.CAUSAL
         )
-        preferred = [
-            item for item in unique if item.source_kind is preferred_kind
-        ]
+        preferred = [item for item in unique if item.source_kind is preferred_kind]
         if len(preferred) != 1:
             raise ProvenanceCreditValidationError(
                 "conflicting direct credit evidence at the same priority"
@@ -969,9 +886,7 @@ def _normalize_policies(
     for item in normalized:
         existing = result.get(item.relation)
         if existing is not None and existing != item:
-            raise ProvenanceCreditValidationError(
-                "conflicting policies for one relation"
-            )
+            raise ProvenanceCreditValidationError("conflicting policies for one relation")
         result[item.relation] = item
     return MappingProxyType(dict(sorted(result.items())))
 
@@ -1020,8 +935,7 @@ def _outgoing_edges(
             continue
         next_depth = state.depth + 1
         if next_depth > config.maximum_depth or (
-            policy.maximum_depth is not None
-            and next_depth > policy.maximum_depth
+            policy.maximum_depth is not None and next_depth > policy.maximum_depth
         ):
             blocked.append(
                 _blocked(
@@ -1033,9 +947,7 @@ def _outgoing_edges(
                 )
             )
             continue
-        if (positive and not policy.allow_positive) or (
-            not positive and not policy.allow_negative
-        ):
+        if (positive and not policy.allow_positive) or (not positive and not policy.allow_negative):
             blocked.append(
                 _blocked(
                     direct,
@@ -1082,11 +994,7 @@ def _outgoing_edges(
                 )
             )
             continue
-        attribution = (
-            edge.local_attribution
-            if edge.local_attribution is not None
-            else 1.0
-        )
+        attribution = edge.local_attribution if edge.local_attribution is not None else 1.0
         weight = policy.relation_weight * edge.confidence * attribution
         if weight <= 0:
             blocked.append(
@@ -1130,16 +1038,12 @@ def _validate_oriented_acyclic_graph(
     positive: bool,
 ) -> None:
     node_map = graph.node_map
-    adjacency: dict[UUID, set[UUID]] = {
-        item.memory_id: set() for item in graph.nodes
-    }
+    adjacency: dict[UUID, set[UUID]] = {item.memory_id: set() for item in graph.nodes}
     for edge in graph.edges:
         policy = policies.get(edge.relation)
         if policy is None or policy.direction is PropagationDirection.BLOCKED:
             continue
-        if (positive and not policy.allow_positive) or (
-            not positive and not policy.allow_negative
-        ):
+        if (positive and not policy.allow_positive) or (not positive and not policy.allow_negative):
             continue
         if policy.requires_local_attribution and (
             edge.local_attribution is None or edge.evidence_id is None
@@ -1200,9 +1104,7 @@ def _summarize_targets(
                 root_memory_id=root_memory_id,
                 target_memory_id=target_memory_id,
                 propagated_value=sum(item.propagated_value for item in paths),
-                propagated_standard_error=sum(
-                    item.propagated_standard_error for item in paths
-                ),
+                propagated_standard_error=sum(item.propagated_standard_error for item in paths),
                 path_count=len(paths),
             )
         )
@@ -1220,9 +1122,7 @@ def _contribution(
         root_memory_id=direct.root_memory_id,
         target_memory_id=state.current_memory_id,
         propagated_value=value,
-        propagated_standard_error=(
-            abs(multiplier) * direct.standard_error
-        ),
+        propagated_standard_error=(abs(multiplier) * direct.standard_error),
         structural_confidence=state.structural_confidence,
         minimum_edge_confidence=state.minimum_edge_confidence,
         depth=state.depth,
@@ -1296,9 +1196,7 @@ def _oriented_endpoints(
         return edge.from_node_id, edge.to_node_id
     if direction is PropagationDirection.REVERSE:
         return edge.to_node_id, edge.from_node_id
-    raise ProvenanceCreditValidationError(
-        "blocked relation does not have traversable endpoints"
-    )
+    raise ProvenanceCreditValidationError("blocked relation does not have traversable endpoints")
 
 
 def _edge_sort_key(edge: ProvenanceEdge) -> tuple[str, str, str, str]:
@@ -1366,9 +1264,7 @@ def _target_group_sort_key(
 def _normalize_relation(value: object) -> str:
     relation = _required_text("relation", value).lower()
     if _RELATION_RE.fullmatch(relation) is None:
-        raise ProvenanceCreditValidationError(
-            "relation must use lowercase typed-relation syntax"
-        )
+        raise ProvenanceCreditValidationError("relation must use lowercase typed-relation syntax")
     return relation
 
 
@@ -1403,30 +1299,22 @@ def _finite_number(name: str, value: object) -> float:
 def _probability(name: str, value: object) -> float:
     normalized = _finite_number(name, value)
     if not 0.0 <= normalized <= 1.0:
-        raise ProvenanceCreditValidationError(
-            f"{name} must be between zero and one"
-        )
+        raise ProvenanceCreditValidationError(f"{name} must be between zero and one")
     return normalized
 
 
 def _positive_integer(name: str, value: object) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
-        raise ProvenanceCreditValidationError(
-            f"{name} must be a positive integer"
-        )
+        raise ProvenanceCreditValidationError(f"{name} must be a positive integer")
     return value
 
 
 def _nonnegative_integer(name: str, value: object) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-        raise ProvenanceCreditValidationError(
-            f"{name} must be a non-negative integer"
-        )
+        raise ProvenanceCreditValidationError(f"{name} must be a non-negative integer")
     return value
 
 
 def _require_hash(name: str, value: object) -> None:
     if not isinstance(value, str) or _HASH_RE.fullmatch(value) is None:
-        raise ProvenanceCreditValidationError(
-            f"{name} must be a lowercase SHA-256 hex digest"
-        )
+        raise ProvenanceCreditValidationError(f"{name} must be a lowercase SHA-256 hex digest")

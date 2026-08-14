@@ -5,6 +5,7 @@ from dataclasses import FrozenInstanceError
 from uuid import UUID
 
 import pytest
+
 from nextgen_memory.provenance_credit import (
     ConservativeProvenancePropagator,
     CreditSourceKind,
@@ -243,9 +244,7 @@ def test_direct_selector_keeps_independent_evidence_groups_separate() -> None:
 
 
 def test_simple_positive_leaf_receives_exact_bounded_budget() -> None:
-    result = propagate(
-        graph((node(A), node(B)), (edge(EDGE_AB, A, B, confidence=0.8),))
-    )
+    result = propagate(graph((node(A), node(B)), (edge(EDGE_AB, A, B, confidence=0.8),)))
 
     assert result.direct_credits == (direct(),)
     assert len(result.contributions) == 1
@@ -281,8 +280,7 @@ def test_chain_retains_half_at_each_reached_non_leaf() -> None:
     )
 
     values = {
-        (item.target_memory_id, item.depth): item.propagated_value
-        for item in result.contributions
+        (item.target_memory_id, item.depth): item.propagated_value for item in result.contributions
     }
     assert values == {
         (B, 1): pytest.approx(0.25),
@@ -302,13 +300,11 @@ def test_equal_branch_redistributes_budget_without_multiplication() -> None:
         )
     )
 
-    assert {
-        item.target_memory_id: item.propagated_value
-        for item in result.contributions
-    } == {B: pytest.approx(0.25), C: pytest.approx(0.25)}
-    assert sum(item.propagated_value for item in result.contributions) == pytest.approx(
-        0.5
-    )
+    assert {item.target_memory_id: item.propagated_value for item in result.contributions} == {
+        B: pytest.approx(0.25),
+        C: pytest.approx(0.25),
+    }
+    assert sum(item.propagated_value for item in result.contributions) == pytest.approx(0.5)
     assert result.mass_ledgers[0].conservation_residual == pytest.approx(0.0)
 
 
@@ -323,10 +319,7 @@ def test_unequal_confidence_weights_split_one_fixed_budget() -> None:
         )
     )
 
-    values = {
-        item.target_memory_id: item.propagated_value
-        for item in result.contributions
-    }
+    values = {item.target_memory_id: item.propagated_value for item in result.contributions}
     assert values[B] == pytest.approx(0.375)
     assert values[C] == pytest.approx(0.125)
     assert sum(values.values()) == pytest.approx(0.5)
@@ -345,9 +338,7 @@ def test_converging_paths_remain_separate_with_conservative_target_uncertainty()
         )
     )
 
-    paths_to_d = tuple(
-        item for item in result.contributions if item.target_memory_id == D
-    )
+    paths_to_d = tuple(item for item in result.contributions if item.target_memory_id == D)
     assert len(paths_to_d) == 2
     assert {item.edge_path for item in paths_to_d} == {
         (EDGE_AB, EDGE_BD),
@@ -402,10 +393,7 @@ def test_blocked_relation_produces_no_credit_and_explicit_root_abstention() -> N
 
     assert result.contributions == ()
     assert result.blocked[0].reason is PropagationBlockReason.RELATION_BLOCKED
-    assert (
-        result.abstentions[0].reason
-        is ProvenanceCreditAbstentionReason.NO_ADMISSIBLE_PATH
-    )
+    assert result.abstentions[0].reason is ProvenanceCreditAbstentionReason.NO_ADMISSIBLE_PATH
     assert result.mass_ledgers[0].unallocated_value == pytest.approx(0.5)
 
 
@@ -492,10 +480,7 @@ def test_negative_credit_requires_explicit_local_attribution_evidence() -> None:
         config=config,
     )
     assert blocked.contributions == ()
-    assert (
-        blocked.blocked[0].reason
-        is PropagationBlockReason.LOCAL_ATTRIBUTION_REQUIRED
-    )
+    assert blocked.blocked[0].reason is PropagationBlockReason.LOCAL_ATTRIBUTION_REQUIRED
 
     allowed = propagate(
         graph(
