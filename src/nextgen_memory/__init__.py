@@ -16,6 +16,18 @@ from .domain import (
     TemporalIntent,
 )
 from .eligibility import EligibilityResult, evaluate_candidate_eligibility
+from .mongodb_retrieval import (
+    MongoResearchIndexConfig,
+    MongoResearchRetriever,
+    build_research_hybrid_pipeline,
+)
+from .retrieval import ResearchRetrievalHit, ResearchRetrievalQuery
+from .retrieval_telemetry import (
+    RETRIEVAL_EVENT_INSERT_SQL,
+    RetrievalEvent,
+    RetrievalEventWriter,
+    build_retrieval_events,
+)
 from .router import DeterministicMemoryRouter
 from .telemetry import (
     InMemoryRoutingDecisionSink,
@@ -24,6 +36,7 @@ from .telemetry import (
 )
 
 __all__ = [
+    "RETRIEVAL_EVENT_INSERT_SQL",
     "DeterministicMemoryRouter",
     "EligibilityResult",
     "EvidenceNeed",
@@ -32,7 +45,13 @@ __all__ = [
     "ExpertKey",
     "InMemoryRoutingDecisionSink",
     "MemoryCandidate",
+    "MongoResearchIndexConfig",
+    "MongoResearchRetriever",
     "PlanPhase",
+    "ResearchRetrievalHit",
+    "ResearchRetrievalQuery",
+    "RetrievalEvent",
+    "RetrievalEventWriter",
     "RiskLevel",
     "RoutingDecision",
     "RoutingDecisionSink",
@@ -42,5 +61,7 @@ __all__ = [
     "Sensitivity",
     "TaskKind",
     "TemporalIntent",
+    "build_research_hybrid_pipeline",
+    "build_retrieval_events",
     "evaluate_candidate_eligibility",
 ]

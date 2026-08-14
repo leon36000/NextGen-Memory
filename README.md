@@ -66,18 +66,32 @@ decision = DeterministicMemoryRouter().route(request)
 print(decision.to_dict())
 ```
 
+## Research Retrieval v1
+
+The research expert now has an executable MongoDB Atlas read path:
+
+- native MongoDB 8.0 `$rankFusion` over `rag_autoembed_v1` and `rag_lexical_v1`;
+- mandatory canonical `space_id` isolation and `status=active` filtering;
+- typed, immutable query/result contracts and fail-closed result mapping;
+- deterministic rows compatible with `ngm.retrieval_events`;
+- no raw query text in retrieval telemetry;
+- idempotent canonical Neon identities for the ten initial Atlas research sources.
+
+See `docs/retrieval-v1.md` for the query contract, privacy boundary, and verified live smoke result.
+
 ## Repository map
 
-- `src/nextgen_memory/`: framework contracts and routing kernel.
-- `tests/`: behavior and migration-contract tests.
-- `migrations/neon/`: reproducible canonical ledger migrations.
+- `src/nextgen_memory/`: framework contracts, routing kernel, and research retrieval adapter.
+- `tests/`: behavior, retrieval, telemetry, and migration-contract tests.
+- `migrations/neon/`: reproducible canonical ledger migrations and research identity seed.
 - `migrations/mongodb/`: rich-payload collection contracts.
 - `docs/router-v0.md`: router semantics and non-goals.
-- `docs/superpowers/specs/`: approved research/design specification.
+- `docs/retrieval-v1.md`: native hybrid research retrieval and telemetry contract.
+- `docs/superpowers/specs/`: approved research/design specifications.
 - `docs/superpowers/plans/`: implementation plans.
 
 ## Status
 
-Bootstrap schema `0.1.1` and Router v0 are the current foundation. Learned routing, retrieval
-execution, state-adjudication replay, Temporal workflows, and SWE execution governance follow only
-after their contracts and supervision data are verified.
+Schema `0.1.1`, Router v0, and Research Retrieval v1 are the current foundation. Learned routing,
+utility-aware reranking, context compilation, state-adjudication replay, Temporal workflows, and SWE
+execution governance follow only after their contracts and supervision data are verified.
