@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import nextgen_memory
-
 from nextgen_memory.provenance_credit import (
     BlockedPropagation,
     ConservativeProvenancePropagator,
