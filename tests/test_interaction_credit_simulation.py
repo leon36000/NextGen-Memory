@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import pytest
-
 from scripts.simulate_interaction_credit import SimulationConfig, simulate
 
 
