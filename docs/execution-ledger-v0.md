@@ -86,6 +86,10 @@ Negative path:
 
 The full migration was reapplied successfully with two runs, six events, and one artifact already present; no duplicate trigger or schema object was introduced and drift remained zero. No execution-ledger schema change has been applied to the primary Neon branch; deployment remains a separate approval gate.
 
+## Verification policy
+
+Every code-bearing hardening commit must pass the pull-request CI matrix on Python 3.12 and 3.13, including Ruff and the complete test suite. A workflow-generated commit that does not trigger normal pull-request jobs is not accepted as final verification evidence; an independently triggered matrix run is required.
+
 ## Deployment gate
 
 Production deployment requires a separate explicit approval. Before applying the migration:
