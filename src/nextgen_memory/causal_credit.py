@@ -447,9 +447,13 @@ def _measure_target(
     without_scores = [
         trial.without_memory[target.memory_id].score for trial in trials
     ]
-    effects = [full - without for full, without in zip(full_scores, without_scores)]
+    effects = [
+        full - without
+        for full, without in zip(full_scores, without_scores, strict=True)
+    ]
     bundle_uplifts = [
-        full - baseline for full, baseline in zip(full_scores, no_memory_scores)
+        full - baseline
+        for full, baseline in zip(full_scores, no_memory_scores, strict=True)
     ]
     token_deltas = [
         trial.full.tokens - trial.without_memory[target.memory_id].tokens
@@ -460,7 +464,9 @@ def _measure_target(
         - trial.without_memory[target.memory_id].latency_ms
         for trial in trials
     ]
-    full_success_rate = fmean(1.0 if trial.full.task_success else 0.0 for trial in trials)
+    full_success_rate = fmean(
+        1.0 if trial.full.task_success else 0.0 for trial in trials
+    )
     without_success_rate = fmean(
         1.0 if trial.without_memory[target.memory_id].task_success else 0.0
         for trial in trials
