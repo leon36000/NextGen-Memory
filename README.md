@@ -17,6 +17,8 @@ A standard RAG pipeline asks which chunks resemble a query. NextGen Memory asks 
 6. What is the smallest evidence packet that closes the agent's evidence gap?
 7. Which selected memories actually changed the resulting task outcome?
 8. Is the causal evidence strong enough to update utility, or should the system abstain?
+9. Are memories substitutes, complements, or structurally dependent?
+10. Does allocated credit close exactly to the measured bundle value?
 
 ## Current architecture
 
@@ -25,8 +27,8 @@ A standard RAG pipeline asks which chunks resemble a query. NextGen Memory asks 
 - **MongoDB Atlas:** rich episodic traces, research sources, repository artifacts, and alternate
   representations linked to canonical Neon UUIDs.
 - **Python kernel:** zero-dependency typed contracts, fail-closed candidate eligibility, a
-  deterministic sparse router, scoped hybrid retrieval, evidence-shrunk utility reranking, and
-  paired post-action causal attribution.
+  deterministic sparse router, scoped hybrid retrieval, evidence-shrunk utility reranking, paired
+  post-action causal attribution, and dependency-aware interaction allocation.
 - **Temporal:** planned for durable lifecycle workflows after read/write contracts stabilize.
 
 The twelve initial experts are `working`, `execution`, `episodic`, `semantic`, `temporal`,
@@ -102,7 +104,7 @@ for a later learned reranker.
 
 ## Post-Action Causal Credit v0
 
-A completed task can now be evaluated using matched interventions:
+A completed task can be evaluated using matched interventions:
 
 ```text
 full memory bundle
@@ -123,10 +125,36 @@ applied to production.
 See `docs/causal-credit-v0.md` for the intervention model, migration verification, simulation results,
 and deployment gate.
 
+## Interaction Credit v0
+
+Leave-one-out can miss redundant substitutes and double-count synergistic complements. Interaction
+Credit v0 adds:
+
+- explicit acyclic memory prerequisites;
+- dependency-closed coalitions and valid topological orders;
+- exact or sampled precedence-constrained Shapley allocation;
+- mandatory value closure;
+- token and latency allocation;
+- context-averaged pairwise synergy/redundancy diagnostics;
+- a deterministic hard-budget coalition planner.
+
+The planner reuses cached coalitions, prioritizes empty/full boundaries, improves player-position
+coverage, and never requests an invalid subset. Pairwise diagnostics are intentionally separate from
+Shapley allocation and are not presented as a formal Shapley interaction index.
+
+The current Neon provenance graph is too sparse and semantically heterogeneous for safe automatic
+credit propagation. Provenance Credit remains deferred until edge meanings, directions, cycles,
+uncertainty, and direct-vs-propagated evidence are explicitly separated.
+
+See `docs/interaction-credit-v0.md` for equations, closure guarantees, planner behavior, graph audit,
+simulation results, and research limitations.
+
 ## Repository map
 
-- `src/nextgen_memory/`: routing, retrieval, utility, causal credit, telemetry, and immutable contracts.
-- `tests/`: behavior, retrieval, utility, causal attribution, telemetry, and migration-contract tests.
+- `src/nextgen_memory/`: routing, retrieval, utility, direct causal credit, interaction credit,
+  telemetry, and immutable contracts.
+- `tests/`: behavior, retrieval, utility, causal attribution, interactions, planners, telemetry, and
+  migration-contract tests.
 - `scripts/`: deterministic research and verification simulations.
 - `migrations/neon/`: reproducible canonical ledger, identity, execution, and causal-feedback migrations.
 - `migrations/mongodb/`: rich-payload collection and index contracts.
@@ -134,12 +162,14 @@ and deployment gate.
 - `docs/retrieval-v1.md`: native hybrid research retrieval and telemetry contract.
 - `docs/utility-reranker-v0.md`: evidence-shrunk utility-aware reranking.
 - `docs/causal-credit-v0.md`: paired post-action causal attribution and feedback persistence.
+- `docs/interaction-credit-v0.md`: constrained-Shapley allocation and coalition planning.
 - `docs/superpowers/specs/`: approved research/design specifications.
 - `docs/superpowers/plans/`: implementation plans.
 
 ## Status
 
-Schema `0.1.1`, Router v0, scope-safe Research Retrieval, Utility-Aware Reranker v0, and Post-Action
-Causal Credit v0 are the current research foundation. Learned routing, subset interaction credit,
-redundancy-aware context compilation, Temporal orchestration, and latent-memory injection follow only
-after their contracts and intervention-grounded supervision data are verified.
+Schema `0.1.1`, Router v0, scope-safe Research Retrieval, Utility-Aware Reranker v0, Post-Action
+Causal Credit v0, and Interaction Credit v0 are the current research foundation. Provenance credit,
+redundancy-aware context compilation, adaptive rollout orchestration, learned interaction estimators,
+and latent-memory injection follow only after their contracts and intervention-grounded supervision
+data are verified.
