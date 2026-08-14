@@ -14,7 +14,7 @@ from nextgen_memory.retrieval import ResearchRetrievalQuery
 SPACE_ID = UUID("279c0edc-e75d-5c7e-a857-2f461b4ba61e")
 
 
-def test_pipeline_uses_native_rank_fusion_with_scoped_auto_embed_search() -> None:
+def test_pipeline_uses_native_rank_fusion_with_scope_safe_search() -> None:
     query = ResearchRetrievalQuery(
         text="memory MoE utility router",
         space_id=SPACE_ID,
@@ -38,14 +38,23 @@ def test_pipeline_uses_native_rank_fusion_with_scoped_auto_embed_search() -> Non
     assert vector_search["limit"] == 10
     assert vector_search["numCandidates"] == 50
 
-    assert lexical_pipeline[0]["$search"]["index"] == "rag_lexical_v1"
-    assert lexical_pipeline[1] == {
-        "$match": {
-            "space_id": str(query.space_id),
-            "status": "active",
+    lexical_search = lexical_pipeline[0]["$search"]
+    assert lexical_search["index"] == "rag_lexical_v2"
+    assert "text" not in lexical_search
+    assert lexical_search["compound"]["must"] == [
+        {
+            "text": {
+                "query": query.text,
+                "path": ["rag_text", "title", "claims_text", "tags"],
+            }
         }
-    }
-    assert lexical_pipeline[2] == {"$limit": 10}
+    ]
+    assert lexical_search["compound"]["filter"] == [
+        {"equals": {"path": "space_id", "value": str(query.space_id)}},
+        {"equals": {"path": "status", "value": "active"}},
+    ]
+    assert lexical_pipeline[1] == {"$limit": 10}
+    assert len(lexical_pipeline) == 2
     assert rank_fusion["combination"]["weights"] == {
         "semantic": 0.65,
         "lexical": 0.35,
