@@ -27,26 +27,27 @@ jobs:
         run: |
           python - <<'PY'
           from pathlib import Path
+          import re
 
           path = Path("tests/test_research_materialization.py")
           text = path.read_text(encoding="utf-8")
-          old = '''    def find(
-              self,
-              filter: Mapping[str, Any],
-              projection: Mapping[str, int],
-          ) -> Iterable[Mapping[str, Any]]:
-              self.calls.append((filter, projection))
-          '''
-          new = '''    def find(
-              self,
-              filter_doc: Mapping[str, Any],
-              projection: Mapping[str, int],
-          ) -> Iterable[Mapping[str, Any]]:
-              self.calls.append((filter_doc, projection))
-          '''
-          if text.count(old) != 1:
-              raise SystemExit("expected one FakeCollection.find block")
-          path.write_text(text.replace(old, new), encoding="utf-8")
+          text, parameter_count = re.subn(
+              r"(?m)^(\s*)filter: Mapping\[str, Any\],$",
+              r"\1filter_doc: Mapping[str, Any],",
+              text,
+              count=1,
+          )
+          text, call_count = re.subn(
+              r"self\.calls\.append\(\(filter, projection\)\)",
+              "self.calls.append((filter_doc, projection))",
+              text,
+              count=1,
+          )
+          if (parameter_count, call_count) != (1, 1):
+              raise SystemExit(
+                  f"expected one shadow repair, got parameter={parameter_count}, call={call_count}"
+              )
+          path.write_text(text, encoding="utf-8")
           PY
       - name: Apply safe Ruff fixes and formatting
         run: |
