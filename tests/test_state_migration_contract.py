@@ -1,4 +1,5 @@
 import pathlib
+
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 MIGRATION = ROOT / "migrations" / "neon" / "0003_state_resolution_replay.sql"
 
