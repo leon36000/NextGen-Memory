@@ -1,0 +1,37 @@
+{
+  "pull_request": 13,
+  "branch": "feat/inherited-credit-ledger-v0",
+  "base_sha": "37ed27903fce26c7d9d7aa536b951da9a7a68e54",
+  "head_sha": "167d5c60d485eaacc2fbf165797f7fae187be2eb",
+  "ci_run_id": 31847487327,
+  "conclusion": "success",
+  "python": [
+    "3.12.13",
+    "3.13.15"
+  ],
+  "tests": 223,
+  "coverage_percent": 90.56968136466044,
+  "property_cases": 2000,
+  "changed_files": 12,
+  "wheel_sha256": "3d3222c933c1411abe1196aab94b32afc65b4c2ec1c98432bf3e75dcb2f241e8",
+  "direct_feedback_separate": true,
+  "node_utility_redefined": false,
+  "database_changed": false,
+  "merged": false,
+  "neon_candidate": {
+    "branch": "br-soft-cherry-a6pv1ag2",
+    "schema_version": "0.1.0",
+    "evaluations": 2,
+    "contributions": 1,
+    "observations": 2,
+    "accounting": 2,
+    "accounting_links_valid": true,
+    "exact_replay": true,
+    "negative_test_rows": 0,
+    "memory_feedback_rows": 0,
+    "migration_reapplied_with_data": true,
+    "parent_schema_version": "0.1.1",
+    "parent_changed": false
+  },
+  "verified_at": "2026-08-14T22:44:57Z"
+}
