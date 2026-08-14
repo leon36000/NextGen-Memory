@@ -13,17 +13,18 @@ A standard RAG pipeline asks which chunks resemble a query. NextGen Memory asks 
 3. Does the task need current state, exact history, causal evidence, a procedure, a prior failure,
    repository structure, or research?
 4. Which candidates remain valid after scope, permission, sensitivity, time, and quarantine checks?
-5. What is the smallest evidence packet that closes the agent's evidence gap?
-6. Which memories actually helped or harmed the resulting task?
+5. Which relevant memories have credible evidence of helping or harming comparable work?
+6. What is the smallest evidence packet that closes the agent's evidence gap?
+7. Which selected memories actually changed the resulting task outcome?
 
 ## Current architecture
 
 - **Neon/Postgres:** canonical immutable ledger, provenance, bitemporal state, expert registry,
-  routing/retrieval telemetry, feedback, and project checkpoints.
+  routing/retrieval telemetry, aggregate utility evidence, feedback, and project checkpoints.
 - **MongoDB Atlas:** rich episodic traces, research sources, repository artifacts, and alternate
   representations linked to canonical Neon UUIDs.
-- **Python kernel:** zero-dependency typed contracts, fail-closed candidate eligibility, and a
-  deterministic sparse router used before learned routing is justified.
+- **Python kernel:** zero-dependency typed contracts, fail-closed candidate eligibility, a
+  deterministic sparse router, scoped hybrid retrieval, and evidence-shrunk utility reranking.
 - **Temporal:** planned for durable lifecycle workflows after read/write contracts stabilize.
 
 The twelve initial experts are `working`, `execution`, `episodic`, `semantic`, `temporal`,
@@ -66,32 +67,53 @@ decision = DeterministicMemoryRouter().route(request)
 print(decision.to_dict())
 ```
 
-## Research Retrieval v1
+## Scope-safe Research Retrieval
 
-The research expert now has an executable MongoDB Atlas read path:
+The research expert has an executable MongoDB Atlas read path:
 
-- native MongoDB 8.0 `$rankFusion` over `rag_autoembed_v1` and `rag_lexical_v1`;
-- mandatory canonical `space_id` isolation and `status=active` filtering;
+- native MongoDB 8.0 `$rankFusion` over `rag_autoembed_v1` and `rag_lexical_v2`;
+- canonical `space_id` and `status=active` filters inside both retrieval channels;
 - typed, immutable query/result contracts and fail-closed result mapping;
 - deterministic rows compatible with `ngm.retrieval_events`;
 - no raw query text in retrieval telemetry;
-- idempotent canonical Neon identities for the ten initial Atlas research sources.
+- idempotent canonical Neon identities for the initial Atlas research sources.
 
 See `docs/retrieval-v1.md` for the query contract, privacy boundary, and verified live smoke result.
 
+## Utility-Aware Reranker v0
+
+The retrieval path can now oversample candidates, read scoped aggregate evidence from
+`ngm.node_utility`, and rerank with:
+
+- normalized retrieval relevance;
+- strongly shrunk reward and verdict utility;
+- an independent harm-risk penalty;
+- bounded token and latency costs;
+- a complete deterministic score breakdown.
+
+No-feedback memories remain neutral. Backend failures propagate rather than silently falling back to
+unscoped or evidence-free ranking. The fixed-seed reward-trap simulation shows why task reward must
+not be copied to every co-retrieved memory.
+
+See `docs/utility-reranker-v0.md` for equations, defaults, simulation results, and the training gate
+for a later learned reranker.
+
 ## Repository map
 
-- `src/nextgen_memory/`: framework contracts, routing kernel, and research retrieval adapter.
-- `tests/`: behavior, retrieval, telemetry, and migration-contract tests.
+- `src/nextgen_memory/`: routing, retrieval, utility, telemetry, and immutable contracts.
+- `tests/`: behavior, retrieval, utility, telemetry, and migration-contract tests.
+- `scripts/`: deterministic research and verification simulations.
 - `migrations/neon/`: reproducible canonical ledger migrations and research identity seed.
-- `migrations/mongodb/`: rich-payload collection contracts.
+- `migrations/mongodb/`: rich-payload collection and index contracts.
 - `docs/router-v0.md`: router semantics and non-goals.
 - `docs/retrieval-v1.md`: native hybrid research retrieval and telemetry contract.
+- `docs/utility-reranker-v0.md`: evidence-shrunk utility-aware reranking.
 - `docs/superpowers/specs/`: approved research/design specifications.
 - `docs/superpowers/plans/`: implementation plans.
 
 ## Status
 
-Schema `0.1.1`, Router v0, and Research Retrieval v1 are the current foundation. Learned routing,
-utility-aware reranking, context compilation, state-adjudication replay, Temporal workflows, and SWE
-execution governance follow only after their contracts and supervision data are verified.
+Schema `0.1.1`, Router v0, scope-safe Research Retrieval, and Utility-Aware Reranker v0 are the
+current foundation. Learned routing, post-action causal credit, context compilation, Temporal
+workflows, and latent-memory injection follow only after their contracts and supervision data are
+verified.
