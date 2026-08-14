@@ -3,6 +3,7 @@ from __future__ import annotations
 from uuid import UUID
 
 import pytest
+
 from nextgen_memory.credit_targets import CREDIT_TARGETS_SELECT_SQL, CreditTargetReader
 
 SPACE_ID = UUID("279c0edc-e75d-5c7e-a857-2f461b4ba61e")
