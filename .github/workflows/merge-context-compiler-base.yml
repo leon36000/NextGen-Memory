@@ -45,8 +45,9 @@ jobs:
           cache: pip
       - name: Install project tools
         run: python -m pip install -e '.[dev]'
-      - name: Normalize merged public imports
-        run: ruff check src/nextgen_memory/__init__.py --select I001 --fix
+      - name: Normalize merged imports
+        run: |
+          ruff check src/nextgen_memory/__init__.py tests/test_context_compiler_properties.py --select I001 --fix
       - name: Verify merged tree
         run: |
           ruff check .
@@ -55,6 +56,6 @@ jobs:
           git diff --check
       - name: Commit and push merge
         run: |
-          git add README.md src/nextgen_memory/__init__.py
+          git add README.md src/nextgen_memory/__init__.py tests/test_context_compiler_properties.py
           git commit -m "merge: align Context Compiler with final reranker base"
           git push origin HEAD:feat/context-compiler-v0
