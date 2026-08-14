@@ -3,6 +3,7 @@ from uuid import UUID
 
 import pytest
 
+import nextgen_memory
 from nextgen_memory.state import (
     StateProjectionVerification,
     StateReplayError,
@@ -366,17 +367,10 @@ def test_empty_replay_is_rejected() -> None:
 
 
 def test_package_exports_state_replay_api() -> None:
-    from nextgen_memory import (
-        StateProjectionVerification as ExportedVerification,
-        StateResolutionEvent as ExportedResolutionEvent,
-        replay_state as exported_replay_state,
-        verify_state_projection as exported_verify_state_projection,
-    )
-
-    assert ExportedResolutionEvent is StateResolutionEvent
-    assert ExportedVerification is StateProjectionVerification
-    assert exported_replay_state is replay_state
-    assert exported_verify_state_projection is verify_state_projection
+    assert nextgen_memory.StateResolutionEvent is StateResolutionEvent
+    assert nextgen_memory.StateProjectionVerification is StateProjectionVerification
+    assert nextgen_memory.replay_state is replay_state
+    assert nextgen_memory.verify_state_projection is verify_state_projection
 
 
 def test_stored_slot_can_represent_corrupt_projection_for_diagnostics() -> None:
