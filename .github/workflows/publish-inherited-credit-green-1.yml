@@ -1,0 +1,73 @@
+name: Publish Inherited Credit GREEN 1
+
+on:
+  push:
+    branches: [bootstrap/inherited-credit-green-publish-1]
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/inherited-credit-ledger-v0
+          fetch-depth: 0
+      - name: Verify target head
+        run: test "$(git rev-parse HEAD)" = "8eac467709b46e638d2e0e30dc4b7627e4838da2"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install development tools
+        run: python -m pip install -e '.[dev]'
+      - name: Split the only overlong comprehension
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path("src/nextgen_memory/provenance_credit_persistence.py")
+          text = path.read_text(encoding="utf-8")
+          old = """        spaces = {
+              record.space_id
+              for record in (*direct_credits, *evaluations, *contributions, *observations, *accounting)
+          }
+          """
+          new = """        all_records = (
+              *direct_credits,
+              *evaluations,
+              *contributions,
+              *observations,
+              *accounting,
+          )
+          spaces = {record.space_id for record in all_records}
+          """
+          if text.count(old) != 1:
+              raise SystemExit("expected one overlong spaces comprehension")
+          path.write_text(text.replace(old, new), encoding="utf-8")
+          PY
+      - name: Apply mechanical Ruff fixes and formatting
+        run: |
+          ruff check src/nextgen_memory/provenance_credit_persistence.py tests/test_provenance_credit_persistence.py --fix
+          ruff format src/nextgen_memory/provenance_credit_persistence.py tests/test_provenance_credit_persistence.py
+      - name: Verify complete tree
+        run: |
+          ruff check .
+          python -m pytest tests/test_provenance_credit_persistence.py -q
+          python -m pytest -q
+          python -m compileall -q src
+          git diff --check
+      - name: Verify exact correction scope
+        run: |
+          printf '%s\n' src/nextgen_memory/provenance_credit_persistence.py tests/test_provenance_credit_persistence.py > /tmp/expected
+          git diff --name-only | sort > /tmp/actual
+          diff -u /tmp/expected /tmp/actual
+      - name: Commit and push fast-forward
+        run: |
+          git config user.name "NextGen Memory Automation"
+          git config user.email "actions@users.noreply.github.com"
+          git add src/nextgen_memory/provenance_credit_persistence.py tests/test_provenance_credit_persistence.py
+          git commit -m "style: finalize inherited credit persistence core"
+          git push origin HEAD:feat/inherited-credit-ledger-v0
