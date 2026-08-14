@@ -1,0 +1,46 @@
+name: Apply execution-ledger hardening
+
+on:
+  push:
+    branches: [bootstrap/apply-execution-ledger-hardening-0c7b]
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/execution-ledger-v0
+          fetch-depth: 0
+      - name: Verify target head has not moved
+        run: |
+          test "$(git rev-parse HEAD)" = "0c7b950c6a30634fd33dc8bfc1289c72958d79b5"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Fetch verified patch carrier
+        run: |
+          git fetch origin bootstrap/apply-execution-ledger-hardening-0c7b
+          for part in 00 01 02 03; do
+            git show "origin/bootstrap/apply-execution-ledger-hardening-0c7b:bootstrap/execution-ledger-hardening.patch.part${part}"
+          done > /tmp/execution-ledger-hardening.patch
+      - name: Apply verified patch
+        run: |
+          git apply --check /tmp/execution-ledger-hardening.patch
+          git apply --index /tmp/execution-ledger-hardening.patch
+      - name: Install project and development tools
+        run: python -m pip install -e '.[dev]'
+      - name: Lint
+        run: ruff check .
+      - name: Test
+        run: python -m pytest -q
+      - name: Commit and push one atomic change
+        run: |
+          git config user.name "NextGen Memory Automation"
+          git config user.email "actions@users.noreply.github.com"
+          git commit -m "fix: harden execution ledger integrity"
+          git push origin HEAD:feat/execution-ledger-v0
