@@ -1,0 +1,57 @@
+name: Record Bounded Inherited Reranker Core GREEN
+
+on:
+  push:
+    branches: [bootstrap/bounded-inherited-green-check-1]
+
+permissions:
+  contents: write
+
+jobs:
+  record:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      FEATURE_BRANCH: feat/bounded-inherited-reranker-v0
+      MARKER_BRANCH: bootstrap/bounded-inherited-green-check-1
+    steps:
+      - name: Capture exact feature SHA
+        id: target
+        run: |
+          SHA=$(gh api repos/${{ github.repository }}/git/ref/heads/$FEATURE_BRANCH --jq '.object.sha')
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.target.outputs.sha }}
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Verify core GREEN
+        run: |
+          set -euo pipefail
+          python -m pip install -e '.[dev]'
+          ruff check .
+          python -m pytest tests/test_bounded_inherited_reranker.py -q
+          python -m pytest -q
+          python -m compileall -q src
+          git diff --check
+      - name: Verify protected files remain unchanged
+        run: |
+          BASE=$(git merge-base HEAD origin/feat/learning-evidence-reader-v0)
+          test -z "$(git diff --name-only "$BASE...HEAD" -- src/nextgen_memory/utility_reranker.py src/nextgen_memory/neon_utility.py migrations)"
+      - name: Write machine-readable core marker
+        run: |
+          jq -n \
+            --arg feature_sha '${{ steps.target.outputs.sha }}' \
+            '{feature_branch:"feat/bounded-inherited-reranker-v0",feature_sha:$feature_sha,ruff:true,focused_tests:true,full_suite:true,compileall:true,direct_reranker_changed:false,node_utility_reader_changed:false,migration_changed:false,verified_at:(now|todate)}' > /tmp/marker.json
+          CONTENT=$(base64 -w0 /tmp/marker.json)
+          PATH_NAME='bootstrap/bounded-inherited-reranker-v0-core-green.json'
+          EXISTING_SHA=$(gh api "repos/${{ github.repository }}/contents/$PATH_NAME?ref=$MARKER_BRANCH" --jq '.sha' 2>/dev/null || true)
+          if [ -n "$EXISTING_SHA" ]; then
+            gh api --method PUT "repos/${{ github.repository }}/contents/$PATH_NAME" -f message='chore: record bounded inherited reranker core GREEN' -f branch="$MARKER_BRANCH" -f sha="$EXISTING_SHA" -f content="$CONTENT" >/dev/null
+          else
+            gh api --method PUT "repos/${{ github.repository }}/contents/$PATH_NAME" -f message='chore: record bounded inherited reranker core GREEN' -f branch="$MARKER_BRANCH" -f content="$CONTENT" >/dev/null
+          fi
