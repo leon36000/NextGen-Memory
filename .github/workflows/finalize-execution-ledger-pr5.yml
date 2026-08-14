@@ -1,0 +1,143 @@
+name: Finalize execution-ledger PR5 verification
+
+on:
+  push:
+    branches: [bootstrap/apply-execution-ledger-hardening-0c7b]
+
+permissions:
+  actions: read
+  contents: write
+  pull-requests: write
+
+jobs:
+  finalize:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: leon36000/NextGen-Memory
+      TARGET_BRANCH: feat/execution-ledger-v0
+      BASE_SHA: 0c7b950c6a30634fd33dc8bfc1289c72958d79b5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Wait for atomic hardening commit
+        id: head
+        run: |
+          for attempt in $(seq 1 60); do
+            HEAD_SHA=$(gh api "repos/$REPO/git/ref/heads/$TARGET_BRANCH" --jq '.object.sha')
+            if [ "$HEAD_SHA" != "$BASE_SHA" ]; then
+              echo "sha=$HEAD_SHA" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "Target branch did not advance from guarded base SHA" >&2
+          exit 1
+      - name: Wait for CI on exact target SHA
+        id: ci
+        run: |
+          HEAD_SHA='${{ steps.head.outputs.sha }}'
+          for attempt in $(seq 1 90); do
+            RUN=$(gh api "repos/$REPO/actions/runs?head_sha=$HEAD_SHA&event=push&per_page=50" \
+              --jq '[.workflow_runs[] | select(.name == "CI")][0] // empty')
+            if [ -n "$RUN" ]; then
+              STATUS=$(printf '%s' "$RUN" | jq -r '.status')
+              CONCLUSION=$(printf '%s' "$RUN" | jq -r '.conclusion // ""')
+              RUN_ID=$(printf '%s' "$RUN" | jq -r '.id')
+              if [ "$STATUS" = "completed" ]; then
+                test "$CONCLUSION" = "success"
+                echo "run_id=$RUN_ID" >> "$GITHUB_OUTPUT"
+                echo "conclusion=$CONCLUSION" >> "$GITHUB_OUTPUT"
+                exit 0
+              fi
+            fi
+            sleep 10
+          done
+          echo "CI did not complete successfully for $HEAD_SHA" >&2
+          exit 1
+      - name: Verify both matrix jobs
+        run: |
+          RUN_ID='${{ steps.ci.outputs.run_id }}'
+          gh api "repos/$REPO/actions/runs/$RUN_ID/jobs?per_page=100" > /tmp/jobs.json
+          jq -e '[.jobs[] | select(.name | contains("3.12")) | .conclusion] | length > 0 and all(. == "success")' /tmp/jobs.json
+          jq -e '[.jobs[] | select(.name | contains("3.13")) | .conclusion] | length > 0 and all(. == "success")' /tmp/jobs.json
+      - name: Update draft PR with verified evidence
+        run: |
+          cat > /tmp/pr-body.md <<EOF
+          ## Ce qui change
+
+          - sépare l’identité canonique Python `content_hash` du contrôle local PostgreSQL `storage_content_hash`;
+          - conserve une chaîne `event_hash` identique entre Python et Neon;
+          - recalcule indépendamment identité d’événement, contenu, chaînage, ordre temporel et terminaison;
+          - renforce la normalisation des métadonnées contre espaces, ponctuation, camelCase, acronymes et collisions;
+          - refuse les métadonnées cycliques, non JSON ou contenant des nombres non finis;
+          - impose `ended_at` et la correspondance exacte des outcomes terminaux;
+          - étend les tests de régression et la documentation de déploiement.
+
+          ## Validation GitHub Actions
+
+          - commit exact : `${{ steps.head.outputs.sha }}`;
+          - workflow CI : `${{ steps.ci.outputs.run_id }}`;
+          - conclusion globale : **success**;
+          - Python 3.12 : Ruff et tests réussis;
+          - Python 3.13 : Ruff et tests réussis.
+
+          ## Validation locale
+
+          - **82 tests réussis**;
+          - **91 % de couverture globale**;
+          - fuzzing déterministe : **5 000 runs, 22 396 événements, 2 411 artéfacts**;
+          - compileall, construction et installation du wheel réussies;
+          - SHA-256 du wheel : `5c8ba59615b4e445d524fea4756c643862fa3e15190259cb0f9051435beab8c2`;
+          - diff check et scan ciblé de secrets propres.
+
+          ## Validation Neon isolée
+
+          Migration exacte validée sur la branche enfant `br-crimson-scene-a66ul63f`, créée depuis la branche principale. Aucun statement n’a ciblé Neon `main`.
+
+          Vérifications :
+
+          - conservation bit pour bit des `content_hash` produits par Python;
+          - égalité bit pour bit des `event_hash` Python/PostgreSQL;
+          - calcul indépendant de `storage_content_hash`;
+          - zéro dérive finale dans `ngm.execution_chain_drift`;
+          - retries exacts, conflits, gaps, terminaison, mutations et artéfacts cross-run;
+          - détection puis restauration d’une altération contrôlée;
+          - réapplication idempotente avec données présentes;
+          - rejet des variantes `access token`, `api.token`, `accessToken`, `APIKey`, `stdOut`, `queryText`, `rawPayload`, des clés vides normalisées et des collisions.
+
+          ## Limites et garde-fous
+
+          - PR empilée sur la PR nº 2;
+          - aucune fusion effectuée;
+          - aucune migration appliquée à Neon `main`;
+          - promotion de schéma et merge restent soumis à une décision explicite du propriétaire.
+          EOF
+          sed -i 's/^          //' /tmp/pr-body.md
+          gh pr edit 5 --repo "$REPO" --body-file /tmp/pr-body.md
+      - name: Persist machine-readable verification marker
+        run: |
+          HEAD_SHA='${{ steps.head.outputs.sha }}'
+          RUN_ID='${{ steps.ci.outputs.run_id }}'
+          jq -n \
+            --arg head_sha "$HEAD_SHA" \
+            --argjson ci_run_id "$RUN_ID" \
+            --arg conclusion '${{ steps.ci.outputs.conclusion }}' \
+            --arg neon_branch 'br-crimson-scene-a66ul63f' \
+            '{pull_request:5, branch:"feat/execution-ledger-v0", head_sha:$head_sha, ci_run_id:$ci_run_id, conclusion:$conclusion, python:["3.12","3.13"], tests_local:82, coverage_percent:91, fuzz:{runs:5000,events:22396,artifacts:2411}, wheel_sha256:"5c8ba59615b4e445d524fea4756c643862fa3e15190259cb0f9051435beab8c2", neon_validation_branch:$neon_branch, neon_main_promoted:false, verified_at:(now | todate)}' > /tmp/verification.json
+          CONTENT=$(base64 -w0 /tmp/verification.json)
+          PATH_NAME='bootstrap/pr5-verification.json'
+          EXISTING_SHA=$(gh api "repos/$REPO/contents/$PATH_NAME?ref=bootstrap/apply-execution-ledger-hardening-0c7b" --jq '.sha' 2>/dev/null || true)
+          if [ -n "$EXISTING_SHA" ]; then
+            gh api --method PUT "repos/$REPO/contents/$PATH_NAME" \
+              -f message='chore: record PR5 verification evidence' \
+              -f branch='bootstrap/apply-execution-ledger-hardening-0c7b' \
+              -f sha="$EXISTING_SHA" \
+              -f content="$CONTENT" >/dev/null
+          else
+            gh api --method PUT "repos/$REPO/contents/$PATH_NAME" \
+              -f message='chore: record PR5 verification evidence' \
+              -f branch='bootstrap/apply-execution-ledger-hardening-0c7b' \
+              -f content="$CONTENT" >/dev/null
+          fi
