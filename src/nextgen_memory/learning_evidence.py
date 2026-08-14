@@ -52,25 +52,15 @@ class DirectUtilityEvidence:
     last_feedback_at: datetime | None
 
     def __post_init__(self) -> None:
-        feedback_count = _nonnegative_integer(
-            "feedback_count", self.feedback_count
-        )
-        positive_count = _nonnegative_integer(
-            "positive_count", self.positive_count
-        )
-        negative_count = _nonnegative_integer(
-            "negative_count", self.negative_count
-        )
+        feedback_count = _nonnegative_integer("feedback_count", self.feedback_count)
+        positive_count = _nonnegative_integer("positive_count", self.positive_count)
+        negative_count = _nonnegative_integer("negative_count", self.negative_count)
         if positive_count + negative_count > feedback_count:
             raise LearningEvidenceValidationError(
                 "positive and negative counts cannot exceed feedback_count"
             )
-        average_reward = _optional_finite_number(
-            "average_reward", self.average_reward
-        )
-        last_feedback_at = _optional_aware_datetime(
-            "last_feedback_at", self.last_feedback_at
-        )
+        average_reward = _optional_finite_number("average_reward", self.average_reward)
+        last_feedback_at = _optional_aware_datetime("last_feedback_at", self.last_feedback_at)
         if feedback_count == 0:
             if (
                 average_reward is not None
@@ -108,23 +98,15 @@ class InheritedUtilityEvidence:
     last_credit_at: datetime | None
 
     def __post_init__(self) -> None:
-        contribution_count = _nonnegative_integer(
-            "contribution_count", self.contribution_count
-        )
+        contribution_count = _nonnegative_integer("contribution_count", self.contribution_count)
         value_sum = _optional_finite_number("value_sum", self.value_sum)
-        absolute_value_sum = _optional_finite_number(
-            "absolute_value_sum", self.absolute_value_sum
-        )
-        standard_error_sum = _optional_finite_number(
-            "standard_error_sum", self.standard_error_sum
-        )
+        absolute_value_sum = _optional_finite_number("absolute_value_sum", self.absolute_value_sum)
+        standard_error_sum = _optional_finite_number("standard_error_sum", self.standard_error_sum)
         minimum_structural_confidence = _optional_probability(
             "minimum_structural_confidence",
             self.minimum_structural_confidence,
         )
-        last_credit_at = _optional_aware_datetime(
-            "last_credit_at", self.last_credit_at
-        )
+        last_credit_at = _optional_aware_datetime("last_credit_at", self.last_credit_at)
         optional_values = (
             value_sum,
             absolute_value_sum,
@@ -146,17 +128,13 @@ class InheritedUtilityEvidence:
             assert absolute_value_sum is not None
             assert standard_error_sum is not None
             if absolute_value_sum < 0:
-                raise LearningEvidenceValidationError(
-                    "absolute_value_sum must be non-negative"
-                )
+                raise LearningEvidenceValidationError("absolute_value_sum must be non-negative")
             if absolute_value_sum + 1e-12 < abs(value_sum):
                 raise LearningEvidenceValidationError(
                     "absolute_value_sum cannot be smaller than abs(value_sum)"
                 )
             if standard_error_sum < 0:
-                raise LearningEvidenceValidationError(
-                    "standard_error_sum must be non-negative"
-                )
+                raise LearningEvidenceValidationError("standard_error_sum must be non-negative")
         object.__setattr__(self, "contribution_count", contribution_count)
         object.__setattr__(self, "value_sum", value_sum)
         object.__setattr__(self, "absolute_value_sum", absolute_value_sum)
@@ -188,13 +166,9 @@ class NodeLearningEvidence:
         if not isinstance(self.memory_id, UUID):
             raise LearningEvidenceValidationError("memory_id must be a UUID")
         if not isinstance(self.direct, DirectUtilityEvidence):
-            raise LearningEvidenceValidationError(
-                "direct must be DirectUtilityEvidence"
-            )
+            raise LearningEvidenceValidationError("direct must be DirectUtilityEvidence")
         if not isinstance(self.inherited, InheritedUtilityEvidence):
-            raise LearningEvidenceValidationError(
-                "inherited must be InheritedUtilityEvidence"
-            )
+            raise LearningEvidenceValidationError("inherited must be InheritedUtilityEvidence")
 
     @property
     def has_direct_evidence(self) -> bool:
@@ -242,9 +216,7 @@ class NeonLearningEvidenceReader:
         snapshots: dict[UUID, NodeLearningEvidence] = {}
         for raw_row in self._cursor.fetchall():
             if not isinstance(raw_row, Mapping):
-                raise LearningEvidenceReadConflictError(
-                    "learning evidence row must be a mapping"
-                )
+                raise LearningEvidenceReadConflictError("learning evidence row must be a mapping")
             missing_columns = _REQUIRED_COLUMNS.difference(raw_row)
             if missing_columns:
                 raise LearningEvidenceReadConflictError(
@@ -330,9 +302,7 @@ class NeonLearningEvidenceReader:
             raise LearningEvidenceReadConflictError(
                 "learning evidence is missing requested memories"
             )
-        return MappingProxyType(
-            {memory_id: snapshots[memory_id] for memory_id in normalized_ids}
-        )
+        return MappingProxyType({memory_id: snapshots[memory_id] for memory_id in normalized_ids})
 
 
 _REQUIRED_COLUMNS = frozenset(
@@ -356,37 +326,27 @@ _REQUIRED_COLUMNS = frozenset(
 
 def _normalize_memory_ids(values: object) -> tuple[UUID, ...]:
     if isinstance(values, (str, bytes)) or not isinstance(values, Iterable):
-        raise LearningEvidenceValidationError(
-            "memory_ids must be an iterable of UUID values"
-        )
+        raise LearningEvidenceValidationError("memory_ids must be an iterable of UUID values")
     normalized: set[UUID] = set()
     for value in values:
         if not isinstance(value, UUID):
-            raise LearningEvidenceValidationError(
-                "memory_ids must contain UUID values"
-            )
+            raise LearningEvidenceValidationError("memory_ids must contain UUID values")
         normalized.add(value)
     return tuple(sorted(normalized, key=str))
 
 
 def _nonnegative_integer(name: str, value: object) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-        raise LearningEvidenceValidationError(
-            f"{name} must be a non-negative integer"
-        )
+        raise LearningEvidenceValidationError(f"{name} must be a non-negative integer")
     return value
 
 
 def _finite_number(name: str, value: object) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise LearningEvidenceValidationError(
-            f"{name} must be a finite number"
-        )
+        raise LearningEvidenceValidationError(f"{name} must be a finite number")
     normalized = float(value)
     if not isfinite(normalized):
-        raise LearningEvidenceValidationError(
-            f"{name} must be a finite number"
-        )
+        raise LearningEvidenceValidationError(f"{name} must be a finite number")
     return normalized
 
 
@@ -401,25 +361,17 @@ def _optional_probability(name: str, value: object) -> float | None:
         return None
     normalized = _finite_number(name, value)
     if not 0.0 <= normalized <= 1.0:
-        raise LearningEvidenceValidationError(
-            f"{name} must be between zero and one"
-        )
+        raise LearningEvidenceValidationError(f"{name} must be between zero and one")
     return normalized
 
 
-def _optional_aware_datetime(
-    name: str, value: object
-) -> datetime | None:
+def _optional_aware_datetime(name: str, value: object) -> datetime | None:
     if value is None:
         return None
     if not isinstance(value, datetime):
-        raise LearningEvidenceValidationError(
-            f"{name} must be a datetime or null"
-        )
+        raise LearningEvidenceValidationError(f"{name} must be a datetime or null")
     if value.tzinfo is None or value.utcoffset() is None:
-        raise LearningEvidenceValidationError(
-            f"{name} must be timezone-aware"
-        )
+        raise LearningEvidenceValidationError(f"{name} must be timezone-aware")
     return value
 
 
@@ -434,9 +386,7 @@ def _parse_uuid(name: str, value: object) -> UUID:
 
 def _parse_integer(name: str, value: object) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
-        raise LearningEvidenceReadConflictError(
-            f"learning evidence {name} is not an integer"
-        )
+        raise LearningEvidenceReadConflictError(f"learning evidence {name} is not an integer")
     return value
 
 
@@ -444,9 +394,7 @@ def _parse_optional_number(name: str, value: object) -> float | None:
     if value is None:
         return None
     if isinstance(value, bool):
-        raise LearningEvidenceReadConflictError(
-            f"learning evidence {name} is not numeric"
-        )
+        raise LearningEvidenceReadConflictError(f"learning evidence {name} is not numeric")
     try:
         normalized = float(value)
     except (TypeError, ValueError) as error:
@@ -454,9 +402,7 @@ def _parse_optional_number(name: str, value: object) -> float | None:
             f"learning evidence {name} is not numeric"
         ) from error
     if not isfinite(normalized):
-        raise LearningEvidenceReadConflictError(
-            f"learning evidence {name} is not finite"
-        )
+        raise LearningEvidenceReadConflictError(f"learning evidence {name} is not finite")
     return normalized
 
 
@@ -473,11 +419,7 @@ def _parse_optional_datetime(name: str, value: object) -> datetime | None:
                 f"learning evidence {name} is not a datetime"
             ) from error
     else:
-        raise LearningEvidenceReadConflictError(
-            f"learning evidence {name} is not a datetime"
-        )
+        raise LearningEvidenceReadConflictError(f"learning evidence {name} is not a datetime")
     if parsed.tzinfo is None or parsed.utcoffset() is None:
-        raise LearningEvidenceReadConflictError(
-            f"learning evidence {name} is not timezone-aware"
-        )
+        raise LearningEvidenceReadConflictError(f"learning evidence {name} is not timezone-aware")
     return parsed
