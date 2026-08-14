@@ -3,18 +3,18 @@ from __future__ import annotations
 from uuid import UUID, uuid5
 
 import pytest
+
+from nextgen_memory.causal_credit import (
+    AttributedMemoryCredit,
+    CreditAssignmentResult,
+    CreditVerdict,
+)
 from nextgen_memory.causal_feedback import (
     CAUSAL_FEEDBACK_INSERT_SQL,
     CAUSAL_FEEDBACK_SELECT_SQL,
     CausalFeedbackConflictError,
     CausalFeedbackWriter,
     build_memory_feedback_records,
-)
-
-from nextgen_memory.causal_credit import (
-    AttributedMemoryCredit,
-    CreditAssignmentResult,
-    CreditVerdict,
 )
 
 SPACE_ID = UUID("279c0edc-e75d-5c7e-a857-2f461b4ba61e")
