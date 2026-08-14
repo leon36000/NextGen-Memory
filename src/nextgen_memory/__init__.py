@@ -37,12 +37,35 @@ from .domain import (
     TemporalIntent,
 )
 from .eligibility import EligibilityResult, evaluate_candidate_eligibility
+from .interaction_credit import (
+    InteractionCreditAbstentionReason,
+    InteractionCreditConfig,
+    InteractionCreditResult,
+    InteractionEstimationMode,
+    InteractionTrial,
+    MemoryDependencyGraph,
+    MemoryInteractionAbstention,
+    MemoryInteractionCredit,
+    PairInteractionKind,
+    PrecedenceShapleyEstimator,
+)
+from .interaction_planner import (
+    AdaptiveOrderPlanner,
+    AdaptiveOrderPlannerConfig,
+    CoalitionRequest,
+    CoalitionRequestReason,
+    InteractionOrderPlan,
+)
 from .mongodb_retrieval import (
     MongoResearchIndexConfig,
     MongoResearchRetriever,
     build_research_hybrid_pipeline,
 )
 from .neon_utility import NODE_UTILITY_SELECT_SQL, NodeUtilityReader
+from .pairwise_interactions import (
+    PairInteractionEstimate,
+    PairwiseInteractionEstimator,
+)
 from .retrieval import ResearchRetrievalHit, ResearchRetrievalQuery
 from .retrieval_telemetry import (
     RETRIEVAL_EVENT_INSERT_SQL,
@@ -73,11 +96,15 @@ __all__ = [
     "CREDIT_TARGETS_SELECT_SQL",
     "NODE_UTILITY_SELECT_SQL",
     "RETRIEVAL_EVENT_INSERT_SQL",
+    "AdaptiveOrderPlanner",
+    "AdaptiveOrderPlannerConfig",
     "AttributedMemoryCredit",
     "CausalCreditAssigner",
     "CausalCreditConfig",
     "CausalFeedbackConflictError",
     "CausalFeedbackWriter",
+    "CoalitionRequest",
+    "CoalitionRequestReason",
     "CounterfactualTrial",
     "CreditAbstention",
     "CreditAbstentionReason",
@@ -92,13 +119,26 @@ __all__ = [
     "ExpertAllocation",
     "ExpertKey",
     "InMemoryRoutingDecisionSink",
+    "InteractionCreditAbstentionReason",
+    "InteractionCreditConfig",
+    "InteractionCreditResult",
+    "InteractionEstimationMode",
+    "InteractionOrderPlan",
+    "InteractionTrial",
     "MemoryCandidate",
+    "MemoryDependencyGraph",
     "MemoryFeedbackRecord",
+    "MemoryInteractionAbstention",
+    "MemoryInteractionCredit",
     "MongoResearchIndexConfig",
     "MongoResearchRetriever",
     "NodeUtilityReader",
     "OutcomeMeasurement",
+    "PairInteractionEstimate",
+    "PairInteractionKind",
+    "PairwiseInteractionEstimator",
     "PlanPhase",
+    "PrecedenceShapleyEstimator",
     "RerankedMemory",
     "ResearchRetrievalHit",
     "ResearchRetrievalQuery",
