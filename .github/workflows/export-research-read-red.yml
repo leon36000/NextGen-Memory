@@ -1,0 +1,21 @@
+name: Export Research Read Pipeline RED workspace
+
+on:
+  push:
+    branches: [bootstrap/export-research-read-red]
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Upload exact source tree
+        uses: actions/upload-artifact@v4
+        with:
+          name: nextgen-memory-research-read-red
+          path: .
+          include-hidden-files: true
+          retention-days: 1
