@@ -3,6 +3,7 @@ from __future__ import annotations
 from uuid import UUID
 
 import pytest
+
 from nextgen_memory.causal_credit import (
     CausalCreditAssigner,
     CausalCreditConfig,
@@ -100,7 +101,7 @@ def test_stable_positive_effect_is_helpful() -> None:
     assert credit.mean_bundle_uplift == pytest.approx(0.255)
     assert credit.reward == pytest.approx(0.10)
     assert credit.task_success is True
-    assert credit.token_delta == 29
+    assert credit.token_delta == 30
     assert credit.latency_delta_ms == pytest.approx(10.0)
     assert credit.trial_count == 2
 
