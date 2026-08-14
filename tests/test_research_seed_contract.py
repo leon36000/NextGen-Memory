@@ -3,7 +3,6 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-
 SEED_PATH = Path("migrations/neon/0003_research_sources_seed.sql")
 EXPECTED_MEMORY_IDS = {
     "2d6dc3f4-6fbb-51fb-b271-3ec5d70b70fa",
@@ -37,5 +36,5 @@ def test_research_seed_contains_exactly_the_atlas_memory_ids() -> None:
         )
     )
 
-    assert EXPECTED_MEMORY_IDS <= ids
+    assert ids >= EXPECTED_MEMORY_IDS
     assert len(ids - EXPECTED_MEMORY_IDS) == 2  # project space and source principal

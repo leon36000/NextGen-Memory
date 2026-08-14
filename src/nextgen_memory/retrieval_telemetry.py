@@ -10,7 +10,6 @@ from uuid import NAMESPACE_URL, UUID, uuid5
 
 from .retrieval import ResearchRetrievalHit
 
-
 RETRIEVAL_EVENT_INSERT_SQL = """
 INSERT INTO ngm.retrieval_events (
     id,

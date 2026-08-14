@@ -36,6 +36,7 @@ from .telemetry import (
 )
 
 __all__ = [
+    "RETRIEVAL_EVENT_INSERT_SQL",
     "DeterministicMemoryRouter",
     "EligibilityResult",
     "EvidenceNeed",
@@ -47,7 +48,6 @@ __all__ = [
     "MongoResearchIndexConfig",
     "MongoResearchRetriever",
     "PlanPhase",
-    "RETRIEVAL_EVENT_INSERT_SQL",
     "ResearchRetrievalHit",
     "ResearchRetrievalQuery",
     "RetrievalEvent",

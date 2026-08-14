@@ -9,7 +9,6 @@ from nextgen_memory.retrieval_telemetry import (
     build_retrieval_events,
 )
 
-
 SPACE_ID = UUID("279c0edc-e75d-5c7e-a857-2f461b4ba61e")
 DECISION_ID = UUID("29c9cc3c-8c2e-5d7d-92ff-cc9071fd9cb5")
 MEMORY_ID = UUID("4b84a18f-056f-5be9-bd27-a33ef835d29c")

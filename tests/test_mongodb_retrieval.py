@@ -11,7 +11,6 @@ from nextgen_memory.mongodb_retrieval import (
 )
 from nextgen_memory.retrieval import ResearchRetrievalQuery
 
-
 SPACE_ID = UUID("279c0edc-e75d-5c7e-a857-2f461b4ba61e")
 
 
