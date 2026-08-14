@@ -34,6 +34,7 @@ from .mongodb_retrieval import (
     MongoResearchRetriever,
     build_research_hybrid_pipeline,
 )
+from .neon_utility import NODE_UTILITY_SELECT_SQL, NodeUtilityReader
 from .retrieval import ResearchRetrievalHit, ResearchRetrievalQuery
 from .retrieval_telemetry import (
     RETRIEVAL_EVENT_INSERT_SQL,
@@ -47,8 +48,19 @@ from .telemetry import (
     RoutingDecisionSink,
     RoutingTelemetryRecord,
 )
+from .utility_reranker import (
+    RerankedMemory,
+    UtilityAwareReranker,
+    UtilityAwareResearchRetriever,
+    UtilityEvidence,
+    UtilityRerankCandidate,
+    UtilityRerankerConfig,
+    UtilityScoreBreakdown,
+    UtilitySnapshotProvider,
+)
 
 __all__ = [
+    "NODE_UTILITY_SELECT_SQL",
     "RETRIEVAL_EVENT_INSERT_SQL",
     "CompiledEvidence",
     "ContextBudgetError",
@@ -68,9 +80,11 @@ __all__ = [
     "MemoryCandidate",
     "MongoResearchIndexConfig",
     "MongoResearchRetriever",
+    "NodeUtilityReader",
     "OmissionReason",
     "OmittedEvidence",
     "PlanPhase",
+    "RerankedMemory",
     "ResearchRetrievalHit",
     "ResearchRetrievalQuery",
     "RetrievalEvent",
@@ -85,6 +99,13 @@ __all__ = [
     "Sensitivity",
     "TaskKind",
     "TemporalIntent",
+    "UtilityAwareReranker",
+    "UtilityAwareResearchRetriever",
+    "UtilityEvidence",
+    "UtilityRerankCandidate",
+    "UtilityRerankerConfig",
+    "UtilityScoreBreakdown",
+    "UtilitySnapshotProvider",
     "build_research_hybrid_pipeline",
     "build_retrieval_events",
     "evaluate_candidate_eligibility",

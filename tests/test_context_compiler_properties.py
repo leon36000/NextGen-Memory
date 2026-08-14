@@ -5,9 +5,9 @@ import json
 import random
 from uuid import UUID
 
-import nextgen_memory
 import pytest
 
+import nextgen_memory
 from nextgen_memory.context_compiler import (
     ContextBudgetError,
     ContextCompiler,
