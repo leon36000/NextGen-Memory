@@ -3,14 +3,14 @@ from __future__ import annotations
 from uuid import UUID
 
 import pytest
+
+from nextgen_memory.retrieval import ResearchRetrievalHit
 from nextgen_memory.utility_reranker import (
     UtilityAwareReranker,
     UtilityEvidence,
     UtilityRerankCandidate,
     UtilityRerankerConfig,
 )
-
-from nextgen_memory.retrieval import ResearchRetrievalHit
 
 MEMORY_A = UUID("00000000-0000-5000-8000-000000000001")
 MEMORY_B = UUID("00000000-0000-5000-8000-000000000002")
