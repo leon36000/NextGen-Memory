@@ -1,5 +1,26 @@
 """Public API for the NextGen Memory kernel."""
 
+from .causal_credit import (
+    AttributedMemoryCredit,
+    CausalCreditAssigner,
+    CausalCreditConfig,
+    CounterfactualTrial,
+    CreditAbstention,
+    CreditAbstentionReason,
+    CreditAssignmentResult,
+    CreditTarget,
+    CreditVerdict,
+    OutcomeMeasurement,
+)
+from .causal_feedback import (
+    CAUSAL_FEEDBACK_INSERT_SQL,
+    CAUSAL_FEEDBACK_SELECT_SQL,
+    CausalFeedbackConflictError,
+    CausalFeedbackWriter,
+    MemoryFeedbackRecord,
+    build_memory_feedback_records,
+)
+from .credit_targets import CREDIT_TARGETS_SELECT_SQL, CreditTargetReader
 from .domain import (
     EvidenceNeed,
     ExactnessNeed,
@@ -47,8 +68,23 @@ from .utility_reranker import (
 )
 
 __all__ = [
+    "CAUSAL_FEEDBACK_INSERT_SQL",
+    "CAUSAL_FEEDBACK_SELECT_SQL",
+    "CREDIT_TARGETS_SELECT_SQL",
     "NODE_UTILITY_SELECT_SQL",
     "RETRIEVAL_EVENT_INSERT_SQL",
+    "AttributedMemoryCredit",
+    "CausalCreditAssigner",
+    "CausalCreditConfig",
+    "CausalFeedbackConflictError",
+    "CausalFeedbackWriter",
+    "CounterfactualTrial",
+    "CreditAbstention",
+    "CreditAbstentionReason",
+    "CreditAssignmentResult",
+    "CreditTarget",
+    "CreditTargetReader",
+    "CreditVerdict",
     "DeterministicMemoryRouter",
     "EligibilityResult",
     "EvidenceNeed",
@@ -57,9 +93,11 @@ __all__ = [
     "ExpertKey",
     "InMemoryRoutingDecisionSink",
     "MemoryCandidate",
+    "MemoryFeedbackRecord",
     "MongoResearchIndexConfig",
     "MongoResearchRetriever",
     "NodeUtilityReader",
+    "OutcomeMeasurement",
     "PlanPhase",
     "RerankedMemory",
     "ResearchRetrievalHit",
@@ -82,6 +120,7 @@ __all__ = [
     "UtilityRerankerConfig",
     "UtilityScoreBreakdown",
     "UtilitySnapshotProvider",
+    "build_memory_feedback_records",
     "build_research_hybrid_pipeline",
     "build_retrieval_events",
     "evaluate_candidate_eligibility",
