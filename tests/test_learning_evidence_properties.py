@@ -62,9 +62,7 @@ def _generated_rows(
                 direct_count - positive_count,
             )
             direct_average: object = round(rng.uniform(-1.0, 1.0), 8)
-            last_direct: object = BASE_TIME + timedelta(
-                seconds=seed + index
-            )
+            last_direct: object = BASE_TIME + timedelta(seconds=seed + index)
         else:
             positive_count = 0
             negative_count = 0
@@ -83,9 +81,7 @@ def _generated_rows(
                 rng.uniform(0.0, 1.0),
                 8,
             )
-            last_inherited: object = BASE_TIME + timedelta(
-                seconds=seed + index + 1
-            )
+            last_inherited: object = BASE_TIME + timedelta(seconds=seed + index + 1)
         else:
             inherited_value = None
             inherited_absolute = None
@@ -134,9 +130,7 @@ def _serialize(result: Mapping[UUID, Any]) -> str:
                 "value_sum": snapshot.inherited.value_sum,
                 "absolute_value_sum": snapshot.inherited.absolute_value_sum,
                 "standard_error_sum": snapshot.inherited.standard_error_sum,
-                "minimum_structural_confidence": (
-                    snapshot.inherited.minimum_structural_confidence
-                ),
+                "minimum_structural_confidence": (snapshot.inherited.minimum_structural_confidence),
                 "last_credit_at": (
                     snapshot.inherited.last_credit_at.isoformat()
                     if snapshot.inherited.last_credit_at is not None
@@ -173,9 +167,7 @@ def test_5000_generated_reads_are_order_invariant_and_privacy_safe() -> None:
         assert first == second
         assert tuple(first) == tuple(sorted(set(memory_ids), key=str))
         assert _serialize(first) == _serialize(second)
-        assert first_cursor.calls[0][1]["memory_ids"] == list(
-            sorted(set(memory_ids), key=str)
-        )
+        assert first_cursor.calls[0][1]["memory_ids"] == list(sorted(set(memory_ids), key=str))
 
         for snapshot in first.values():
             assert snapshot.space_id == SPACE
@@ -195,9 +187,7 @@ def test_5000_generated_reads_are_order_invariant_and_privacy_safe() -> None:
                 inherited_observed += 1
                 assert snapshot.inherited.value_sum is not None
                 assert snapshot.inherited.absolute_value_sum is not None
-                assert snapshot.inherited.absolute_value_sum >= abs(
-                    snapshot.inherited.value_sum
-                )
+                assert snapshot.inherited.absolute_value_sum >= abs(snapshot.inherited.value_sum)
             else:
                 inherited_neutral += 1
                 assert snapshot.inherited.value_sum is None
