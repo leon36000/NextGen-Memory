@@ -1,0 +1,47 @@
+name: Publish Provenance Credit GREEN 1
+
+on:
+  push:
+    branches: [bootstrap/provenance-credit-green-publish-1]
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/provenance-credit-v0
+          fetch-depth: 0
+      - name: Verify target head
+        run: test "$(git rev-parse HEAD)" = "a6036465368e6e3d87db93c420d738760d60af0b"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install development tools
+        run: python -m pip install -e '.[dev]'
+      - name: Apply mechanical Ruff fixes
+        run: |
+          ruff check src/nextgen_memory/provenance_credit.py tests/test_provenance_credit.py --fix
+          ruff format src/nextgen_memory/provenance_credit.py tests/test_provenance_credit.py
+      - name: Verify complete tree
+        run: |
+          ruff check .
+          python -m pytest -q
+          python -m compileall -q src
+          git diff --check
+      - name: Verify exact scope
+        run: |
+          printf '%s\n' src/nextgen_memory/provenance_credit.py tests/test_provenance_credit.py > /tmp/expected
+          git diff --name-only | sort > /tmp/actual
+          diff -u /tmp/expected /tmp/actual
+      - name: Commit and push fast-forward
+        run: |
+          git config user.name "NextGen Memory Automation"
+          git config user.email "actions@users.noreply.github.com"
+          git add src/nextgen_memory/provenance_credit.py tests/test_provenance_credit.py
+          git commit -m "style: finalize provenance credit core"
+          git push origin HEAD:feat/provenance-credit-v0
