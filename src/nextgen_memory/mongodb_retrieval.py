@@ -14,7 +14,7 @@ from .retrieval import ResearchRetrievalHit, ResearchRetrievalQuery
 class MongoResearchIndexConfig:
     database: str = "nextgen_memory"
     collection: str = "research_sources"
-    lexical_index: str = "rag_lexical_v1"
+    lexical_index: str = "rag_lexical_v2"
     vector_index: str = "rag_autoembed_v1"
     vector_path: str = "rag_text"
     lexical_paths: tuple[str, ...] = (
@@ -69,13 +69,32 @@ def build_research_hybrid_pipeline(
                             {
                                 "$search": {
                                     "index": config.lexical_index,
-                                    "text": {
-                                        "query": query.text,
-                                        "path": list(config.lexical_paths),
+                                    "compound": {
+                                        "must": [
+                                            {
+                                                "text": {
+                                                    "query": query.text,
+                                                    "path": list(config.lexical_paths),
+                                                }
+                                            }
+                                        ],
+                                        "filter": [
+                                            {
+                                                "equals": {
+                                                    "path": "space_id",
+                                                    "value": str(query.space_id),
+                                                }
+                                            },
+                                            {
+                                                "equals": {
+                                                    "path": "status",
+                                                    "value": config.active_status,
+                                                }
+                                            },
+                                        ],
                                     },
                                 }
                             },
-                            {"$match": scope_filter},
                             {"$limit": branch_limit},
                         ],
                     }
