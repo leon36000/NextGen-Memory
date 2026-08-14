@@ -10,6 +10,7 @@ def migration_sql() -> str:
 
 def test_migration_creates_four_separate_append_only_evidence_tables() -> None:
     sql = migration_sql()
+    compact_sql = " ".join(sql.split())
 
     for table in (
         "ngm.provenance_credit_evaluations",
@@ -19,7 +20,7 @@ def test_migration_creates_four_separate_append_only_evidence_tables() -> None:
     ):
         assert f"CREATE TABLE IF NOT EXISTS {table}" in sql
         trigger_name = table.removeprefix("ngm.") + "_immutable"
-        assert f"DROP TRIGGER IF EXISTS {trigger_name} ON {table}" in sql
+        assert f"DROP TRIGGER IF EXISTS {trigger_name} ON {table}" in compact_sql
         assert f"CREATE TRIGGER {trigger_name}" in sql
         assert "ngm.reject_immutable_mutation()" in sql
 

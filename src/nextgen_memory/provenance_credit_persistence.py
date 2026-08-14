@@ -56,6 +56,7 @@ INSERT INTO ngm.provenance_credit_evaluations (
     policy_version,
     status,
     result_hash,
+    accounting_id,
     content_hash
 ) VALUES (
     %(id)s,
@@ -74,6 +75,7 @@ INSERT INTO ngm.provenance_credit_evaluations (
     %(policy_version)s,
     %(status)s,
     %(result_hash)s,
+    %(accounting_id)s,
     %(content_hash)s
 )
 ON CONFLICT (space_id, id) DO NOTHING
@@ -97,6 +99,7 @@ SELECT
     policy_version,
     status,
     result_hash,
+    accounting_id,
     content_hash
 FROM ngm.provenance_credit_evaluations
 WHERE space_id = %(space_id)s
@@ -275,6 +278,7 @@ class ProvenanceCreditEvaluationRecord:
     policy_version: str
     status: str
     result_hash: str
+    accounting_id: UUID
     content_hash: str
 
     def __post_init__(self) -> None:
@@ -284,6 +288,7 @@ class ProvenanceCreditEvaluationRecord:
             "direct_credit_id",
             "evidence_group_id",
             "root_node_id",
+            "accounting_id",
         ):
             _require_uuid(name, getattr(self, name))
         source_kind = _required_text("source_kind", self.source_kind)
@@ -334,6 +339,7 @@ class ProvenanceCreditEvaluationRecord:
             "policy_version": self.policy_version,
             "status": self.status,
             "result_hash": self.result_hash,
+            "accounting_id": self.accounting_id,
             "content_hash": self.content_hash,
         }
 
@@ -967,6 +973,7 @@ def build_provenance_credit_batch(
             "policy_fingerprint": policy_fingerprint,
             "policy_version": config.policy_version,
             "status": "propagated" if contribution_records else "abstained",
+            "accounting_id": str(accounting_record.id),
         }
         result_hash = _hash_payload(
             {
@@ -998,6 +1005,7 @@ def build_provenance_credit_batch(
                 policy_version=config.policy_version,
                 status=evaluation_base["status"],
                 result_hash=result_hash,
+                accounting_id=accounting_record.id,
                 content_hash=_hash_payload(evaluation_payload),
             )
         )
@@ -1257,6 +1265,7 @@ def _normalize_evaluation_row(row: Mapping[str, Any]) -> dict[str, Any]:
         "policy_version": str(row["policy_version"]),
         "status": str(row["status"]),
         "result_hash": str(row["result_hash"]),
+        "accounting_id": _parse_uuid("accounting_id", row["accounting_id"]),
         "content_hash": str(row["content_hash"]),
     }
 
