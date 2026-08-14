@@ -140,9 +140,13 @@ class ExecutionEvent:
 
     def __post_init__(self) -> None:
         if not isinstance(self.kind, ExecutionEventKind):
-            raise ExecutionLedgerValidationError("kind must be an ExecutionEventKind")
+            raise ExecutionLedgerValidationError(
+                "kind must be an ExecutionEventKind"
+            )
         if not isinstance(self.outcome, ExecutionOutcome):
-            raise ExecutionLedgerValidationError("outcome must be an ExecutionOutcome")
+            raise ExecutionLedgerValidationError(
+                "outcome must be an ExecutionOutcome"
+            )
         if self.sequence <= 0:
             raise ExecutionLedgerValidationError("sequence must be positive")
         if self.sequence == 1:
@@ -153,7 +157,10 @@ class ExecutionEvent:
                 raise ExecutionLedgerValidationError(
                     "first execution event must be run_started without a predecessor"
                 )
-        elif self.previous_event_id is None or self.kind is ExecutionEventKind.RUN_STARTED:
+        elif (
+            self.previous_event_id is None
+            or self.kind is ExecutionEventKind.RUN_STARTED
+        ):
             raise ExecutionLedgerValidationError(
                 "non-initial events require a predecessor and cannot be run_started"
             )
@@ -181,7 +188,10 @@ class ExecutionEvent:
             raise ExecutionLedgerValidationError(
                 "run_started must use unknown outcome"
             )
-        if _ACTION_RE.fullmatch(self.action_key) is None or not self.idempotency_key.strip():
+        if (
+            _ACTION_RE.fullmatch(self.action_key) is None
+            or not self.idempotency_key.strip()
+        ):
             raise ExecutionLedgerValidationError(
                 "action_key or event idempotency_key is invalid"
             )
@@ -270,7 +280,9 @@ def _metadata_key_is_forbidden(key: str) -> bool:
     return bool(segments & _FORBIDDEN_METADATA_KEYS)
 
 
-def _freeze_metadata(metadata: Mapping[str, Any] | None) -> Mapping[str, Any]:
+def _freeze_metadata(
+    metadata: Mapping[str, Any] | None,
+) -> Mapping[str, Any]:
     source: Any = {} if metadata is None else metadata
     frozen = _freeze_json(source, set(), "metadata")
     if not isinstance(frozen, Mapping):
@@ -306,7 +318,8 @@ def _freeze_json(value: Any, active_ids: set[int], path: str) -> Any:
                     )
                 if stored_key in frozen or normalized_key in normalized_keys:
                     raise ExecutionLedgerValidationError(
-                        f"duplicate metadata key after normalization: {path}.{stored_key}"
+                        "duplicate metadata key after normalization: "
+                        f"{path}.{stored_key}"
                     )
                 if _metadata_key_is_forbidden(stored_key):
                     raise ExecutionLedgerValidationError(
@@ -314,7 +327,9 @@ def _freeze_json(value: Any, active_ids: set[int], path: str) -> Any:
                     )
                 normalized_keys.add(normalized_key)
                 frozen[stored_key] = _freeze_json(
-                    nested, active_ids, f"{path}.{stored_key}"
+                    nested,
+                    active_ids,
+                    f"{path}.{stored_key}",
                 )
             return MappingProxyType(frozen)
         finally:
@@ -336,7 +351,7 @@ def _freeze_json(value: Any, active_ids: set[int], path: str) -> Any:
     if isinstance(value, float):
         if not isfinite(value):
             raise ExecutionLedgerValidationError(
-                "metadata floats must be finite"
+                "metadata numbers must be finite JSON numbers"
             )
         return value
     raise ExecutionLedgerValidationError(
@@ -388,13 +403,11 @@ class AppendOnlyExecutionLedger:
 
     def __init__(self) -> None:
         self._runs: dict[UUID, ExecutionRun] = {}
-        self._run_idempotency: dict[tuple[UUID, str], ExecutionRun] = {}
+        self._run_keys: dict[tuple[UUID, str], UUID] = {}
         self._events: dict[UUID, list[ExecutionEvent]] = {}
-        self._event_idempotency: dict[tuple[UUID, str], ExecutionEvent] = {}
+        self._event_keys: dict[tuple[UUID, str], ExecutionEvent] = {}
         self._artifacts: dict[UUID, list[ExecutionArtifact]] = {}
-        self._artifact_ordinals: dict[
-            tuple[UUID, int], ExecutionArtifact
-        ] = {}
+        self._artifact_ordinals: dict[tuple[UUID, int], ExecutionArtifact] = {}
 
     def begin(
         self,
@@ -411,14 +424,14 @@ class AppendOnlyExecutionLedger:
         session_key: str | None = None,
         metadata: Mapping[str, Any] | None = None,
     ) -> ExecutionRun:
-        _require_aware("started_at", started_at)
-        _require_hash("request_hash", request_hash)
         repository_key = repository_key.strip()
         idempotency_key = idempotency_key.strip()
         if not repository_key or not idempotency_key:
             raise ExecutionLedgerValidationError(
-                "repository_key and run idempotency_key are required"
+                "repository_key and idempotency_key are required"
             )
+        _require_aware("started_at", started_at)
+        _require_hash("request_hash", request_hash)
         frozen_metadata = _freeze_metadata(metadata)
         run_id = uuid5(space_id, f"execution-run:{idempotency_key}")
         payload = {
@@ -440,10 +453,10 @@ class AppendOnlyExecutionLedger:
             space_id=space_id,
             source_id=source_id,
             repository_key=repository_key,
-            branch=_normalize_optional(branch),
-            base_revision=_normalize_optional(base_revision),
-            task_key=_normalize_optional(task_key),
-            session_key=_normalize_optional(session_key),
+            branch=payload["branch"],
+            base_revision=payload["base_revision"],
+            task_key=payload["task_key"],
+            session_key=payload["session_key"],
             started_at=started_at,
             idempotency_key=idempotency_key,
             request_hash=request_hash,
@@ -451,17 +464,404 @@ class AppendOnlyExecutionLedger:
             metadata=frozen_metadata,
         )
         key = (space_id, idempotency_key)
-        existing = self._run_idempotency.get(key)
-        if existing is not None:
-            if existing.run_id != candidate.run_id or existing.content_hash != candidate.content_hash:
+        existing_id = self._run_keys.get(key)
+        if existing_id is not None:
+            existing = self._runs[existing_id]
+            if existing.content_hash != candidate.content_hash:
                 raise ExecutionLedgerConflictError(
-                    "run idempotency_key was reused with different immutable content"
+                    "run idempotency key was reused with different immutable content"
                 )
             return existing
+
         self._runs[run_id] = candidate
-        self._run_idempotency[key] = candidate
+        self._run_keys[key] = run_id
         self._events[run_id] = []
         self._artifacts[run_id] = []
-
-        self._append start_event with input_hash = run request_hash.
+        self._append_event(
+            run=candidate,
+            kind=ExecutionEventKind.RUN_STARTED,
+            outcome=ExecutionOutcome.UNKNOWN,
+            action_key="run.start",
+            started_at=started_at,
+            ended_at=None,
+            idempotency_key=f"{idempotency_key}:started",
+            command_fingerprint=None,
+            input_hash=request_hash,
+            output_hash=None,
+            backend_ref=None,
+            metadata={},
+        )
         return candidate
+
+    def append(
+        self,
+        *,
+        run_id: UUID,
+        kind: ExecutionEventKind,
+        outcome: ExecutionOutcome,
+        action_key: str,
+        started_at: datetime,
+        idempotency_key: str,
+        ended_at: datetime | None = None,
+        command_fingerprint: str | None = None,
+        input_hash: str | None = None,
+        output_hash: str | None = None,
+        backend_ref: str | None = None,
+        metadata: Mapping[str, Any] | None = None,
+    ) -> ExecutionEvent:
+        run = self._runs.get(run_id)
+        if run is None:
+            raise KeyError(f"unknown run_id {run_id}")
+        if not isinstance(kind, ExecutionEventKind):
+            raise ExecutionLedgerValidationError(
+                "kind must be an ExecutionEventKind"
+            )
+        if not isinstance(outcome, ExecutionOutcome):
+            raise ExecutionLedgerValidationError(
+                "outcome must be an ExecutionOutcome"
+            )
+        if kind is ExecutionEventKind.RUN_STARTED:
+            raise ExecutionLedgerValidationError(
+                "run_started can only be created by begin"
+            )
+        return self._append_event(
+            run=run,
+            kind=kind,
+            outcome=outcome,
+            action_key=action_key,
+            started_at=started_at,
+            ended_at=ended_at,
+            idempotency_key=idempotency_key,
+            command_fingerprint=command_fingerprint,
+            input_hash=input_hash,
+            output_hash=output_hash,
+            backend_ref=backend_ref,
+            metadata=metadata,
+        )
+
+    def _append_event(
+        self,
+        *,
+        run: ExecutionRun,
+        kind: ExecutionEventKind,
+        outcome: ExecutionOutcome,
+        action_key: str,
+        started_at: datetime,
+        ended_at: datetime | None,
+        idempotency_key: str,
+        command_fingerprint: str | None,
+        input_hash: str | None,
+        output_hash: str | None,
+        backend_ref: str | None,
+        metadata: Mapping[str, Any] | None,
+    ) -> ExecutionEvent:
+        action_key = action_key.strip()
+        idempotency_key = idempotency_key.strip()
+        if _ACTION_RE.fullmatch(action_key) is None or not idempotency_key:
+            raise ExecutionLedgerValidationError(
+                "action_key or event idempotency_key is invalid"
+            )
+        _require_aware("started_at", started_at)
+        if ended_at is not None:
+            _require_aware("ended_at", ended_at)
+            if ended_at < started_at:
+                raise ExecutionLedgerValidationError(
+                    "ended_at cannot precede started_at"
+                )
+        for name, value in (
+            ("command_fingerprint", command_fingerprint),
+            ("input_hash", input_hash),
+            ("output_hash", output_hash),
+        ):
+            _require_hash(name, value)
+
+        events = self._events[run.run_id]
+        existing = self._event_keys.get((run.run_id, idempotency_key))
+        previous = events[-1] if events else None
+        sequence = existing.sequence if existing is not None else len(events) + 1
+        previous_id = (
+            existing.previous_event_id
+            if existing is not None
+            else previous.event_id if previous is not None else None
+        )
+        backend_ref = _normalize_optional(backend_ref)
+        frozen_metadata = _freeze_metadata(metadata)
+        event_id = uuid5(run.run_id, f"execution-event:{idempotency_key}")
+        payload = {
+            "event_id": str(event_id),
+            "space_id": str(run.space_id),
+            "run_id": str(run.run_id),
+            "sequence": sequence,
+            "previous_event_id": str(previous_id) if previous_id else None,
+            "kind": kind.value,
+            "outcome": outcome.value,
+            "action_key": action_key,
+            "started_at": started_at.isoformat(),
+            "ended_at": ended_at.isoformat() if ended_at else None,
+            "command_fingerprint": command_fingerprint,
+            "input_hash": input_hash,
+            "output_hash": output_hash,
+            "backend_ref": backend_ref,
+            "idempotency_key": idempotency_key,
+            "metadata": frozen_metadata,
+        }
+        content_hash = _hash_payload(payload)
+        if existing is not None:
+            if existing.content_hash != content_hash:
+                raise ExecutionLedgerConflictError(
+                    "event idempotency key was reused with different immutable content"
+                )
+            return existing
+
+        if previous is not None and _terminal_outcome(previous.kind) is not None:
+            raise ExecutionLedgerConflictError(
+                "cannot append after a terminal execution event"
+            )
+        if started_at < run.started_at or (
+            previous is not None and started_at < previous.started_at
+        ):
+            raise ExecutionLedgerValidationError(
+                "execution event time must be non-decreasing"
+            )
+        expected = _terminal_outcome(kind)
+        if expected is not None and outcome is not expected:
+            raise ExecutionLedgerValidationError(
+                "terminal execution outcome mismatch"
+            )
+        if kind is ExecutionEventKind.RUN_STARTED:
+            if sequence != 1 or outcome is not ExecutionOutcome.UNKNOWN:
+                raise ExecutionLedgerValidationError(
+                    "run_started must be first with unknown outcome"
+                )
+            if input_hash != run.request_hash:
+                raise ExecutionLedgerValidationError(
+                    "run_started input_hash must equal request_hash"
+                )
+
+        previous_hash = previous.event_hash if previous is not None else ""
+        candidate = ExecutionEvent(
+            event_id=event_id,
+            space_id=run.space_id,
+            run_id=run.run_id,
+            sequence=sequence,
+            previous_event_id=previous_id,
+            kind=kind,
+            outcome=outcome,
+            action_key=action_key,
+            started_at=started_at,
+            ended_at=ended_at,
+            command_fingerprint=command_fingerprint,
+            input_hash=input_hash,
+            output_hash=output_hash,
+            backend_ref=backend_ref,
+            idempotency_key=idempotency_key,
+            content_hash=content_hash,
+            event_hash=_sha256(f"{previous_hash}:{content_hash}"),
+            metadata=frozen_metadata,
+        )
+        events.append(candidate)
+        self._event_keys[(run.run_id, idempotency_key)] = candidate
+        return candidate
+
+    def complete(
+        self,
+        run_id: UUID,
+        *,
+        started_at: datetime,
+        idempotency_key: str,
+        metadata: Mapping[str, Any] | None = None,
+    ) -> ExecutionEvent:
+        return self.append(
+            run_id=run_id,
+            kind=ExecutionEventKind.RUN_COMPLETED,
+            outcome=ExecutionOutcome.SUCCESS,
+            action_key="run.complete",
+            started_at=started_at,
+            ended_at=started_at,
+            idempotency_key=idempotency_key,
+            metadata=metadata,
+        )
+
+    def fail(
+        self,
+        run_id: UUID,
+        *,
+        started_at: datetime,
+        idempotency_key: str,
+        metadata: Mapping[str, Any] | None = None,
+    ) -> ExecutionEvent:
+        return self.append(
+            run_id=run_id,
+            kind=ExecutionEventKind.RUN_FAILED,
+            outcome=ExecutionOutcome.FAILURE,
+            action_key="run.fail",
+            started_at=started_at,
+            ended_at=started_at,
+            idempotency_key=idempotency_key,
+            metadata=metadata,
+        )
+
+    def cancel(
+        self,
+        run_id: UUID,
+        *,
+        started_at: datetime,
+        idempotency_key: str,
+        metadata: Mapping[str, Any] | None = None,
+    ) -> ExecutionEvent:
+        return self.append(
+            run_id=run_id,
+            kind=ExecutionEventKind.RUN_CANCELLED,
+            outcome=ExecutionOutcome.CANCELLED,
+            action_key="run.cancel",
+            started_at=started_at,
+            ended_at=started_at,
+            idempotency_key=idempotency_key,
+            metadata=metadata,
+        )
+
+    def attach_artifact(
+        self,
+        *,
+        run_id: UUID,
+        event_id: UUID,
+        ordinal: int,
+        role: str,
+        artifact_key: str,
+        artifact_type: str,
+        memory_id: UUID | None = None,
+        backend_ref: str | None = None,
+        digest_algorithm: str | None = None,
+        digest: str | None = None,
+        metadata: Mapping[str, Any] | None = None,
+    ) -> ExecutionArtifact:
+        run = self._runs.get(run_id)
+        if run is None:
+            raise KeyError(f"unknown run_id {run_id}")
+        if not any(event.event_id == event_id for event in self._events[run_id]):
+            raise ExecutionLedgerValidationError(
+                "artifact event_id does not belong to run"
+            )
+        if ordinal <= 0:
+            raise ExecutionLedgerValidationError(
+                "artifact ordinal must be positive"
+            )
+        role = role.strip()
+        artifact_key = artifact_key.strip()
+        artifact_type = artifact_type.strip()
+        backend_ref = _normalize_optional(backend_ref)
+        if role not in _ALLOWED_ARTIFACT_ROLES:
+            raise ExecutionLedgerValidationError("artifact role is not allowed")
+        if not artifact_key or not artifact_type:
+            raise ExecutionLedgerValidationError(
+                "artifact_key and artifact_type are required"
+            )
+        if memory_id is None and backend_ref is None:
+            raise ExecutionLedgerValidationError(
+                "artifact requires memory_id or backend_ref"
+            )
+        if (digest_algorithm is None) != (digest is None):
+            raise ExecutionLedgerValidationError(
+                "digest_algorithm and digest must be supplied together"
+            )
+        if digest_algorithm is not None:
+            digest_algorithm = digest_algorithm.strip().lower()
+            digest = digest.strip().lower() if digest is not None else None
+            if _DIGEST_ALGORITHM_RE.fullmatch(digest_algorithm) is None:
+                raise ExecutionLedgerValidationError("invalid digest_algorithm")
+            if digest is None or _DIGEST_RE.fullmatch(digest) is None:
+                raise ExecutionLedgerValidationError("invalid artifact digest")
+
+        frozen_metadata = _freeze_metadata(metadata)
+        artifact_id = uuid5(event_id, f"execution-artifact:{ordinal}")
+        payload = {
+            "artifact_id": str(artifact_id),
+            "space_id": str(run.space_id),
+            "run_id": str(run_id),
+            "event_id": str(event_id),
+            "ordinal": ordinal,
+            "role": role,
+            "artifact_key": artifact_key,
+            "artifact_type": artifact_type,
+            "memory_id": str(memory_id) if memory_id else None,
+            "backend_ref": backend_ref,
+            "digest_algorithm": digest_algorithm,
+            "digest": digest,
+            "metadata": frozen_metadata,
+        }
+        candidate = ExecutionArtifact(
+            artifact_id=artifact_id,
+            space_id=run.space_id,
+            run_id=run_id,
+            event_id=event_id,
+            ordinal=ordinal,
+            role=role,
+            artifact_key=artifact_key,
+            artifact_type=artifact_type,
+            memory_id=memory_id,
+            backend_ref=backend_ref,
+            digest_algorithm=digest_algorithm,
+            digest=digest,
+            content_hash=_hash_payload(payload),
+            metadata=frozen_metadata,
+        )
+        key = (event_id, ordinal)
+        existing = self._artifact_ordinals.get(key)
+        if existing is not None:
+            if existing.content_hash != candidate.content_hash:
+                raise ExecutionLedgerConflictError(
+                    "artifact ordinal was reused with different immutable content"
+                )
+            return existing
+        self._artifact_ordinals[key] = candidate
+        self._artifacts[run_id].append(candidate)
+        return candidate
+
+    def events(self, run_id: UUID) -> tuple[ExecutionEvent, ...]:
+        if run_id not in self._runs:
+            raise KeyError(f"unknown run_id {run_id}")
+        return tuple(self._events[run_id])
+
+    def artifacts(self, run_id: UUID) -> tuple[ExecutionArtifact, ...]:
+        if run_id not in self._runs:
+            raise KeyError(f"unknown run_id {run_id}")
+        return tuple(self._artifacts[run_id])
+
+    def verify_chain(self, run_id: UUID) -> bool:
+        run = self._runs.get(run_id)
+        if run is None:
+            raise KeyError(f"unknown run_id {run_id}")
+        previous: ExecutionEvent | None = None
+        for expected_sequence, event in enumerate(
+            self._events[run_id], start=1
+        ):
+            if event.sequence != expected_sequence:
+                return False
+            expected_previous_id = previous.event_id if previous is not None else None
+            if event.previous_event_id != expected_previous_id:
+                return False
+            expected_event_id = uuid5(
+                run.run_id,
+                f"execution-event:{event.idempotency_key}",
+            )
+            if event.event_id != expected_event_id:
+                return False
+            if _hash_payload(_event_payload(event)) != event.content_hash:
+                return False
+            previous_hash = previous.event_hash if previous is not None else ""
+            if _sha256(f"{previous_hash}:{event.content_hash}") != event.event_hash:
+                return False
+            if previous is not None and event.started_at < previous.started_at:
+                return False
+            if previous is not None and _terminal_outcome(previous.kind) is not None:
+                return False
+            previous = event
+        return bool(previous)
+
+    def status(self, run_id: UUID) -> ExecutionStatus:
+        latest = self.events(run_id)[-1]
+        return {
+            ExecutionEventKind.RUN_COMPLETED: ExecutionStatus.COMPLETED,
+            ExecutionEventKind.RUN_FAILED: ExecutionStatus.FAILED,
+            ExecutionEventKind.RUN_CANCELLED: ExecutionStatus.CANCELLED,
+        }.get(latest.kind, ExecutionStatus.RUNNING)

@@ -134,7 +134,9 @@ CREATE TABLE IF NOT EXISTS ngm.execution_events (
   backend_ref text,
   idempotency_key text NOT NULL CHECK (btrim(idempotency_key) <> ''),
   content_hash text NOT NULL CHECK (content_hash ~ '^[0-9a-f]{64}$'),
-  storage_content_hash text NOT NULL CHECK (storage_content_hash ~ '^[0-9a-f]{64}$'),
+  storage_content_hash text NOT NULL CHECK (
+    storage_content_hash ~ '^[0-9a-f]{64}$'
+  ),
   event_hash text NOT NULL CHECK (event_hash ~ '^[0-9a-f]{64}$'),
   metadata jsonb NOT NULL DEFAULT '{}'::jsonb,
   created_at timestamptz NOT NULL DEFAULT now(),
@@ -313,7 +315,7 @@ BEGIN
    FOR UPDATE;
 
   IF NOT FOUND THEN
-    RAISE ExCEPTION 'execution run does not exist in scope'
+    RAISE EXCEPTION 'execution run does not exist in scope'
       USING ERRCODE = '23503';
   END IF;
 
@@ -324,7 +326,7 @@ BEGIN
      AND run_id = NEW.run_id
      AND idempotency_key = NEW.idempotency_key;
 
-  IF v_existing.event_id IS NOT NULL THEN
+  IF v_existing.id IS NOT NULL THEN
     IF v_existing.id IS DISTINCT FROM NEW.id
        OR v_existing.content_hash IS DISTINCT FROM NEW.content_hash THEN
       RAISE EXCEPTION
@@ -343,15 +345,29 @@ BEGIN
    ORDER BY sequence DESC
    LIMIT 1;
 
-  IF v_latest.kind IN ('run_completed', 'run_failed', 'run_cancelled') THEN
-    RAISE EXCEPTION 'cannot append after terminal execution event'
-      USING ERRCODE = '23514';
-  END IF;
-
-  IF v_latest.id IS NOT NULL THEN
-    IF NEW.first event must be run_started without a predecessor using ERRCODE = '23514';
+  IF v_latest.id IS NULL THEN
+    IF NEW.sequence <> 1 OR NEW.previous_event_id IS NOT NULL THEN
+      RAISE EXCEPTION 'execution sequence must be contiguous'
+        USING ERRCODE = '23514';
+    END IF;
+    IF NEW.kind <> 'run_started' THEN
+      RAISE EXCEPTION 'first execution event must be run_started'
+        USING ERRCODE = '23514';
+    END IF;
+    IF NEW.started_at <> v_run_started_at THEN
+      RAISE EXCEPTION 'run_started time must equal execution run started_at'
+        USING ERRCODE = '23514';
+    END IF;
+    IF NEW.input_hash IS DISTINCT FROM v_run_request_hash THEN
+      RAISE EXCEPTION
+        'run_started input_hash must equal execution run request_hash'
+        USING ERRCODE = '23514';
     END IF;
   ELSE
+    IF v_latest.kind IN ('run_completed', 'run_failed', 'run_cancelled') THEN
+      RAISE EXCEPTION 'cannot append after terminal execution event'
+        USING ERRCODE = '23514';
+    END IF;
     IF NEW.sequence <> v_latest.sequence + 1 THEN
       RAISE EXCEPTION 'execution sequence must be contiguous'
         USING ERRCODE = '23514';
@@ -440,7 +456,7 @@ CREATE TRIGGER execution_events_immutable
 BEFORE UPDATE OR DELETE ON ngm.execution_events
 FOR EACH ROW EXECUTE FUNCTION ngm.reject_execution_ledger_mutation();
 
-DROP TRIGGGER IF EXISTS execution_artifacts_immutable ON ngm.execution_artifacts;
+DROP TRIGGER IF EXISTS execution_artifacts_immutable ON ngm.execution_artifacts;
 CREATE TRIGGER execution_artifacts_immutable
 BEFORE UPDATE OR DELETE ON ngm.execution_artifacts
 FOR EACH ROW EXECUTE FUNCTION ngm.reject_execution_ledger_mutation();
@@ -453,7 +469,7 @@ CREATE INDEX IF NOT EXISTS execution_artifacts_key_idx
   ON ngm.execution_artifacts (space_id, artifact_key, created_at DESC);
 CREATE INDEX IF NOT EXISTS execution_artifacts_memory_idx
   ON ngm.execution_artifacts (space_id, memory_id)
-  WHERE memory_id IS NELL;
+  WHERE memory_id IS NOT NULL;
 
 CREATE OR REPLACE VIEW ngm.execution_run_heads AS
 SELECT
