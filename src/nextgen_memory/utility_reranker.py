@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
-from dataclasses import dataclass
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, replace
 from datetime import datetime
 from math import isfinite
+from typing import Protocol
 from uuid import UUID
 
-from .retrieval import ResearchRetrievalHit
+from .retrieval import ResearchRetrievalHit, ResearchRetrievalQuery
 
 
 @dataclass(frozen=True, slots=True)
@@ -145,6 +146,29 @@ class RerankedMemory:
             raise ValueError("final_score must be finite")
 
 
+class ResearchRetriever(Protocol):
+    """Scoped research retrieval contract used by the composition decorator."""
+
+    def search(
+        self,
+        query: ResearchRetrievalQuery,
+    ) -> tuple[ResearchRetrievalHit, ...]:
+        """Return ranked, canonical research hits."""
+        ...
+
+
+class UtilitySnapshotProvider(Protocol):
+    """Read aggregate utility evidence for canonical memory IDs."""
+
+    def get_many(
+        self,
+        space_id: UUID,
+        memory_ids: Sequence[UUID],
+    ) -> Mapping[UUID, UtilityEvidence]:
+        """Return evidence for any subset of the requested memories."""
+        ...
+
+
 class UtilityAwareReranker:
     """Rerank retrieval hits without learning from contaminated bundle rewards."""
 
@@ -255,6 +279,66 @@ class UtilityAwareReranker:
 
         utility = sum(signals) / len(signals) if signals else 0.0
         return utility, harm_risk
+
+
+class UtilityAwareResearchRetriever:
+    """Oversample scoped retrieval, add utility evidence, and restore the limit."""
+
+    def __init__(
+        self,
+        base_retriever: ResearchRetriever,
+        utility_provider: UtilitySnapshotProvider,
+        reranker: UtilityAwareReranker | None = None,
+        *,
+        oversample_factor: int = 4,
+    ) -> None:
+        _validate_positive_integer("oversample_factor", oversample_factor)
+        self.base_retriever = base_retriever
+        self.utility_provider = utility_provider
+        self.reranker = reranker or UtilityAwareReranker()
+        self.oversample_factor = oversample_factor
+
+    def search(
+        self,
+        query: ResearchRetrievalQuery,
+    ) -> tuple[RerankedMemory, ...]:
+        expanded_limit = min(100, query.limit * self.oversample_factor)
+        expanded_num_candidates = min(
+            10_000,
+            max(query.num_candidates, expanded_limit * 10),
+        )
+        expanded_query = replace(
+            query,
+            limit=expanded_limit,
+            num_candidates=expanded_num_candidates,
+        )
+        hits = self.base_retriever.search(expanded_query)
+        if not hits:
+            return ()
+
+        requested_ids = tuple(hit.memory_id for hit in hits)
+        requested_set = frozenset(requested_ids)
+        evidence_by_id = self.utility_provider.get_many(
+            query.space_id,
+            requested_ids,
+        )
+        if not isinstance(evidence_by_id, Mapping):
+            raise ValueError("utility provider must return a mapping")
+        unexpected = set(evidence_by_id).difference(requested_set)
+        if unexpected:
+            raise ValueError("utility provider returned an unrequested memory_id")
+
+        candidates = tuple(
+            UtilityRerankCandidate(
+                hit=hit,
+                utility=evidence_by_id.get(
+                    hit.memory_id,
+                    UtilityEvidence.neutral(hit.memory_id),
+                ),
+            )
+            for hit in hits
+        )
+        return self.reranker.rerank(candidates, limit=query.limit)
 
 
 def _validate_nonnegative_integer(name: str, value: int) -> None:
