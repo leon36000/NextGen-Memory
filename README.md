@@ -22,8 +22,8 @@ A standard RAG pipeline asks which chunks resemble a query. NextGen Memory asks 
   routing/retrieval telemetry, feedback, and project checkpoints.
 - **MongoDB Atlas:** rich episodic traces, research sources, repository artifacts, and alternate
   representations linked to canonical Neon UUIDs.
-- **Python kernel:** zero-dependency typed contracts, fail-closed candidate eligibility, and a
-  deterministic sparse router used before learned routing is justified.
+- **Python kernel:** zero-dependency typed contracts, fail-closed candidate eligibility, a
+  deterministic sparse router, and deterministic replay of append-only state adjudications.
 - **Temporal:** planned for durable lifecycle workflows after read/write contracts stabilize.
 
 The twelve initial experts are `working`, `execution`, `episodic`, `semantic`, `temporal`,
@@ -66,18 +66,35 @@ decision = DeterministicMemoryRouter().route(request)
 print(decision.to_dict())
 ```
 
+## Rebuild current state from immutable history
+
+```python
+from nextgen_memory import replay_state, verify_state_projection
+
+projection = replay_state(resolution_events)
+verification = verify_state_projection(resolution_events, stored_state_slot)
+assert verification.matches
+```
+
+`state_slots` is only a fast projection. Explicit slot versions and idempotency keys make replay
+robust under concurrency and at-least-once delivery. Immutable resolution history remains
+authoritative. See `docs/state-replay-v0.md` for transition and adapter rules.
+
 ## Repository map
 
-- `src/nextgen_memory/`: framework contracts and routing kernel.
+- `src/nextgen_memory/`: framework contracts, routing kernel, and state replay.
 - `tests/`: behavior and migration-contract tests.
 - `migrations/neon/`: reproducible canonical ledger migrations.
 - `migrations/mongodb/`: rich-payload collection contracts.
 - `docs/router-v0.md`: router semantics and non-goals.
+- `docs/state-replay-v0.md`: state transition, replay, and projection-verification rules.
 - `docs/superpowers/specs/`: approved research/design specification.
 - `docs/superpowers/plans/`: implementation plans.
 
 ## Status
 
-Bootstrap schema `0.1.1` and Router v0 are the current foundation. Learned routing, retrieval
-execution, state-adjudication replay, Temporal workflows, and SWE execution governance follow only
-after their contracts and supervision data are verified.
+The deployed bootstrap remains schema `0.1.1`. Migration `0003` has been validated twice on an
+isolated Neon child branch and advances the schema to `0.2.0`; it has not been promoted to `main`.
+Router v0 and State Replay v0 are the current code foundation. Learned
+routing, retrieval execution, context compilation, Temporal workflows, and SWE execution
+governance follow only after their contracts and supervision data are verified.

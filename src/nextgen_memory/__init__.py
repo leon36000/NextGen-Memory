@@ -17,6 +17,20 @@ from .domain import (
 )
 from .eligibility import EligibilityResult, evaluate_candidate_eligibility
 from .router import DeterministicMemoryRouter
+from .state import (
+    ProjectionVerification,
+    StateProjection,
+    StateProjectionVerification,
+    StateReplayError,
+    StateResolutionEvent,
+    StateStatus,
+    StateVerdict,
+    StoredStateSlot,
+    apply_state_resolution,
+    replay_state,
+    replay_state_slots,
+    verify_state_projection,
+)
 from .telemetry import (
     InMemoryRoutingDecisionSink,
     RoutingDecisionSink,
@@ -33,6 +47,7 @@ __all__ = [
     "InMemoryRoutingDecisionSink",
     "MemoryCandidate",
     "PlanPhase",
+    "ProjectionVerification",
     "RiskLevel",
     "RoutingDecision",
     "RoutingDecisionSink",
@@ -40,7 +55,18 @@ __all__ = [
     "RoutingScope",
     "RoutingTelemetryRecord",
     "Sensitivity",
+    "StateProjection",
+    "StateProjectionVerification",
+    "StateReplayError",
+    "StateResolutionEvent",
+    "StateStatus",
+    "StateVerdict",
+    "StoredStateSlot",
     "TaskKind",
     "TemporalIntent",
+    "apply_state_resolution",
     "evaluate_candidate_eligibility",
+    "replay_state",
+    "replay_state_slots",
+    "verify_state_projection",
 ]
