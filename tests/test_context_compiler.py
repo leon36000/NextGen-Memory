@@ -6,11 +6,10 @@ from math import inf, nan
 from uuid import UUID
 
 import pytest
-
 from nextgen_memory.context_compiler import (
     ContextBudgetError,
-    ContextCompileRequest,
     ContextCompiler,
+    ContextCompileRequest,
     ContextCompilerValidationError,
     ContextEvidence,
     EvidenceFidelity,
