@@ -1,0 +1,136 @@
+name: Annotate Inherited Credit Ledger v0
+
+on:
+  push:
+    branches: [bootstrap/inherited-credit-ledger-v0-finalize]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  annotate:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: leon36000/NextGen-Memory
+      MARKER_BRANCH: bootstrap/inherited-credit-ledger-v0-finalize
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: bootstrap/inherited-credit-ledger-v0-finalize
+          fetch-depth: 0
+
+      - name: Require successful machine-readable marker
+        run: |
+          test -f bootstrap/inherited-credit-ledger-v0-verification.json
+          jq -e '.pull_request == 13' bootstrap/inherited-credit-ledger-v0-verification.json
+          jq -e '.conclusion == "success"' bootstrap/inherited-credit-ledger-v0-verification.json
+          jq -e '.head_sha == "167d5c60d485eaacc2fbf165797f7fae187be2eb"' bootstrap/inherited-credit-ledger-v0-verification.json
+          jq -e '.neon_candidate.parent_changed == false' bootstrap/inherited-credit-ledger-v0-verification.json
+          jq -e '.neon_candidate.memory_feedback_rows == 0' bootstrap/inherited-credit-ledger-v0-verification.json
+
+      - name: Build exact PR summary from marker
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          marker = json.loads(
+              Path("bootstrap/inherited-credit-ledger-v0-verification.json")
+              .read_text(encoding="utf-8")
+          )
+          neon = marker["neon_candidate"]
+          body = f"""## Résumé
+
+Ajoute **Inherited Credit Ledger v0**, un registre append-only séparé pour les contributions de provenance héritées.
+
+La PR reste empilée sur `feat/provenance-credit-v0`, brouillon et non fusionnée.
+
+## Séparation des preuves
+
+- aucun crédit hérité n’est inséré dans `ngm.memory_feedback` ;
+- `ngm.node_utility` n’est ni remplacée ni redéfinie ;
+- aucune somme implicite direct + hérité ;
+- contributions par chemin, blocages, abstentions et conservation sont persistés séparément ;
+- `ngm.node_inherited_credit` expose uniquement les preuves héritées ;
+- `ngm.node_learning_evidence` juxtapose les agrégats directs et hérités sans score combiné.
+
+## Contrats de persistance
+
+- quatre tables append-only : évaluations, contributions, observations et accounting ;
+- identités UUID5 et hashes SHA-256 déterministes ;
+- fingerprint canonique du graphe et de la politique ;
+- result hash couvrant le lot enfant complet ;
+- lien circulaire différé entre chaque évaluation et son unique accounting ;
+- SQL statique paramétré ;
+- insert-then-readback exact, avec rejet des lignes manquantes, inattendues, dupliquées ou divergentes ;
+- aucune donnée brute : requête, prompt, réponse, mémoire, commande, sortie, secret ou note.
+
+## TDD
+
+- RED persistance : Ruff vert puis module `provenance_credit_persistence` absent ;
+- RED migration : **211 tests verts**, puis 9 échecs uniquement car `0006_inherited_credit_ledger.sql` était absent ;
+- RED API : **222 tests verts**, puis exports racine absents ;
+- GREEN final : **{marker['tests']} tests**.
+
+## Vérification GitHub Actions
+
+- commit exact : `{marker['head_sha']}` ;
+- workflow CI : `{marker['ci_run_id']}` ;
+- Python 3.12.13 : Ruff et **223 tests** réussis ;
+- Python 3.13.15 : Ruff et **223 tests** réussis ;
+- conclusion globale : **success**.
+
+## Vérification générative et indépendante
+
+- **{marker['property_cases']} lots déterministes** : identité, permutation, comptabilité, références et confidentialité ;
+- couverture globale : **{marker['coverage_percent']} %** ;
+- wheel construit, réinstallé et importé ;
+- SHA-256 du wheel : `{marker['wheel_sha256']}` ;
+- diff limité aux **{marker['changed_files']} fichiers** prévus ;
+- scan de secrets à forte précision : propre.
+
+## Validation Neon isolée
+
+Migration appliquée et réappliquée uniquement sur `{neon['branch']}` :
+
+- schéma candidat `{neon['schema_version']}` ;
+- évaluations : **{neon['evaluations']}** ;
+- contributions : **{neon['contributions']}** ;
+- observations : **{neon['observations']}** ;
+- accountings : **{neon['accounting']}** ;
+- liens évaluation/accounting exacts : **{str(neon['accounting_links_valid']).lower()}** ;
+- replay exact sans duplication : **{str(neon['exact_replay']).lower()}** ;
+- lignes issues des tests négatifs : **{neon['negative_test_rows']}** ;
+- `memory_feedback` : **{neon['memory_feedback_rows']}** ;
+- réapplication avec données présentes : **{str(neon['migration_reapplied_with_data']).lower()}**.
+
+Le parent reste au schéma `{neon['parent_schema_version']}` et n’a pas été modifié.
+
+## Garde-fous
+
+- aucune fusion ;
+- aucune migration sur Neon main ;
+- aucun feedback hérité injecté dans l’utilité directe ;
+- aucun score direct + hérité combiné ;
+- promotion de `0006` soumise à une approbation explicite distincte.
+"""
+          Path("/tmp/pr-body.md").write_text(body, encoding="utf-8")
+          Path("bootstrap/inherited-credit-ledger-v0-summary.md").write_text(
+              body,
+              encoding="utf-8",
+          )
+          PY
+
+      - name: Update draft PR and persist readable summary
+        run: |
+          gh pr edit 13 --repo "$REPO" --body-file /tmp/pr-body.md
+          git config user.name "NextGen Memory Automation"
+          git config user.email "actions@users.noreply.github.com"
+          git add bootstrap/inherited-credit-ledger-v0-summary.md
+          if ! git diff --cached --quiet; then
+            git commit -m "docs: record inherited credit ledger verification summary"
+            git push origin HEAD:$MARKER_BRANCH
+          fi
