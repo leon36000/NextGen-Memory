@@ -1,0 +1,128 @@
+name: Annotate Learning Evidence Reader v0
+
+on:
+  push:
+    branches: [bootstrap/learning-evidence-reader-v0-finalize-v2]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  annotate:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: leon36000/NextGen-Memory
+      MARKER_BRANCH: bootstrap/learning-evidence-reader-v0-finalize-v2
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: bootstrap/learning-evidence-reader-v0-finalize-v2
+          fetch-depth: 0
+
+      - name: Require successful exact marker
+        run: |
+          set -euo pipefail
+          test -f bootstrap/learning-evidence-reader-v0-verification.json
+          jq -e '.pull_request == 14' bootstrap/learning-evidence-reader-v0-verification.json
+          jq -e '.conclusion == "success"' bootstrap/learning-evidence-reader-v0-verification.json
+          jq -e '.property_cases == 5000' bootstrap/learning-evidence-reader-v0-verification.json
+          jq -e '.changed_files == 11' bootstrap/learning-evidence-reader-v0-verification.json
+          jq -e '.direct_inherited_separate == true' bootstrap/learning-evidence-reader-v0-verification.json
+          jq -e '.combined_utility == false' bootstrap/learning-evidence-reader-v0-verification.json
+          jq -e '.node_utility_reader_changed == false' bootstrap/learning-evidence-reader-v0-verification.json
+          jq -e '.database_changed == false' bootstrap/learning-evidence-reader-v0-verification.json
+          jq -e '.merged == false' bootstrap/learning-evidence-reader-v0-verification.json
+          jq -e '.neon_smoke.parent_changed == false' bootstrap/learning-evidence-reader-v0-verification.json
+
+      - name: Generate exact readable summary
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          marker = json.loads(
+              Path('bootstrap/learning-evidence-reader-v0-verification.json')
+              .read_text(encoding='utf-8')
+          )
+          neon = marker['neon_smoke']
+          body = f"""## Résumé
+
+Ajoute **Learning Evidence Reader v0**, un lecteur scoped qui expose les preuves directes et héritées dans deux contrats Python distincts.
+
+La PR reste empilée sur `feat/inherited-credit-ledger-v0`, brouillon et non fusionnée.
+
+## Garanties
+
+- `NodeUtilityReader` reste inchangé ;
+- aucun score direct + hérité ;
+- `DirectUtilityEvidence` et `InheritedUtilityEvidence` restent imbriqués séparément ;
+- une mémoire réellement neutre utilise comptes zéro et agrégats nuls ;
+- un UUID demandé mais absent échoue fermé ;
+- SQL statique, paramétré et lié à `space_id` ;
+- UUIDs dédupliqués et triés ;
+- rows manquants, inattendus, dupliqués, cross-space ou malformés rejetés ;
+- mapping immuable et déterministe ;
+- aucune query, mémoire brute, commande, sortie, secret ou note libre ;
+- aucune migration et aucune écriture DB.
+
+## TDD et propriétés
+
+- noyau interne vérifié avant export public ;
+- RED API : un seul échec sur les exports racine ;
+- GREEN final : **{marker['tests']} tests** ;
+- **{marker['property_cases']} snapshots déterministes** : permutations, neutralité, preuves observées, scope et confidentialité.
+
+## Vérification GitHub Actions
+
+- commit exact : `{marker['head_sha']}` ;
+- base exacte : `{marker['base_sha']}` ;
+- workflow CI : `{marker['ci_run_id']}` ;
+- Python 3.12 et 3.13 : Ruff et suite complète réussis ;
+- conclusion globale : **success**.
+
+## Reproduction indépendante
+
+- couverture globale : **{marker['coverage_percent']} %** ;
+- compileall : réussi ;
+- wheel construit, réinstallé et importé ;
+- SHA-256 du wheel : `{marker['wheel_sha256']}` ;
+- diff limité aux **{marker['changed_files']} fichiers** prévus ;
+- scan de secrets à forte précision : propre.
+
+## Neon isolé
+
+SQL exact validé uniquement sur `{neon['branch']}` :
+
+- cible héritée : direct `{neon['target']['direct_count']}`, inherited `{neon['target']['inherited_count']}`, valeur `{neon['target']['inherited_value']}`, erreur `{neon['target']['inherited_standard_error']}`, confiance `{neon['target']['minimum_structural_confidence']}` ;
+- mémoire neutre : direct `{neon['neutral']['direct_count']}`, inherited `{neon['neutral']['inherited_count']}`, agrégats nuls `{str(neon['neutral']['aggregates_null']).lower()}` ;
+- UUID absent : `{neon['missing_uuid_rows']} row, traité comme conflit par Python ;
+- aucune requête sur Neon main.
+
+## Garde-fous
+
+- aucune fusion ;
+- aucune modification de main ;
+- aucune modification de schéma ;
+- consommation par le reranker reportée à une politique bornée et explicable séparée.
+"""
+          Path('/tmp/pr-body.md').write_text(body, encoding='utf-8')
+          Path('bootstrap/learning-evidence-reader-v0-summary.md').write_text(
+              body,
+              encoding='utf-8',
+          )
+          PY
+
+      - name: Update draft PR and persist summary
+        run: |
+          set -euo pipefail
+          gh pr edit 14 --repo "$REPO" --body-file /tmp/pr-body.md
+          git config user.name 'NextGen Memory Automation'
+          git config user.email 'actions@users.noreply.github.com'
+          git add bootstrap/learning-evidence-reader-v0-summary.md
+          if ! git diff --cached --quiet; then
+            git commit -m 'docs: record learning evidence reader verification summary'
+            git push origin HEAD:$MARKER_BRANCH
+          fi
