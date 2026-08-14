@@ -3,6 +3,8 @@ from __future__ import annotations
 from uuid import UUID
 
 import pytest
+
+from nextgen_memory.causal_credit import OutcomeMeasurement
 from nextgen_memory.interaction_credit import (
     InteractionCreditAbstentionReason,
     InteractionCreditConfig,
@@ -11,8 +13,6 @@ from nextgen_memory.interaction_credit import (
     MemoryDependencyGraph,
     PairInteractionKind,
 )
-
-from nextgen_memory.causal_credit import OutcomeMeasurement
 
 MEMORY_A = UUID("00000000-0000-5000-8000-000000000001")
 MEMORY_B = UUID("00000000-0000-5000-8000-000000000002")
