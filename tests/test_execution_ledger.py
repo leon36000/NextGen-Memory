@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
@@ -7,6 +8,7 @@ import pytest
 
 from nextgen_memory.execution_ledger import (
     AppendOnlyExecutionLedger,
+    ExecutionEvent,
     ExecutionEventKind,
     ExecutionLedgerConflictError,
     ExecutionLedgerValidationError,
@@ -51,6 +53,31 @@ def append_test(ledger: AppendOnlyExecutionLedger, run_id: UUID, **overrides):
     }
     values.update(overrides)
     return ledger.append(**values)
+
+
+def direct_event(**overrides) -> ExecutionEvent:
+    values = {
+        "event_id": UUID("10000000-0000-0000-0000-000000000001"),
+        "space_id": SPACE_ID,
+        "run_id": UUID("20000000-0000-0000-0000-000000000001"),
+        "sequence": 1,
+        "previous_event_id": None,
+        "kind": ExecutionEventKind.RUN_STARTED,
+        "outcome": ExecutionOutcome.UNKNOWN,
+        "action_key": "run.start",
+        "started_at": NOW,
+        "ended_at": None,
+        "command_fingerprint": None,
+        "input_hash": REQUEST_HASH,
+        "output_hash": None,
+        "backend_ref": None,
+        "idempotency_key": "event:direct:001",
+        "content_hash": "1" * 64,
+        "event_hash": "2" * 64,
+        "metadata": {},
+    }
+    values.update(overrides)
+    return ExecutionEvent(**values)
 
 
 def test_begin_is_idempotent_and_creates_a_tamper_evident_start_event() -> None:
@@ -130,6 +157,77 @@ def test_event_idempotency_conflict_is_rejected() -> None:
         )
 
 
+@pytest.mark.parametrize(
+    ("method_name", "expected_status"),
+    [
+        ("fail", ExecutionStatus.FAILED),
+        ("cancel", ExecutionStatus.CANCELLED),
+    ],
+)
+def test_non_success_terminal_states_are_explicit_and_idempotent(
+    method_name: str,
+    expected_status: ExecutionStatus,
+) -> None:
+    ledger = AppendOnlyExecutionLedger()
+    run = begin(ledger, idempotency_key=f"run:{method_name}")
+    method = getattr(ledger, method_name)
+    kwargs = {
+        "run_id": run.run_id,
+        "started_at": NOW + timedelta(seconds=3),
+        "idempotency_key": f"event:{method_name}:001",
+    }
+
+    first = method(**kwargs)
+    second = method(**kwargs)
+
+    assert first == second
+    assert ledger.status(run.run_id) is expected_status
+
+
+def test_append_rejects_non_enum_kind_and_outcome_with_validation_error() -> None:
+    ledger = AppendOnlyExecutionLedger()
+    run = begin(ledger)
+
+    with pytest.raises(ExecutionLedgerValidationError, match="kind"):
+        ledger.append(
+            run_id=run.run_id,
+            kind="test",
+            outcome=ExecutionOutcome.SUCCESS,
+            action_key="pytest.execution-ledger",
+            started_at=NOW + timedelta(seconds=1),
+            idempotency_key="event:bad-kind",
+        )
+    with pytest.raises(ExecutionLedgerValidationError, match="outcome"):
+        ledger.append(
+            run_id=run.run_id,
+            kind=ExecutionEventKind.TEST,
+            outcome="success",
+            action_key="pytest.execution-ledger",
+            started_at=NOW + timedelta(seconds=1),
+            idempotency_key="event:bad-outcome",
+        )
+
+
+def test_execution_event_contract_rejects_semantically_invalid_shapes() -> None:
+    with pytest.raises(ExecutionLedgerValidationError, match="first execution event"):
+        direct_event(kind=ExecutionEventKind.TEST)
+    with pytest.raises(ExecutionLedgerValidationError, match="terminal execution outcome"):
+        direct_event(
+            sequence=2,
+            previous_event_id=UUID("10000000-0000-0000-0000-000000000000"),
+            kind=ExecutionEventKind.RUN_COMPLETED,
+            outcome=ExecutionOutcome.FAILURE,
+            ended_at=NOW,
+        )
+    with pytest.raises(ExecutionLedgerValidationError, match="require ended_at"):
+        direct_event(
+            sequence=2,
+            previous_event_id=UUID("10000000-0000-0000-0000-000000000000"),
+            kind=ExecutionEventKind.RUN_FAILED,
+            outcome=ExecutionOutcome.FAILURE,
+        )
+
+
 def test_metadata_is_safe_deeply_immutable_and_finite() -> None:
     ledger = AppendOnlyExecutionLedger()
     metadata = {"nested": {"policy": "v1"}, "labels": ["safe"]}
@@ -153,6 +251,100 @@ def test_metadata_is_safe_deeply_immutable_and_finite() -> None:
             idempotency_key="run:nan",
             metadata={"quality": float("nan")},
         )
+
+
+@pytest.mark.parametrize(
+    "forbidden_key",
+    [
+        "access token",
+        "api.token",
+        "accessToken",
+        "query text",
+        "APIKey",
+        "stdOut",
+        "queryText",
+        "rawPayload",
+        "commandText",
+    ],
+)
+def test_metadata_rejects_forbidden_segments_across_common_key_styles(
+    forbidden_key: str,
+) -> None:
+    ledger = AppendOnlyExecutionLedger()
+
+    with pytest.raises(ExecutionLedgerValidationError, match="forbidden metadata key"):
+        begin(
+            ledger,
+            idempotency_key=f"run:forbidden-style:{forbidden_key}",
+            metadata={forbidden_key: "sensitive"},
+        )
+
+
+def test_metadata_rejects_keys_that_normalize_to_empty() -> None:
+    ledger = AppendOnlyExecutionLedger()
+
+    with pytest.raises(ExecutionLedgerValidationError, match="metadata key"):
+        begin(
+            ledger,
+            idempotency_key="run:empty-normalized-key",
+            metadata={"!!!": "invalid"},
+        )
+
+
+def test_metadata_rejects_keys_that_collide_after_normalization() -> None:
+    ledger = AppendOnlyExecutionLedger()
+
+    with pytest.raises(ExecutionLedgerValidationError, match="duplicate metadata key"):
+        begin(
+            ledger,
+            idempotency_key="run:metadata-key-collision",
+            metadata={"policy": "v1", " policy ": "v2"},
+        )
+
+
+def test_empty_non_mapping_metadata_is_not_silently_coerced() -> None:
+    ledger = AppendOnlyExecutionLedger()
+
+    with pytest.raises(ExecutionLedgerValidationError, match="JSON object"):
+        begin(
+            ledger,
+            idempotency_key="run:empty-list-metadata",
+            metadata=[],
+        )
+
+
+def test_cyclic_metadata_is_rejected_as_non_json() -> None:
+    ledger = AppendOnlyExecutionLedger()
+    metadata: dict[str, object] = {}
+    metadata["cycle"] = metadata
+
+    with pytest.raises(ExecutionLedgerValidationError, match="cyclic metadata"):
+        begin(
+            ledger,
+            idempotency_key="run:cyclic-metadata",
+            metadata=metadata,
+        )
+
+
+def test_verify_chain_recomputes_content_hash_and_event_identity() -> None:
+    ledger = AppendOnlyExecutionLedger()
+    run = begin(ledger)
+    append_test(ledger, run.run_id)
+
+    assert ledger.verify_chain(run.run_id) is True
+
+    original = ledger.events(run.run_id)[1]
+    ledger._events[run.run_id][1] = replace(
+        original,
+        action_key="pytest.execution-ledger.tampered",
+    )
+    assert ledger.verify_chain(run.run_id) is False
+
+    ledger._events[run.run_id][1] = replace(
+        original,
+        event_id=UUID("30000000-0000-0000-0000-000000000001"),
+    )
+    assert ledger.verify_chain(run.run_id) is False
 
 
 def test_artifacts_are_idempotent_and_linked_to_an_event() -> None:
