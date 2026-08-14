@@ -7,6 +7,17 @@ from typing import Any
 from uuid import UUID
 
 import pytest
+
+from nextgen_memory.provenance_credit import (
+    ConservativeProvenancePropagator,
+    CreditSourceKind,
+    DirectCreditEvidence,
+    PropagationConfig,
+    ProvenanceEdge,
+    ProvenanceNode,
+    TypedProvenanceGraph,
+    project_relation_policies_v0,
+)
 from nextgen_memory.provenance_credit_persistence import (
     INHERITED_ACCOUNTING_INSERT_SQL,
     INHERITED_ACCOUNTING_SELECT_SQL,
@@ -29,17 +40,6 @@ from nextgen_memory.provenance_credit_persistence import (
     fingerprint_provenance_policy,
 )
 
-from nextgen_memory.provenance_credit import (
-    ConservativeProvenancePropagator,
-    CreditSourceKind,
-    DirectCreditEvidence,
-    PropagationConfig,
-    ProvenanceEdge,
-    ProvenanceNode,
-    TypedProvenanceGraph,
-    project_relation_policies_v0,
-)
-
 SPACE = UUID("11111111-1111-1111-1111-111111111111")
 OTHER_SPACE = UUID("22222222-2222-2222-2222-222222222222")
 A = UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
@@ -60,10 +60,7 @@ HASH_B = "b" * 64
 
 def graph(*, confidence: float = 1.0) -> TypedProvenanceGraph:
     return TypedProvenanceGraph(
-        nodes=tuple(
-            ProvenanceNode(memory_id, SPACE)
-            for memory_id in (A, B, C, D, E)
-        ),
+        nodes=tuple(ProvenanceNode(memory_id, SPACE) for memory_id in (A, B, C, D, E)),
         edges=(
             ProvenanceEdge(
                 EDGE_AB,
@@ -144,9 +141,7 @@ def batch(**overrides: object) -> ProvenanceCreditBatch:
 class FakeCursor:
     def __init__(self, responses: list[list[Mapping[str, Any]]]) -> None:
         self.responses = list(responses)
-        self.executemany_calls: list[
-            tuple[str, list[Mapping[str, Any]]]
-        ] = []
+        self.executemany_calls: list[tuple[str, list[Mapping[str, Any]]]] = []
         self.execute_calls: list[tuple[str, Mapping[str, Any]]] = []
         self.current: list[Mapping[str, Any]] = []
 
@@ -210,9 +205,7 @@ def test_batch_is_complete_deterministic_and_keeps_evidence_classes_separate() -
     assert isinstance(first.observations, tuple)
     assert isinstance(first.accounting, tuple)
 
-    evaluation_by_direct = {
-        item.direct_credit_id: item for item in first.evaluations
-    }
+    evaluation_by_direct = {item.direct_credit_id: item for item in first.evaluations}
     contribution = first.contributions[0]
     assert contribution.target_node_id == B
     assert contribution.evaluation_id == evaluation_by_direct[DIRECT_A].id
@@ -220,9 +213,7 @@ def test_batch_is_complete_deterministic_and_keeps_evidence_classes_separate() -
     assert contribution.content_hash
 
     blocked = [item for item in first.observations if item.kind == "blocked"]
-    abstained = [
-        item for item in first.observations if item.kind == "abstention"
-    ]
+    abstained = [item for item in first.observations if item.kind == "abstention"]
     assert len(blocked) == 2
     assert len(abstained) == 1
     assert abstained[0].evaluation_id == evaluation_by_direct[DIRECT_D].id
@@ -378,9 +369,7 @@ def test_writer_uses_four_insert_then_readback_phases() -> None:
         INHERITED_OBSERVATION_SELECT_SQL,
         INHERITED_ACCOUNTING_SELECT_SQL,
     ]
-    assert all(
-        call[1]["space_id"] == SPACE for call in cursor.execute_calls
-    )
+    assert all(call[1]["space_id"] == SPACE for call in cursor.execute_calls)
 
 
 def test_writer_accepts_empty_batch_without_sql() -> None:

@@ -387,8 +387,7 @@ class InheritedCreditContributionRecord:
         )
         _positive_integer("depth", self.depth)
         relation_path = tuple(
-            _required_text("relation_path item", item)
-            for item in self.relation_path
+            _required_text("relation_path item", item) for item in self.relation_path
         )
         edge_path = tuple(self.edge_path)
         if len(relation_path) != self.depth or len(edge_path) != self.depth:
@@ -396,9 +395,7 @@ class InheritedCreditContributionRecord:
                 "contribution path cardinality must equal depth"
             )
         if any(not isinstance(edge_id, UUID) for edge_id in edge_path):
-            raise ProvenanceCreditPersistenceValidationError(
-                "edge_path must contain UUID values"
-            )
+            raise ProvenanceCreditPersistenceValidationError("edge_path must contain UUID values")
         _require_hash("path_fingerprint", self.path_fingerprint)
         _require_hash("content_hash", self.content_hash)
         object.__setattr__(self, "relation_path", relation_path)
@@ -590,9 +587,7 @@ class ProvenanceCreditBatch:
             ("accounting", accounting),
         ):
             identities = [
-                record.direct_credit_id
-                if isinstance(record, DirectCreditEvidence)
-                else record.id
+                record.direct_credit_id if isinstance(record, DirectCreditEvidence) else record.id
                 for record in records
             ]
             if len(identities) != len(set(identities)):
@@ -600,21 +595,21 @@ class ProvenanceCreditBatch:
                     f"{name} contain duplicate identities"
                 )
 
-        spaces = {
-            record.space_id
-            for record in (*direct_credits, *evaluations, *contributions, *observations, *accounting)
-        }
+        all_records = (
+            *direct_credits,
+            *evaluations,
+            *contributions,
+            *observations,
+            *accounting,
+        )
+        spaces = {record.space_id for record in all_records}
         if len(spaces) > 1:
             raise ProvenanceCreditPersistenceValidationError(
                 "inherited credit batch must use one space"
             )
         evaluation_by_id = {record.id: record for record in evaluations}
-        evaluation_by_direct = {
-            record.direct_credit_id: record for record in evaluations
-        }
-        if set(evaluation_by_direct) != {
-            record.direct_credit_id for record in direct_credits
-        }:
+        evaluation_by_direct = {record.direct_credit_id: record for record in evaluations}
+        if set(evaluation_by_direct) != {record.direct_credit_id for record in direct_credits}:
             raise ProvenanceCreditPersistenceValidationError(
                 "evaluations must cover every direct credit exactly once"
             )
@@ -623,9 +618,7 @@ class ProvenanceCreditBatch:
                 raise ProvenanceCreditPersistenceValidationError(
                     "child record references an unknown evaluation"
                 )
-        if {record.evaluation_id for record in accounting} != set(
-            evaluation_by_id
-        ):
+        if {record.evaluation_id for record in accounting} != set(evaluation_by_id):
             raise ProvenanceCreditPersistenceValidationError(
                 "accounting must cover every evaluation exactly once"
             )
@@ -781,9 +774,7 @@ def fingerprint_provenance_graph(graph: TypedProvenanceGraph) -> str:
     """Hash the canonical control-plane graph without memory content."""
 
     if not isinstance(graph, TypedProvenanceGraph):
-        raise ProvenanceCreditPersistenceValidationError(
-            "graph must be a TypedProvenanceGraph"
-        )
+        raise ProvenanceCreditPersistenceValidationError("graph must be a TypedProvenanceGraph")
     payload = {
         "space_id": str(graph.space_id),
         "nodes": [
@@ -804,9 +795,7 @@ def fingerprint_provenance_graph(graph: TypedProvenanceGraph) -> str:
                 "relation": edge.relation,
                 "confidence": edge.confidence,
                 "local_attribution": edge.local_attribution,
-                "evidence_id": (
-                    str(edge.evidence_id) if edge.evidence_id is not None else None
-                ),
+                "evidence_id": (str(edge.evidence_id) if edge.evidence_id is not None else None),
             }
             for edge in graph.edges
         ],
@@ -821,9 +810,7 @@ def fingerprint_provenance_policy(
     """Hash reviewed relation policies plus allocation-changing config."""
 
     if not isinstance(config, PropagationConfig):
-        raise ProvenanceCreditPersistenceValidationError(
-            "config must be a PropagationConfig"
-        )
+        raise ProvenanceCreditPersistenceValidationError("config must be a PropagationConfig")
     normalized = tuple(policies)
     _require_instances(
         normalized,
@@ -846,9 +833,7 @@ def fingerprint_provenance_policy(
                 "allow_positive": policy.allow_positive,
                 "allow_negative": policy.allow_negative,
                 "relation_weight": policy.relation_weight,
-                "requires_local_attribution": (
-                    policy.requires_local_attribution
-                ),
+                "requires_local_attribution": (policy.requires_local_attribution),
                 "maximum_depth": policy.maximum_depth,
             }
             for policy in sorted(
@@ -879,13 +864,9 @@ def build_provenance_credit_batch(
     """Build a complete deterministic persistence batch from a propagation result."""
 
     if not isinstance(result, ProvenanceCreditResult):
-        raise ProvenanceCreditPersistenceValidationError(
-            "result must be a ProvenanceCreditResult"
-        )
+        raise ProvenanceCreditPersistenceValidationError("result must be a ProvenanceCreditResult")
     if not isinstance(config, PropagationConfig):
-        raise ProvenanceCreditPersistenceValidationError(
-            "config must be a PropagationConfig"
-        )
+        raise ProvenanceCreditPersistenceValidationError("config must be a PropagationConfig")
     if result.policy_version != config.policy_version:
         raise ProvenanceCreditPersistenceValidationError(
             "result policy_version does not match propagation config"
@@ -918,10 +899,7 @@ def build_provenance_credit_batch(
         _validate_mass_ledger(direct, ledger)
         evaluation_id = uuid5(
             direct.direct_credit_id,
-            (
-                f"{_EVALUATION_NAMESPACE}:"
-                f"{graph_fingerprint}:{policy_fingerprint}"
-            ),
+            (f"{_EVALUATION_NAMESPACE}:{graph_fingerprint}:{policy_fingerprint}"),
         )
         direct_contributions = tuple(
             item
@@ -929,14 +907,10 @@ def build_provenance_credit_batch(
             if item.direct_credit_id == direct.direct_credit_id
         )
         direct_blocks = tuple(
-            item
-            for item in result.blocked
-            if item.direct_credit_id == direct.direct_credit_id
+            item for item in result.blocked if item.direct_credit_id == direct.direct_credit_id
         )
         direct_abstentions = tuple(
-            item
-            for item in result.abstentions
-            if item.direct_credit_id == direct.direct_credit_id
+            item for item in result.abstentions if item.direct_credit_id == direct.direct_credit_id
         )
         contribution_records = tuple(
             _build_contribution_record(
@@ -997,12 +971,8 @@ def build_provenance_credit_batch(
         result_hash = _hash_payload(
             {
                 "evaluation": evaluation_base,
-                "contribution_hashes": sorted(
-                    item.content_hash for item in contribution_records
-                ),
-                "observation_hashes": sorted(
-                    item.content_hash for item in observation_records
-                ),
+                "contribution_hashes": sorted(item.content_hash for item in contribution_records),
+                "observation_hashes": sorted(item.content_hash for item in observation_records),
                 "accounting_hash": accounting_record.content_hash,
             }
         )
@@ -1035,18 +1005,14 @@ def build_provenance_credit_batch(
         observations.extend(observation_records)
         accounting.append(accounting_record)
 
-    known_direct_ids = {
-        direct.direct_credit_id for direct in result.direct_credits
-    }
+    known_direct_ids = {direct.direct_credit_id for direct in result.direct_credits}
     for collection_name, items in (
         ("contribution", result.contributions),
         ("blocked observation", result.blocked),
         ("abstention", result.abstentions),
         ("mass ledger", result.mass_ledgers),
     ):
-        unknown = {
-            item.direct_credit_id for item in items
-        }.difference(known_direct_ids)
+        unknown = {item.direct_credit_id for item in items}.difference(known_direct_ids)
         if unknown:
             raise ProvenanceCreditPersistenceValidationError(
                 f"result contains {collection_name} for an unknown direct credit"
@@ -1076,9 +1042,7 @@ def _build_contribution_record(
             "contribution root does not match direct credit"
         )
     if contribution.target_memory_id not in node_ids:
-        raise ProvenanceCreditPersistenceValidationError(
-            "contribution target is absent from graph"
-        )
+        raise ProvenanceCreditPersistenceValidationError("contribution target is absent from graph")
     if any(edge_id not in edge_ids for edge_id in contribution.edge_path):
         raise ProvenanceCreditPersistenceValidationError(
             "contribution edge path references an unknown graph edge"
@@ -1093,13 +1057,9 @@ def _build_contribution_record(
         "evaluation_id": str(evaluation_id),
         "target_node_id": str(contribution.target_memory_id),
         "propagated_value": contribution.propagated_value,
-        "propagated_standard_error": (
-            contribution.propagated_standard_error
-        ),
+        "propagated_standard_error": (contribution.propagated_standard_error),
         "structural_confidence": contribution.structural_confidence,
-        "minimum_edge_confidence": (
-            contribution.minimum_edge_confidence
-        ),
+        "minimum_edge_confidence": (contribution.minimum_edge_confidence),
         "depth": contribution.depth,
         "relation_path": list(contribution.relation_path),
         "edge_path": [str(edge_id) for edge_id in contribution.edge_path],
@@ -1111,9 +1071,7 @@ def _build_contribution_record(
         evaluation_id=evaluation_id,
         target_node_id=contribution.target_memory_id,
         propagated_value=contribution.propagated_value,
-        propagated_standard_error=(
-            contribution.propagated_standard_error
-        ),
+        propagated_standard_error=(contribution.propagated_standard_error),
         structural_confidence=contribution.structural_confidence,
         minimum_edge_confidence=contribution.minimum_edge_confidence,
         depth=contribution.depth,
@@ -1285,12 +1243,8 @@ def _normalize_evaluation_row(row: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "id": _parse_uuid("id", row["id"]),
         "space_id": _parse_uuid("space_id", row["space_id"]),
-        "direct_credit_id": _parse_uuid(
-            "direct_credit_id", row["direct_credit_id"]
-        ),
-        "evidence_group_id": _parse_uuid(
-            "evidence_group_id", row["evidence_group_id"]
-        ),
+        "direct_credit_id": _parse_uuid("direct_credit_id", row["direct_credit_id"]),
+        "evidence_group_id": _parse_uuid("evidence_group_id", row["evidence_group_id"]),
         "root_node_id": _parse_uuid("root_node_id", row["root_node_id"]),
         "source_kind": str(row["source_kind"]),
         "direct_value": float(row["direct_value"]),
@@ -1316,16 +1270,12 @@ def _normalize_contribution_row(row: Mapping[str, Any]) -> dict[str, Any]:
         "evaluation_id": _parse_uuid("evaluation_id", row["evaluation_id"]),
         "target_node_id": _parse_uuid("target_node_id", row["target_node_id"]),
         "propagated_value": float(row["propagated_value"]),
-        "propagated_standard_error": float(
-            row["propagated_standard_error"]
-        ),
+        "propagated_standard_error": float(row["propagated_standard_error"]),
         "structural_confidence": float(row["structural_confidence"]),
         "minimum_edge_confidence": float(row["minimum_edge_confidence"]),
         "depth": _parse_int("depth", row["depth"]),
         "relation_path": [str(item) for item in row["relation_path"]],
-        "edge_path": [
-            _parse_uuid("edge_path item", item) for item in row["edge_path"]
-        ],
+        "edge_path": [_parse_uuid("edge_path item", item) for item in row["edge_path"]],
         "path_fingerprint": str(row["path_fingerprint"]),
         "content_hash": str(row["content_hash"]),
     }
@@ -1339,22 +1289,14 @@ def _normalize_observation_row(row: Mapping[str, Any]) -> dict[str, Any]:
         "space_id": _parse_uuid("space_id", row["space_id"]),
         "evaluation_id": _parse_uuid("evaluation_id", row["evaluation_id"]),
         "kind": str(row["kind"]),
-        "current_node_id": _parse_optional_uuid(
-            "current_node_id", row["current_node_id"]
-        ),
-        "target_node_id": _parse_optional_uuid(
-            "target_node_id", row["target_node_id"]
-        ),
+        "current_node_id": _parse_optional_uuid("current_node_id", row["current_node_id"]),
+        "target_node_id": _parse_optional_uuid("target_node_id", row["target_node_id"]),
         "edge_id": _parse_optional_uuid("edge_id", row["edge_id"]),
         "relation": None if row["relation"] is None else str(row["relation"]),
         "reason": str(row["reason"]),
-        "depth": (
-            None if row["depth"] is None else _parse_int("depth", row["depth"])
-        ),
+        "depth": (None if row["depth"] is None else _parse_int("depth", row["depth"])),
         "path_fingerprint": (
-            None
-            if row["path_fingerprint"] is None
-            else str(row["path_fingerprint"])
+            None if row["path_fingerprint"] is None else str(row["path_fingerprint"])
         ),
         "content_hash": str(row["content_hash"]),
     }
@@ -1417,85 +1359,63 @@ def _require_instances(
 
 def _require_uuid(name: str, value: object) -> None:
     if not isinstance(value, UUID):
-        raise ProvenanceCreditPersistenceValidationError(
-            f"{name} must be a UUID"
-        )
+        raise ProvenanceCreditPersistenceValidationError(f"{name} must be a UUID")
 
 
 def _required_text(name: str, value: object) -> str:
     if not isinstance(value, str):
-        raise ProvenanceCreditPersistenceValidationError(
-            f"{name} must be a string"
-        )
+        raise ProvenanceCreditPersistenceValidationError(f"{name} must be a string")
     normalized = value.strip()
     if not normalized:
-        raise ProvenanceCreditPersistenceValidationError(
-            f"{name} must not be empty"
-        )
+        raise ProvenanceCreditPersistenceValidationError(f"{name} must not be empty")
     return normalized
 
 
 def _finite_number(name: str, value: object) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise ProvenanceCreditPersistenceValidationError(
-            f"{name} must be a finite number"
-        )
+        raise ProvenanceCreditPersistenceValidationError(f"{name} must be a finite number")
     normalized = float(value)
     if not isfinite(normalized):
-        raise ProvenanceCreditPersistenceValidationError(
-            f"{name} must be a finite number"
-        )
+        raise ProvenanceCreditPersistenceValidationError(f"{name} must be a finite number")
     return normalized
 
 
 def _nonnegative_number(name: str, value: object) -> float:
     normalized = _finite_number(name, value)
     if normalized < 0:
-        raise ProvenanceCreditPersistenceValidationError(
-            f"{name} must be non-negative"
-        )
+        raise ProvenanceCreditPersistenceValidationError(f"{name} must be non-negative")
     return normalized
 
 
 def _probability(name: str, value: object) -> float:
     normalized = _finite_number(name, value)
     if not 0.0 <= normalized <= 1.0:
-        raise ProvenanceCreditPersistenceValidationError(
-            f"{name} must be between zero and one"
-        )
+        raise ProvenanceCreditPersistenceValidationError(f"{name} must be between zero and one")
     return normalized
 
 
 def _positive_integer(name: str, value: object) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
-        raise ProvenanceCreditPersistenceValidationError(
-            f"{name} must be a positive integer"
-        )
+        raise ProvenanceCreditPersistenceValidationError(f"{name} must be a positive integer")
     return value
 
 
 def _nonnegative_integer(name: str, value: object) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-        raise ProvenanceCreditPersistenceValidationError(
-            f"{name} must be a non-negative integer"
-        )
+        raise ProvenanceCreditPersistenceValidationError(f"{name} must be a non-negative integer")
     return value
 
 
 def _require_hash(name: str, value: object) -> None:
     if not isinstance(value, str) or _HASH_RE.fullmatch(value) is None:
-        raise ProvenanceCreditPersistenceValidationError(
-            f"{name} must be lowercase SHA-256 hex"
-        )
+        raise ProvenanceCreditPersistenceValidationError(f"{name} must be lowercase SHA-256 hex")
 
 
 def _parse_uuid(name: str, value: object) -> UUID:
     try:
         return value if isinstance(value, UUID) else UUID(str(value))
     except (TypeError, ValueError, AttributeError) as error:
-        raise ProvenanceCreditPersistenceConflictError(
-            f"stored {name} must be a UUID"
-        ) from error
+        raise ProvenanceCreditPersistenceConflictError(f"stored {name} must be a UUID") from error
 
 
 def _parse_optional_uuid(name: str, value: object) -> UUID | None:
@@ -1506,7 +1426,5 @@ def _parse_optional_uuid(name: str, value: object) -> UUID | None:
 
 def _parse_int(name: str, value: object) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
-        raise ProvenanceCreditPersistenceConflictError(
-            f"stored {name} must be an integer"
-        )
+        raise ProvenanceCreditPersistenceConflictError(f"stored {name} must be an integer")
     return value
