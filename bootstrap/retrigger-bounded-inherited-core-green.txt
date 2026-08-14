@@ -1,0 +1,2 @@
+feature_branch=feat/bounded-inherited-reranker-v0
+marker=bootstrap/bounded-inherited-reranker-v0-core-green.json
