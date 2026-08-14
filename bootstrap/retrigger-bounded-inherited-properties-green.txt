@@ -1,0 +1,3 @@
+feature_branch=feat/bounded-inherited-reranker-v0
+property_cases=10000
+simulation=true
