@@ -46,7 +46,10 @@ def only_pair(estimates):
 
 def test_redundant_pair_has_stable_negative_second_difference() -> None:
     graph = MemoryDependencyGraph((MEMORY_A, MEMORY_B))
-    value = lambda coalition: 1.0 if coalition else 0.0
+
+    def value(coalition: frozenset[UUID]) -> float:
+        return 1.0 if coalition else 0.0
+
     trials = (
         make_trial(graph, "trial-1", value),
         make_trial(graph, "trial-2", value),
