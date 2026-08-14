@@ -72,11 +72,7 @@ def _generated_case(seed: int):
         evidence_group_id=_uuid(4, seed),
         space_id=SPACE,
         root_memory_id=node_ids[0],
-        source_kind=(
-            CreditSourceKind.INTERACTION
-            if seed % 3
-            else CreditSourceKind.CAUSAL
-        ),
+        source_kind=(CreditSourceKind.INTERACTION if seed % 3 else CreditSourceKind.CAUSAL),
         value=round(rng.uniform(0.05, 1.0), 8),
         standard_error=round(rng.uniform(0.0, 0.2), 8),
         trial_count=rng.randint(2, 8),
@@ -147,7 +143,10 @@ def test_2000_generated_batches_preserve_identity_completeness_and_privacy() -> 
         assert first.accounting[0].propagated_value == result.mass_ledgers[0].propagated_value
         assert first.accounting[0].dropped_value == result.mass_ledgers[0].dropped_value
         assert first.accounting[0].unallocated_value == result.mass_ledgers[0].unallocated_value
-        assert first.accounting[0].conservation_residual == result.mass_ledgers[0].conservation_residual
+        assert (
+            first.accounting[0].conservation_residual
+            == result.mass_ledgers[0].conservation_residual
+        )
 
         evaluation_ids = {item.id for item in first.evaluations}
         child_ids = [
@@ -164,13 +163,9 @@ def test_2000_generated_batches_preserve_identity_completeness_and_privacy() -> 
                 *first.accounting,
             )
         )
+        assert all(item.target_node_id in graph.node_map for item in first.contributions)
         assert all(
-            item.target_node_id in graph.node_map
-            for item in first.contributions
-        )
-        assert all(
-            len(item.relation_path) == item.depth
-            and len(item.edge_path) == item.depth
+            len(item.relation_path) == item.depth and len(item.edge_path) == item.depth
             for item in first.contributions
         )
         serialized = _serialized_params(first)
@@ -178,9 +173,7 @@ def test_2000_generated_batches_preserve_identity_completeness_and_privacy() -> 
 
         propagated_cases += bool(first.contributions)
         abstained_cases += first.evaluations[0].status == "abstained"
-        blocked_cases += any(
-            item.kind == "blocked" for item in first.observations
-        )
+        blocked_cases += any(item.kind == "blocked" for item in first.observations)
 
     assert propagated_cases > 400
     assert abstained_cases > 400
