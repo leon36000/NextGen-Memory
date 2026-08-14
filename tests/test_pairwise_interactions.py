@@ -11,8 +11,8 @@ from nextgen_memory.interaction_credit import (
     InteractionTrial,
     MemoryDependencyGraph,
     PairInteractionKind,
-    PairwiseInteractionEstimator,
 )
+from nextgen_memory.pairwise_interactions import PairwiseInteractionEstimator
 
 MEMORY_A = UUID("00000000-0000-5000-8000-000000000001")
 MEMORY_B = UUID("00000000-0000-5000-8000-000000000002")
