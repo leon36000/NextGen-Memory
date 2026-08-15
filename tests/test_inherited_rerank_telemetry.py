@@ -5,22 +5,22 @@ from dataclasses import FrozenInstanceError, replace
 from uuid import UUID
 
 import pytest
+from nextgen_memory.inherited_rerank_telemetry import (
+    InheritedRerankObservation,
+    InheritedRerankSummary,
+    InheritedRerankTelemetryBatch,
+    InheritedRerankTelemetryConflictError,
+    InheritedRerankTelemetryValidationError,
+    InMemoryInheritedRerankTelemetrySink,
+    build_inherited_rerank_telemetry,
+    fingerprint_bounded_inherited_policy,
+)
 
 from nextgen_memory.bounded_inherited_reranker import (
     BoundedInheritedRerankerConfig,
     InheritedAwareRerankedMemory,
     InheritedEvidenceDisposition,
     InheritedScoreBreakdown,
-)
-from nextgen_memory.inherited_rerank_telemetry import (
-    InMemoryInheritedRerankTelemetrySink,
-    InheritedRerankObservation,
-    InheritedRerankSummary,
-    InheritedRerankTelemetryBatch,
-    InheritedRerankTelemetryConflictError,
-    InheritedRerankTelemetryValidationError,
-    build_inherited_rerank_telemetry,
-    fingerprint_bounded_inherited_policy,
 )
 from nextgen_memory.retrieval import ResearchRetrievalHit
 from nextgen_memory.utility_reranker import (
