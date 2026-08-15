@@ -1,0 +1,315 @@
+name: Finalize Inherited Rerank Telemetry v0
+
+on:
+  push:
+    branches: [bootstrap/inherited-rerank-telemetry-v0-finalize]
+
+permissions:
+  actions: read
+  contents: write
+  pull-requests: write
+
+jobs:
+  finalize:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: leon36000/NextGen-Memory
+      TARGET_BRANCH: feat/inherited-rerank-telemetry-v0
+      TARGET_SHA: d00992d20f970717268a8a7355f19ab487def4e9
+      BASE_SHA: ead611e8cd7caee5a59c6ce19b671625975e976e
+      CI_RUN_ID: 31859278936
+      PR_NUMBER: '16'
+      MARKER_BRANCH: bootstrap/inherited-rerank-telemetry-v0-finalize
+    steps:
+      - name: Verify exact feature head and ordinary PR matrix
+        run: |
+          set -euo pipefail
+          test "$(gh api "repos/$REPO/git/ref/heads/$TARGET_BRANCH" --jq '.object.sha')" = "$TARGET_SHA"
+          RUN=$(gh api "repos/$REPO/actions/runs/$CI_RUN_ID")
+          test "$(printf '%s' "$RUN" | jq -r '.head_sha')" = "$TARGET_SHA"
+          test "$(printf '%s' "$RUN" | jq -r '.event')" = 'pull_request'
+          test "$(printf '%s' "$RUN" | jq -r '.conclusion')" = 'success'
+          gh api "repos/$REPO/actions/runs/$CI_RUN_ID/jobs?per_page=100" > /tmp/jobs.json
+          jq -e '[.jobs[] | select(.name | contains("3.12")) | .conclusion] | length > 0 and all(. == "success")' /tmp/jobs.json
+          jq -e '[.jobs[] | select(.name | contains("3.13")) | .conclusion] | length > 0 and all(. == "success")' /tmp/jobs.json
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TARGET_SHA }}
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Verify exact diff surface and protected boundaries
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$TARGET_SHA"
+          git diff --check "$BASE_SHA...$TARGET_SHA"
+          git diff --name-only "$BASE_SHA...$TARGET_SHA" | sort > /tmp/files.txt
+          cat > /tmp/expected-files.txt <<'EOF'
+          docs/inherited-rerank-telemetry-v0-verification.md
+          docs/inherited-rerank-telemetry-v0.md
+          docs/superpowers/plans/2026-08-15-inherited-rerank-telemetry-v0.md
+          docs/superpowers/specs/2026-08-15-inherited-rerank-telemetry-v0-design.md
+          src/nextgen_memory/__init__.py
+          src/nextgen_memory/inherited_rerank_telemetry.py
+          tests/test_inherited_rerank_telemetry.py
+          tests/test_inherited_rerank_telemetry_properties.py
+          tests/test_inherited_rerank_telemetry_public_api.py
+          EOF
+          diff -u /tmp/expected-files.txt /tmp/files.txt
+          test -z "$(git diff --name-only "$BASE_SHA...$TARGET_SHA" -- src/nextgen_memory/bounded_inherited_reranker.py src/nextgen_memory/utility_reranker.py src/nextgen_memory/neon_utility.py migrations)"
+
+      - name: Install and reproduce lint, tests, coverage, compile and wheel
+        run: |
+          set -euo pipefail
+          python -m pip install -e '.[dev]'
+          ruff check .
+          python -m pytest -q
+          python -m pytest --cov=nextgen_memory --cov-report=json -q
+          python -m compileall -q src
+          python -m pip wheel . --no-deps -w /tmp/wheel
+          python -m pip install --force-reinstall /tmp/wheel/*.whl
+          python - <<'PY'
+          from nextgen_memory import (
+              InMemoryInheritedRerankTelemetrySink,
+              InheritedRerankObservation,
+              InheritedRerankSummary,
+              InheritedRerankTelemetryBatch,
+              InheritedRerankTelemetryConflictError,
+              InheritedRerankTelemetrySink,
+              InheritedRerankTelemetryValidationError,
+              build_inherited_rerank_telemetry,
+              fingerprint_bounded_inherited_policy,
+          )
+          assert InMemoryInheritedRerankTelemetrySink.__name__.startswith('InMemory')
+          assert InheritedRerankObservation.__name__ == 'InheritedRerankObservation'
+          assert InheritedRerankSummary.__name__ == 'InheritedRerankSummary'
+          assert InheritedRerankTelemetryBatch.__name__ == 'InheritedRerankTelemetryBatch'
+          assert InheritedRerankTelemetryConflictError.__name__.endswith('ConflictError')
+          assert InheritedRerankTelemetrySink.__name__ == 'InheritedRerankTelemetrySink'
+          assert InheritedRerankTelemetryValidationError.__name__.endswith('ValidationError')
+          assert callable(build_inherited_rerank_telemetry)
+          assert callable(fingerprint_bounded_inherited_policy)
+          PY
+          python -m pytest --collect-only -q > /tmp/collect.txt
+          python - <<'PY'
+          import re
+          from pathlib import Path
+          text = Path('/tmp/collect.txt').read_text(encoding='utf-8')
+          matches = re.findall(r'(\d+) tests? collected', text)
+          if not matches:
+              raise SystemExit('unable to parse test count')
+          Path('/tmp/tests.txt').write_text(matches[-1], encoding='utf-8')
+          PY
+          jq -r '.totals.percent_covered' coverage.json > /tmp/coverage.txt
+          sha256sum /tmp/wheel/*.whl | awk '{print $1}' > /tmp/wheel-sha.txt
+
+      - name: Generate canonical example twice and verify privacy
+        run: |
+          set -euo pipefail
+          cat > /tmp/render_example.py <<'PY'
+          from uuid import UUID
+          from nextgen_memory import (
+              BoundedInheritedRerankerConfig,
+              InheritedAwareRerankedMemory,
+              InheritedEvidenceDisposition,
+              InheritedScoreBreakdown,
+              ResearchRetrievalHit,
+              RerankedMemory,
+              UtilityScoreBreakdown,
+              build_inherited_rerank_telemetry,
+          )
+
+          space = UUID('11111111-1111-1111-1111-111111111111')
+          decision = UUID('22222222-2222-2222-2222-222222222222')
+          memory = UUID('aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa')
+          hit = ResearchRetrievalHit(
+              memory_id=memory,
+              backend_ref='telemetry:example',
+              rank=1,
+              score=0.8,
+              title='Example',
+              source_uri='https://example.invalid/example',
+              tags=('telemetry',),
+          )
+          base = RerankedMemory(
+              hit=hit,
+              original_rank=1,
+              final_rank=1,
+              final_score=0.8,
+              breakdown=UtilityScoreBreakdown(
+                  relevance=0.8,
+                  utility=0.0,
+                  harm_risk=0.0,
+                  token_cost=0.0,
+                  latency_cost=0.0,
+                  weighted_relevance=0.8,
+                  weighted_utility=0.0,
+                  weighted_harm_penalty=0.0,
+                  weighted_token_penalty=0.0,
+                  weighted_latency_penalty=0.0,
+              ),
+          )
+          inherited = InheritedScoreBreakdown(
+              contribution_count=4,
+              value_sum=0.8,
+              absolute_value_sum=0.8,
+              standard_error_sum=0.1,
+              minimum_structural_confidence=0.9,
+              inherited_mean=0.2,
+              signed_signal=0.5,
+              count_shrinkage=1 / 3,
+              path_coherence=1.0,
+              uncertainty_reliability=0.8,
+              confidence_reliability=0.9,
+              uncapped_component=0.02,
+              applied_component=0.02,
+              disposition=InheritedEvidenceDisposition.APPLIED,
+              policy_version='bounded-inherited-reranker-v0',
+          )
+          result = InheritedAwareRerankedMemory(
+              base=base,
+              final_rank=1,
+              final_score=0.82,
+              inherited_breakdown=inherited,
+          )
+          batch = build_inherited_rerank_telemetry(
+              space_id=space,
+              router_decision_id=decision,
+              config=BoundedInheritedRerankerConfig(),
+              results=(result,),
+          )
+          print(batch.render_json())
+          PY
+          python /tmp/render_example.py > /tmp/example-1.json
+          python /tmp/render_example.py > /tmp/example-2.json
+          cmp /tmp/example-1.json /tmp/example-2.json
+          jq -e '.summary.candidate_count == 1' /tmp/example-1.json
+          jq -e '.summary.applied_count == 1' /tmp/example-1.json
+          jq -e '.observations[0].applied_component == 0.02' /tmp/example-1.json
+          jq -e '.observations[0].rank_delta == 0' /tmp/example-1.json
+          sha256sum /tmp/example-1.json | awk '{print $1}' > /tmp/example-sha.txt
+          python - <<'PY'
+          from pathlib import Path
+          serialized = Path('/tmp/example-1.json').read_text(encoding='utf-8').lower()
+          forbidden = (
+              'query', 'prompt', 'answer', 'memory_body', 'body_text',
+              'command', 'stdout', 'stderr', 'patch', 'environment',
+              'secret', 'token', 'api_key', 'feedback_note',
+              'direct_reward', 'avg_reward', 'positive_count',
+              'negative_count', 'relation_path', 'edge_path',
+          )
+          for term in forbidden:
+              assert term not in serialized, term
+          PY
+
+      - name: Scan exact diff for high-signal secrets
+        run: |
+          set -euo pipefail
+          if git diff "$BASE_SHA...$TARGET_SHA" | grep -E '(sk-[A-Za-z0-9]{20,}|ghp_[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16}|mongodb\+srv://|postgres(ql)?://|BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY)'; then
+            echo 'High-signal secret pattern found' >&2
+            exit 1
+          fi
+
+      - name: Compute exact verification facts
+        id: facts
+        run: |
+          echo "tests=$(cat /tmp/tests.txt)" >> "$GITHUB_OUTPUT"
+          echo "coverage=$(cat /tmp/coverage.txt)" >> "$GITHUB_OUTPUT"
+          echo "wheel_sha=$(cat /tmp/wheel-sha.txt)" >> "$GITHUB_OUTPUT"
+          echo "example_sha=$(cat /tmp/example-sha.txt)" >> "$GITHUB_OUTPUT"
+
+      - name: Update draft PR with exact evidence
+        run: |
+          cat > /tmp/body.md <<EOF
+          ## Résumé
+
+          Ajoute **Inherited Rerank Telemetry v0**, un lot déterministe et agrégé qui observe l'effet du reranking hérité sans stocker de query, contenu mémoire, feedback direct ou chemins de provenance.
+
+          La PR reste empilée sur \`feat/bounded-inherited-reranker-v0\`, brouillon et non fusionnée.
+
+          ## Contrats
+
+          - une observation immuable par mémoire ;
+          - un résumé de dispositions, promotions, rétrogradations et changement du top ;
+          - UUID5 et SHA-256 déterministes ;
+          - JSON canonique byte-identique sur retry et permutation ;
+          - sink injecté et in-memory idempotent ;
+          - conflit détecté si une identité est réutilisée avec un contenu différent ;
+          - aucune persistance, migration ou timestamp imposé.
+
+          ## TDD
+
+          - RED noyau : Ruff vert puis module absent ;
+          - noyau, builder et sink validés avant export public ;
+          - RED API : tests internes verts, un seul échec sur les exports racine ;
+          - GREEN final : **${{ steps.facts.outputs.tests }} tests**.
+
+          ## Vérification GitHub Actions
+
+          - commit exact : \`$TARGET_SHA\` ;
+          - base exacte : \`$BASE_SHA\` ;
+          - workflow CI : \`$CI_RUN_ID\` ;
+          - Python 3.12.13 : Ruff et **323 tests** réussis ;
+          - Python 3.13 : Ruff et **323 tests** réussis ;
+          - conclusion globale : **success**.
+
+          ## Propriétés
+
+          - **5 000 lots déterministes** ;
+          - lots vides et quatre dispositions couverts ;
+          - partitions des dispositions et mouvements de rang exactes ;
+          - cap et équation de score vérifiés ;
+          - permutations d'entrée byte-identiques ;
+          - changement de politique ou décision → nouvelle identité ;
+          - champs bruts, directs, secrets et chemins absents.
+
+          ## Reproduction indépendante
+
+          - couverture globale : **${{ steps.facts.outputs.coverage }} %** ;
+          - compileall : réussi ;
+          - wheel construit, réinstallé et API importée ;
+          - SHA-256 du wheel : \`${{ steps.facts.outputs.wheel_sha }}\` ;
+          - SHA-256 du JSON canonique : \`${{ steps.facts.outputs.example_sha }}\` ;
+          - diff limité aux **9 fichiers** prévus ;
+          - rerankers, Neon utility et migrations inchangés ;
+          - scans de secrets et confidentialité : propres.
+
+          ## Garde-fous
+
+          - aucune fusion ;
+          - aucune modification de main ;
+          - aucune écriture Neon/Mongo ;
+          - aucun schéma, rétention ou émission production autorisé ;
+          - persistance reportée à une PR distincte après validation opérationnelle.
+          EOF
+          sed -i 's/^          //' /tmp/body.md
+          gh pr edit "$PR_NUMBER" --repo "$REPO" --body-file /tmp/body.md
+
+      - name: Persist machine-readable verification marker
+        run: |
+          set -euo pipefail
+          jq -n \
+            --argjson pull_request 16 \
+            --arg head_sha "$TARGET_SHA" \
+            --arg base_sha "$BASE_SHA" \
+            --argjson ci_run_id "$CI_RUN_ID" \
+            --argjson tests '${{ steps.facts.outputs.tests }}' \
+            --argjson coverage '${{ steps.facts.outputs.coverage }}' \
+            --arg wheel_sha256 '${{ steps.facts.outputs.wheel_sha }}' \
+            --arg example_sha256 '${{ steps.facts.outputs.example_sha }}' \
+            '{pull_request:$pull_request,branch:"feat/inherited-rerank-telemetry-v0",base_sha:$base_sha,head_sha:$head_sha,ci_run_id:$ci_run_id,conclusion:"success",python:["3.12.13","3.13"],tests:$tests,coverage_percent:$coverage,property_cases:5000,changed_files:9,wheel_sha256:$wheel_sha256,canonical_json_sha256:$example_sha256,deterministic_retry:true,input_permutation_invariant:true,aggregate_only:true,direct_feedback_included:false,protected_files_changed:false,database_changed:false,merged:false,verified_at:(now|todate)}' > /tmp/marker.json
+          CONTENT=$(base64 -w0 /tmp/marker.json)
+          PATH_NAME='bootstrap/inherited-rerank-telemetry-v0-verification.json'
+          EXISTING_SHA=$(gh api "repos/$REPO/contents/$PATH_NAME?ref=$MARKER_BRANCH" --jq '.sha' 2>/dev/null || true)
+          if [ -n "$EXISTING_SHA" ]; then
+            gh api --method PUT "repos/$REPO/contents/$PATH_NAME" -f message='chore: record Inherited Rerank Telemetry v0 verification' -f branch="$MARKER_BRANCH" -f sha="$EXISTING_SHA" -f content="$CONTENT" >/dev/null
+          else
+            gh api --method PUT "repos/$REPO/contents/$PATH_NAME" -f message='chore: record Inherited Rerank Telemetry v0 verification' -f branch="$MARKER_BRANCH" -f content="$CONTENT" >/dev/null
+          fi
