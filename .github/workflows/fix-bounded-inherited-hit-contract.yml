@@ -1,0 +1,95 @@
+name: Fix bounded inherited retrieval-hit fixtures
+
+on:
+  push:
+    branches: [bootstrap/fix-bounded-inherited-hit-contract]
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/bounded-inherited-reranker-v0
+          fetch-depth: 0
+
+      - name: Verify guarded target head
+        run: test "$(git rev-parse HEAD)" = "aa683e2135df6e4e0250b5c7fd8e6516ddbbb458"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install development tools
+        run: python -m pip install -e '.[dev]'
+
+      - name: Remove obsolete ResearchRetrievalHit arguments
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          paths = (
+              Path("tests/test_bounded_inherited_reranker.py"),
+              Path("tests/test_bounded_inherited_reranker_properties.py"),
+              Path("scripts/simulate_bounded_inherited_reranker_v0.py"),
+          )
+          total_source_type = 0
+          total_year = 0
+          for path in paths:
+              text = path.read_text(encoding="utf-8")
+              source_type_count = text.count('        source_type="')
+              year_count = text.count("        year=2026,\n")
+              if source_type_count != 1 or year_count != 1:
+                  raise SystemExit(
+                      f"{path}: expected one obsolete source_type/year pair, "
+                      f"found source_type={source_type_count}, year={year_count}"
+                  )
+              lines = [
+                  line
+                  for line in text.splitlines(keepends=True)
+                  if not line.startswith('        source_type="')
+                  and line != "        year=2026,\n"
+              ]
+              path.write_text("".join(lines), encoding="utf-8")
+              total_source_type += source_type_count
+              total_year += year_count
+          if (total_source_type, total_year) != (3, 3):
+              raise SystemExit("unexpected obsolete argument total")
+          PY
+
+      - name: Verify focused and complete behavior
+        run: |
+          ruff check .
+          python -m pytest \
+            tests/test_bounded_inherited_reranker.py \
+            tests/test_bounded_inherited_reranker_properties.py \
+            tests/test_bounded_inherited_reranker_simulation.py \
+            -q
+          python -m pytest -q
+          python -m compileall -q src scripts
+          git diff --check
+
+      - name: Verify exact correction scope
+        run: |
+          cat > /tmp/expected <<'EOF'
+          scripts/simulate_bounded_inherited_reranker_v0.py
+          tests/test_bounded_inherited_reranker.py
+          tests/test_bounded_inherited_reranker_properties.py
+          EOF
+          git diff --name-only | sort > /tmp/actual
+          diff -u /tmp/expected /tmp/actual
+
+      - name: Commit and push fast-forward
+        run: |
+          git config user.name "NextGen Memory Automation"
+          git config user.email "actions@users.noreply.github.com"
+          git add \
+            scripts/simulate_bounded_inherited_reranker_v0.py \
+            tests/test_bounded_inherited_reranker.py \
+            tests/test_bounded_inherited_reranker_properties.py
+          git commit -m "test: align bounded inherited fixtures with retrieval hit contract"
+          git push origin HEAD:feat/bounded-inherited-reranker-v0
