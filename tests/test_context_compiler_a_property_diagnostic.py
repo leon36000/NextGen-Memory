@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import random
+import sys
 from pathlib import Path
 
 from nextgen_memory.context_compiler import IntegratedContextCompiler
@@ -16,6 +17,7 @@ def _load_property_module():
     assert spec is not None
     assert spec.loader is not None
     module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
 
