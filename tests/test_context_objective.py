@@ -12,9 +12,9 @@ from nextgen_memory.context_compiler_contracts import (
     ContextInteractionKind,
     ContextOmissionReason,
     ContextPairInteraction,
+    EvidenceFidelity,
     IntegratedContextCompileRequest,
     IntegratedContextEvidence,
-    EvidenceFidelity,
 )
 
 objective_module = importlib.import_module("nextgen_memory.context_objective")
@@ -480,7 +480,12 @@ def test_set_comparison_is_lexicographic_and_deterministic() -> None:
         (
             evidence(MEMORY_A, coverage_keys=("cause",), relevance=0.1),
             evidence(MEMORY_B, relevance=1.0, estimated_tokens=50),
-            evidence(MEMORY_C, coverage_keys=("cause",), relevance=0.1, estimated_tokens=80),
+            evidence(
+                MEMORY_C,
+                coverage_keys=("cause",),
+                relevance=0.1,
+                estimated_tokens=80,
+            ),
         ),
         (),
     )
