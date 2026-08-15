@@ -6,6 +6,16 @@ from dataclasses import FrozenInstanceError, replace
 from uuid import UUID
 
 import pytest
+from nextgen_memory.paired_rerank_policy_evaluation import (
+    PairedPolicyAbstentionReason,
+    PairedPolicyEvaluationConfig,
+    PairedPolicyVerdict,
+    PairedRerankPolicyEvaluation,
+    PairedRerankPolicyEvaluationValidationError,
+    PairedRerankPolicyEvaluator,
+    PairedRerankPolicyTrial,
+    fingerprint_paired_policy_evaluation_config,
+)
 
 from nextgen_memory.bounded_inherited_reranker import (
     BoundedInheritedRerankerConfig,
@@ -17,16 +27,6 @@ from nextgen_memory.causal_credit import OutcomeMeasurement
 from nextgen_memory.inherited_rerank_telemetry import (
     InheritedRerankTelemetryBatch,
     build_inherited_rerank_telemetry,
-)
-from nextgen_memory.paired_rerank_policy_evaluation import (
-    PairedPolicyAbstentionReason,
-    PairedPolicyEvaluationConfig,
-    PairedPolicyVerdict,
-    PairedRerankPolicyEvaluation,
-    PairedRerankPolicyEvaluationValidationError,
-    PairedRerankPolicyEvaluator,
-    PairedRerankPolicyTrial,
-    fingerprint_paired_policy_evaluation_config,
 )
 from nextgen_memory.retrieval import ResearchRetrievalHit
 from nextgen_memory.utility_reranker import (
