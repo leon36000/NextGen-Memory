@@ -1,0 +1,40 @@
+name: Verify Paired Policy Evaluation Simulation RED
+
+on:
+  push:
+    branches: [bootstrap/paired-policy-evaluation-simulation-red]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/paired-rerank-policy-evaluation-v0
+          fetch-depth: 0
+      - name: Verify guarded feature head
+        run: test "$(git rev-parse HEAD)" = "e063c5fbb98277d7d0215ace25ae1cb421ef3706"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install development tools
+        run: python -m pip install -e '.[dev]'
+      - name: Require internal GREEN
+        run: |
+          ruff check .
+          python -m pytest \
+            --ignore=tests/test_paired_rerank_policy_evaluation_simulation.py \
+            -q
+      - name: Require exact simulation RED
+        run: |
+          set +e
+          python -m pytest tests/test_paired_rerank_policy_evaluation_simulation.py -q > /tmp/red.txt 2>&1
+          status=$?
+          set -e
+          cat /tmp/red.txt
+          test "$status" -ne 0
+          grep -F "No module named 'scripts.simulate_paired_rerank_policy_evaluation_v0'" /tmp/red.txt
