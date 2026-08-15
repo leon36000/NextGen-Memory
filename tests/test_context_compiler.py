@@ -152,10 +152,7 @@ def test_scope_identity_and_dependency_errors_propagate_fail_closed() -> None:
     with pytest.raises(ContextCompilerValidationError, match="space_id"):
         compile_packet(
             request(),
-            (
-                evidence(1),
-                evidence(2, space_id=OTHER_SPACE_ID),
-            ),
+            (evidence(1), evidence(2, space_id=OTHER_SPACE_ID)),
         )
     with pytest.raises(ContextCompilerValidationError, match="immutable identity"):
         compile_packet(
@@ -169,19 +166,17 @@ def test_scope_identity_and_dependency_errors_propagate_fail_closed() -> None:
 
 def test_duplicate_and_threshold_omissions_are_preserved() -> None:
     first = evidence(1, relevance=0.9)
-    duplicate = evidence(1, relevance=0.8)
-    same_content = evidence(
-        2,
-        content=first.content,
-        content_hash=first.content_hash,
-        relevance=0.1,
-    )
     packet = compile_packet(
         request(minimum_authority=0.8, minimum_confidence=0.8),
         (
             first,
-            duplicate,
-            same_content,
+            evidence(1, relevance=0.8),
+            evidence(
+                2,
+                content=first.content,
+                content_hash=first.content_hash,
+                relevance=0.1,
+            ),
             evidence(3, authority=0.5),
             evidence(4, confidence=0.5),
         ),
@@ -305,6 +300,7 @@ def test_nonpositive_redundant_and_hard_limit_omissions_are_classified() -> None
     assert by_id[memory_id(2)] in {
         ContextOmissionReason.EXPERT_CAP,
         ContextOmissionReason.REDUNDANCY_DOMINATED,
+        ContextOmissionReason.TOKEN_BUDGET,
     }
     assert by_id[memory_id(3)] is ContextOmissionReason.NON_POSITIVE_MARGINAL_VALUE
     assert by_id[memory_id(4)] in {
@@ -315,7 +311,10 @@ def test_nonpositive_redundant_and_hard_limit_omissions_are_classified() -> None
 
 
 def test_packet_uuid_json_and_selection_are_input_order_invariant() -> None:
-    candidates = tuple(evidence(index, relevance=0.2 + 0.1 * index) for index in range(1, 7))
+    candidates = tuple(
+        evidence(index, relevance=0.2 + 0.1 * index)
+        for index in range(1, 7)
+    )
     interactions = (
         interaction(1, 4, kind=ContextInteractionKind.SYNERGY, value=0.3),
         interaction(2, 5, kind=ContextInteractionKind.REDUNDANCY, value=-0.2),
