@@ -2,13 +2,13 @@ from __future__ import annotations
 
 import nextgen_memory
 from nextgen_memory.inherited_rerank_telemetry import (
-    InMemoryInheritedRerankTelemetrySink,
     InheritedRerankObservation,
     InheritedRerankSummary,
     InheritedRerankTelemetryBatch,
     InheritedRerankTelemetryConflictError,
     InheritedRerankTelemetrySink,
     InheritedRerankTelemetryValidationError,
+    InMemoryInheritedRerankTelemetrySink,
     build_inherited_rerank_telemetry,
     fingerprint_bounded_inherited_policy,
 )
