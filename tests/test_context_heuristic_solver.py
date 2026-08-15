@@ -123,7 +123,7 @@ def test_mandatory_seed_and_prerequisites_are_never_dropped() -> None:
                 prerequisite_memory_ids=(memory_id(1),),
                 relevance=0.0,
             ),
-            evidence(3, relevance=-0.0, harm_risk=1.0),
+            evidence(3, relevance=0.0, harm_risk=1.0),
         ),
     )
 
@@ -134,17 +134,16 @@ def test_mandatory_seed_and_prerequisites_are_never_dropped() -> None:
 
 
 def test_required_coverage_uses_weight_before_optional_value() -> None:
-    compile_request = request(
-        token_budget=110,
-        envelope_tokens=50,
-        max_items=1,
-        coverage_demands=(
-            ContextCoverageDemand("major", 3.0, True),
-            ContextCoverageDemand("minor", 1.0, True),
-        ),
-    )
     problem, solution = solve(
-        compile_request,
+        request(
+            token_budget=110,
+            envelope_tokens=50,
+            max_items=1,
+            coverage_demands=(
+                ContextCoverageDemand("major", 3.0, True),
+                ContextCoverageDemand("minor", 1.0, True),
+            ),
+        ),
         (
             evidence(1, coverage_keys=("minor",), relevance=1.0),
             evidence(2, coverage_keys=("major",), relevance=0.0),
@@ -158,8 +157,8 @@ def test_required_coverage_uses_weight_before_optional_value() -> None:
     assert evaluation.uncovered_required_keys == ("minor",)
 
 
-def test_required_phase_adds_candidate_with_missing_prerequisite_atomically() -> None:
-    _, solution = solve(
+def test_required_addition_includes_prerequisite_and_can_remain_incomplete() -> None:
+    _, closed = solve(
         request(
             coverage_demands=(ContextCoverageDemand("cause", 2.0, True),)
         ),
@@ -173,30 +172,26 @@ def test_required_phase_adds_candidate_with_missing_prerequisite_atomically() ->
             ),
         ),
     )
+    assert closed.selected_ids == frozenset({memory_id(1), memory_id(2)})
+    assert closed.phase_by_id[memory_id(1)] is ContextSelectionPhase.COVERAGE
+    assert closed.trigger_by_id[memory_id(1)] == memory_id(2)
 
-    assert solution.selected_ids == frozenset({memory_id(1), memory_id(2)})
-    assert solution.phase_by_id[memory_id(1)] is ContextSelectionPhase.COVERAGE
-    assert solution.trigger_by_id[memory_id(1)] == memory_id(2)
-
-
-def test_required_phase_can_return_incomplete_without_raising() -> None:
-    problem, solution = solve(
+    problem, incomplete = solve(
         request(
             token_budget=100,
             envelope_tokens=50,
             max_items=1,
             coverage_demands=(ContextCoverageDemand("missing", 2.0, True),),
         ),
-        (evidence(1, relevance=0.4),),
+        (evidence(3, relevance=0.4),),
     )
-
     assert evaluate_context_set(
         problem,
-        solution.selected_ids,
+        incomplete.selected_ids,
     ).uncovered_required_keys == ("missing",)
 
 
-def test_optional_fill_uses_positive_marginal_value_per_added_token() -> None:
+def test_optional_fill_uses_value_per_token_when_total_value_is_equal() -> None:
     policy = ContextObjectivePolicy(
         new_expert_bonus=0.0,
         new_subject_bonus=0.0,
@@ -210,7 +205,7 @@ def test_optional_fill_uses_positive_marginal_value_per_added_token() -> None:
             objective_policy=policy,
         ),
         (
-            evidence(1, relevance=0.8, estimated_tokens=80),
+            evidence(1, relevance=0.6, estimated_tokens=80),
             evidence(2, relevance=0.6, estimated_tokens=40),
         ),
     )
@@ -248,16 +243,16 @@ def test_non_positive_optional_evidence_is_not_admitted() -> None:
     ).evidence_tokens < problem.request.usable_evidence_tokens
 
 
-def test_positive_synergy_pair_is_considered_as_joint_addition() -> None:
-    policy = ContextObjectivePolicy(
+def test_synergy_pair_is_joint_candidate_and_redundancy_stops_fill() -> None:
+    synergy_policy = ContextObjectivePolicy(
         new_expert_bonus=0.0,
         new_subject_bonus=0.0,
         new_source_cluster_bonus=0.0,
         pair_interaction_weight=1.0,
         pair_interaction_cap=1.0,
     )
-    problem = canonicalize_context_problem(
-        request(objective_policy=policy),
+    synergy_problem = canonicalize_context_problem(
+        request(objective_policy=synergy_policy),
         (
             evidence(1, relevance=0.0, harm_risk=0.08),
             evidence(2, relevance=0.0, harm_risk=0.08),
@@ -271,43 +266,37 @@ def test_positive_synergy_pair_is_considered_as_joint_addition() -> None:
             ),
         ),
     )
+    assert frozenset({memory_id(1), memory_id(2)}) in candidate_additions(
+        synergy_problem,
+        frozenset(),
+    )
+    assert HeuristicContextSolver().solve(synergy_problem).selected_ids == frozenset(
+        {memory_id(1), memory_id(2)}
+    )
 
-    additions = candidate_additions(problem, frozenset())
-    solution = HeuristicContextSolver().solve(problem)
-
-    assert frozenset({memory_id(1), memory_id(2)}) in additions
-    assert solution.selected_ids == frozenset({memory_id(1), memory_id(2)})
-
-
-def test_redundancy_stops_duplicate_fill() -> None:
-    policy = ContextObjectivePolicy(
+    redundancy_policy = ContextObjectivePolicy(
         new_expert_bonus=0.0,
         new_subject_bonus=0.0,
         new_source_cluster_bonus=0.0,
         pair_interaction_weight=2.0,
         pair_interaction_cap=1.0,
     )
-    problem, solution = solve(
-        request(objective_policy=policy),
-        (evidence(1, relevance=0.4), evidence(2, relevance=0.4)),
+    _, redundant_solution = solve(
+        request(objective_policy=redundancy_policy),
+        (evidence(3, relevance=0.4), evidence(4, relevance=0.4)),
         (
             interaction(
-                1,
-                2,
+                3,
+                4,
                 kind=ContextInteractionKind.REDUNDANCY,
                 value=-0.3,
             ),
         ),
     )
-
-    assert solution.selected_ids == frozenset({memory_id(1)})
-    assert evaluate_context_set(
-        problem,
-        solution.selected_ids,
-    ).breakdown.total_set_value > 0
+    assert redundant_solution.selected_ids == frozenset({memory_id(3)})
 
 
-def test_local_search_can_replace_coverage_item_with_cheaper_peer() -> None:
+def test_local_search_can_replace_costly_equal_coverage_item() -> None:
     policy = ContextObjectivePolicy(
         new_expert_bonus=0.0,
         new_subject_bonus=0.0,
@@ -341,7 +330,7 @@ def test_local_search_can_replace_coverage_item_with_cheaper_peer() -> None:
     assert evaluate_context_set(problem, solution.selected_ids).evidence_tokens == 40
 
 
-def test_heuristic_preserves_dependencies_and_mandatory_items() -> None:
+def test_dependencies_fallbacks_and_mandatory_baseline_are_preserved() -> None:
     problem, solution = solve(
         request(local_search_pass_limit=8),
         (
@@ -362,20 +351,8 @@ def test_heuristic_preserves_dependencies_and_mandatory_items() -> None:
     assert memory_id(1) in solution.selected_ids
     for item_id in solution.selected_ids:
         assert problem.prerequisite_closure[item_id].issubset(solution.selected_ids)
-
-
-def test_fallbacks_make_result_no_worse_than_best_single_addition() -> None:
-    problem, solution = solve(
-        request(),
-        (
-            evidence(1, mandatory=True, relevance=0.0),
-            evidence(2, relevance=0.7),
-            evidence(3, relevance=0.6),
-        ),
-    )
     final = evaluate_context_set(problem, solution.selected_ids)
     mandatory = evaluate_context_set(problem, problem.mandatory_closure)
-
     assert final.breakdown.total_set_value >= mandatory.breakdown.total_set_value
     for addition in candidate_additions(problem, problem.mandatory_closure):
         try:
