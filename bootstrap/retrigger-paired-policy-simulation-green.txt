@@ -1,0 +1,3 @@
+feature_branch=feat/paired-rerank-policy-evaluation-v0
+property_cases=5000
+hash_seeds=default,1,999
