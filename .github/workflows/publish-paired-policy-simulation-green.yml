@@ -1,0 +1,113 @@
+name: Publish Paired Policy Simulation GREEN
+
+on:
+  push:
+    branches: [bootstrap/paired-policy-simulation-green]
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/paired-rerank-policy-evaluation-v0
+          fetch-depth: 0
+      - name: Verify guarded feature head
+        run: test "$(git rev-parse HEAD)" = "62235c7a3f0100d17677b6566c99635ae02c57a0"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install development tools
+        run: python -m pip install -e '.[dev]'
+      - name: Replace process-randomized trial identity
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path("scripts/simulate_paired_rerank_policy_evaluation_v0.py")
+          text = path.read_text(encoding="utf-8")
+          old_imports = """import json
+          import random
+          """
+          new_imports = """import hashlib
+          import json
+          import random
+          """
+          if text.count(old_imports) != 1:
+              raise SystemExit("expected one simulation import block")
+          text = text.replace(old_imports, new_imports, 1)
+
+          old_context = """def _context_hash(prefix: str, index: int) -> str:
+              import hashlib
+
+              return hashlib.sha256(f"{prefix}:{index}".encode()).hexdigest()
+          """
+          new_context = """def _context_hash(prefix: str, index: int) -> str:
+              return hashlib.sha256(f"{prefix}:{index}".encode()).hexdigest()
+
+
+          def _stable_trial_id(prefix: str, index: int) -> UUID:
+              digest = hashlib.sha256(f"{prefix}:{index}".encode()).digest()
+              return UUID(bytes=digest[:16])
+          """
+          if text.count(old_context) != 1:
+              raise SystemExit("expected one context-hash helper")
+          text = text.replace(old_context, new_context, 1)
+
+          old_id = """            trial_id=UUID(int=(hash(name) & ((1 << 64) - 1)) << 32 | index + 1),
+          """
+          new_id = """            trial_id=_stable_trial_id(name, index),
+          """
+          if text.count(old_id) != 1:
+              raise SystemExit("expected one randomized trial identity")
+          text = text.replace(old_id, new_id, 1)
+          path.write_text(text, encoding="utf-8")
+          PY
+      - name: Format and verify simulation, properties, and complete suite
+        run: |
+          ruff format \
+            scripts/simulate_paired_rerank_policy_evaluation_v0.py \
+            tests/test_paired_rerank_policy_evaluation_simulation.py \
+            tests/test_paired_rerank_policy_evaluation_properties.py
+          ruff check . --fix
+          ruff check .
+          python -m pytest \
+            tests/test_paired_rerank_policy_evaluation.py \
+            tests/test_paired_rerank_policy_evaluation_properties.py \
+            tests/test_paired_rerank_policy_evaluation_simulation.py \
+            -q
+          python scripts/simulate_paired_rerank_policy_evaluation_v0.py > /tmp/sim-1.json
+          PYTHONHASHSEED=1 python scripts/simulate_paired_rerank_policy_evaluation_v0.py > /tmp/sim-2.json
+          PYTHONHASHSEED=999 python scripts/simulate_paired_rerank_policy_evaluation_v0.py > /tmp/sim-3.json
+          cmp /tmp/sim-1.json /tmp/sim-2.json
+          cmp /tmp/sim-1.json /tmp/sim-3.json
+          jq -e '.variance_experiment.paired_standard_error < .variance_experiment.unpaired_standard_error' /tmp/sim-1.json
+          jq -e '.variance_experiment.standard_error_ratio < 0.25' /tmp/sim-1.json
+          jq -e '.scenario_count == 6' /tmp/sim-1.json
+          jq -e '.memory_level_credit_emitted == false' /tmp/sim-1.json
+          python -m pytest -q
+          python -m compileall -q src scripts
+          git diff --check
+      - name: Verify exact correction scope
+        run: |
+          cat > /tmp/allowed <<'EOF'
+          scripts/simulate_paired_rerank_policy_evaluation_v0.py
+          tests/test_paired_rerank_policy_evaluation_properties.py
+          tests/test_paired_rerank_policy_evaluation_simulation.py
+          EOF
+          git diff --name-only | sort > /tmp/actual
+          while read -r path; do grep -Fx "$path" /tmp/allowed >/dev/null; done < /tmp/actual
+      - name: Commit and push fast-forward
+        run: |
+          git config user.name "NextGen Memory Automation"
+          git config user.email "actions@users.noreply.github.com"
+          git add \
+            scripts/simulate_paired_rerank_policy_evaluation_v0.py \
+            tests/test_paired_rerank_policy_evaluation_properties.py \
+            tests/test_paired_rerank_policy_evaluation_simulation.py
+          git commit -m "test: verify paired policy evaluation properties"
+          git push origin HEAD:feat/paired-rerank-policy-evaluation-v0
