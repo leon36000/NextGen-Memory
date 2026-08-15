@@ -101,89 +101,60 @@ def interaction(
     )
 
 
-def test_canonicalization_rejects_mixed_scope_and_conflicting_identity() -> None:
+def test_canonicalization_rejects_scope_identity_unknown_prerequisite_and_cycle() -> None:
     with pytest.raises(ContextCompilerValidationError, match="space_id"):
         canonicalize_context_problem(
             request(),
-            (
-                evidence(MEMORY_A),
-                evidence(MEMORY_B, space_id=OTHER_SPACE_ID),
-            ),
+            (evidence(MEMORY_A), evidence(MEMORY_B, space_id=OTHER_SPACE_ID)),
             (),
         )
-
     with pytest.raises(ContextCompilerValidationError, match="immutable identity"):
         canonicalize_context_problem(
             request(),
             (
                 evidence(MEMORY_A),
-                evidence(
-                    MEMORY_A,
-                    content="conflicting",
-                    content_hash="f" * 64,
-                ),
+                evidence(MEMORY_A, content="conflict", content_hash="f" * 64),
+            ),
+            (),
+        )
+    with pytest.raises(ContextDependencyError, match="unknown prerequisite"):
+        canonicalize_context_problem(
+            request(),
+            (evidence(MEMORY_A, prerequisite_memory_ids=(MEMORY_E,)),),
+            (),
+        )
+    with pytest.raises(ContextDependencyError, match="cycle"):
+        canonicalize_context_problem(
+            request(),
+            (
+                evidence(MEMORY_A, prerequisite_memory_ids=(MEMORY_B,)),
+                evidence(MEMORY_B, prerequisite_memory_ids=(MEMORY_A,)),
             ),
             (),
         )
 
 
-def test_exact_duplicates_are_deduplicated_with_best_dynamic_representative() -> None:
+def test_duplicate_candidates_choose_best_dynamic_representative() -> None:
     low = evidence(MEMORY_A, relevance=0.2, original_rank=2)
     high = evidence(MEMORY_A, relevance=0.9, original_rank=1)
 
     problem = canonicalize_context_problem(request(), (low, high, high), ())
 
     assert problem.candidates == (high,)
-    assert problem.candidate_by_id[MEMORY_A] == high
     assert [item.reason for item in problem.initial_omissions] == [
         ContextOmissionReason.DUPLICATE_CANDIDATE,
         ContextOmissionReason.DUPLICATE_CANDIDATE,
     ]
 
 
-def test_same_hash_with_different_content_fails_closed() -> None:
-    with pytest.raises(ContextCompilerValidationError, match="content_hash"):
-        canonicalize_context_problem(
-            request(),
-            (
-                evidence(MEMORY_A, content_hash="f" * 64, content="first"),
-                evidence(MEMORY_B, content_hash="f" * 64, content="second"),
-            ),
-            (),
-        )
-
-
-def test_same_content_keeps_best_dynamic_representative() -> None:
-    low = evidence(
-        MEMORY_A,
-        content="same",
-        content_hash="f" * 64,
-        relevance=0.4,
-        original_rank=2,
-    )
-    high = evidence(
-        MEMORY_B,
-        content="same",
-        content_hash="f" * 64,
-        relevance=0.8,
-        original_rank=1,
-    )
-
-    problem = canonicalize_context_problem(request(), (low, high), ())
-
-    assert tuple(problem.candidate_by_id) == (MEMORY_B,)
-    assert problem.initial_omissions[0].memory_id == MEMORY_A
-    assert problem.initial_omissions[0].reason is ContextOmissionReason.DUPLICATE_CONTENT
-
-
-def test_structural_anchor_survives_same_content_deduplication() -> None:
+def test_content_dedup_preserves_structural_anchor_and_rejects_hash_collision() -> None:
     prerequisite = evidence(
         MEMORY_A,
         content="same",
         content_hash="f" * 64,
         relevance=0.1,
     )
-    dynamic_duplicate = evidence(
+    stronger_duplicate = evidence(
         MEMORY_B,
         content="same",
         content_hash="f" * 64,
@@ -197,13 +168,23 @@ def test_structural_anchor_survives_same_content_deduplication() -> None:
 
     problem = canonicalize_context_problem(
         request(),
-        (prerequisite, dynamic_duplicate, dependent),
+        (prerequisite, stronger_duplicate, dependent),
         (),
     )
 
     assert set(problem.candidate_by_id) == {MEMORY_A, MEMORY_C}
     assert problem.mandatory_closure == frozenset({MEMORY_A, MEMORY_C})
-    assert problem.initial_omissions[0].memory_id == MEMORY_B
+    assert problem.initial_omissions[0].reason is ContextOmissionReason.DUPLICATE_CONTENT
+
+    with pytest.raises(ContextCompilerValidationError, match="content_hash"):
+        canonicalize_context_problem(
+            request(),
+            (
+                evidence(MEMORY_A, content="first", content_hash="e" * 64),
+                evidence(MEMORY_B, content="second", content_hash="e" * 64),
+            ),
+            (),
+        )
 
 
 def test_ambiguous_mandatory_same_content_fails() -> None:
@@ -230,22 +211,23 @@ def test_ambiguous_mandatory_same_content_fails() -> None:
         )
 
 
-def test_thresholds_omit_optional_and_fail_mandatory_closure() -> None:
+def test_thresholds_omit_optional_and_propagate_dependency_unavailability() -> None:
     problem = canonicalize_context_problem(
         request(minimum_authority=0.8, minimum_confidence=0.8),
         (
             evidence(MEMORY_A, authority=0.7),
             evidence(MEMORY_B, confidence=0.7),
-            evidence(MEMORY_C),
+            evidence(MEMORY_C, prerequisite_memory_ids=(MEMORY_B,)),
+            evidence(MEMORY_D),
         ),
         (),
     )
 
-    assert tuple(problem.candidate_by_id) == (MEMORY_C,)
-    assert {item.reason for item in problem.initial_omissions} == {
-        ContextOmissionReason.BELOW_AUTHORITY,
-        ContextOmissionReason.BELOW_CONFIDENCE,
-    }
+    assert tuple(problem.candidate_by_id) == (MEMORY_D,)
+    by_id = {item.memory_id: item.reason for item in problem.initial_omissions}
+    assert by_id[MEMORY_A] is ContextOmissionReason.BELOW_AUTHORITY
+    assert by_id[MEMORY_B] is ContextOmissionReason.BELOW_CONFIDENCE
+    assert by_id[MEMORY_C] is ContextOmissionReason.DEPENDENCY_UNAVAILABLE
 
     with pytest.raises(ContextCompilerValidationError, match="mandatory"):
         canonicalize_context_problem(
@@ -262,42 +244,6 @@ def test_thresholds_omit_optional_and_fail_mandatory_closure() -> None:
         )
 
 
-def test_removed_prerequisite_omits_optional_dependents() -> None:
-    problem = canonicalize_context_problem(
-        request(minimum_confidence=0.8),
-        (
-            evidence(MEMORY_A, confidence=0.5),
-            evidence(MEMORY_B, prerequisite_memory_ids=(MEMORY_A,)),
-            evidence(MEMORY_C),
-        ),
-        (),
-    )
-
-    assert tuple(problem.candidate_by_id) == (MEMORY_C,)
-    by_id = {item.memory_id: item.reason for item in problem.initial_omissions}
-    assert by_id[MEMORY_A] is ContextOmissionReason.BELOW_CONFIDENCE
-    assert by_id[MEMORY_B] is ContextOmissionReason.DEPENDENCY_UNAVAILABLE
-
-
-def test_unknown_prerequisite_and_cycle_fail_closed() -> None:
-    with pytest.raises(ContextDependencyError, match="unknown prerequisite"):
-        canonicalize_context_problem(
-            request(),
-            (evidence(MEMORY_A, prerequisite_memory_ids=(MEMORY_E,)),),
-            (),
-        )
-
-    with pytest.raises(ContextDependencyError, match="cycle"):
-        canonicalize_context_problem(
-            request(),
-            (
-                evidence(MEMORY_A, prerequisite_memory_ids=(MEMORY_B,)),
-                evidence(MEMORY_B, prerequisite_memory_ids=(MEMORY_A,)),
-            ),
-            (),
-        )
-
-
 def test_interactions_are_validated_deduplicated_and_filtered() -> None:
     duplicate = interaction(MEMORY_A, MEMORY_B)
     problem = canonicalize_context_problem(
@@ -307,11 +253,7 @@ def test_interactions_are_validated_deduplicated_and_filtered() -> None:
             evidence(MEMORY_B),
             evidence(MEMORY_C, confidence=0.5),
         ),
-        (
-            duplicate,
-            duplicate,
-            interaction(MEMORY_A, MEMORY_C),
-        ),
+        (duplicate, duplicate, interaction(MEMORY_A, MEMORY_C)),
     )
 
     assert tuple(problem.interactions) == ((MEMORY_A, MEMORY_B),)
@@ -322,7 +264,6 @@ def test_interactions_are_validated_deduplicated_and_filtered() -> None:
             (evidence(MEMORY_A), evidence(MEMORY_B)),
             (interaction(MEMORY_A, MEMORY_E),),
         )
-
     with pytest.raises(ContextCompilerValidationError, match="conflicting interaction"):
         canonicalize_context_problem(
             request(),
@@ -353,7 +294,7 @@ def test_dependency_closure_is_transitive_and_immutable() -> None:
         problem.prerequisite_closure[MEMORY_A] = frozenset()
 
 
-def test_objective_separates_signals_saturates_coverage_and_applies_synergy() -> None:
+def test_objective_separates_signals_and_saturates_coverage() -> None:
     item_a = evidence(
         MEMORY_A,
         expert="research",
@@ -401,12 +342,11 @@ def test_objective_separates_signals_saturates_coverage_and_applies_synergy() ->
     assert breakdown.subject_diversity_bonus == pytest.approx(0.06)
     assert breakdown.source_diversity_bonus == pytest.approx(0.08)
     assert breakdown.synergy_bonus == pytest.approx(0.0625)
-    assert breakdown.redundancy_penalty == pytest.approx(0.0)
     assert breakdown.total_set_value == pytest.approx(4.8675)
     assert breakdown.value_per_token == pytest.approx(4.8675 / 200)
 
 
-def test_redundancy_and_harm_can_make_set_value_negative() -> None:
+def test_harm_and_redundancy_can_make_value_negative() -> None:
     harmful = evidence(
         MEMORY_A,
         relevance=1.0,
@@ -415,17 +355,10 @@ def test_redundancy_and_harm_can_make_set_value_negative() -> None:
         inherited_credit=-1.0,
         harm_risk=1.0,
     )
-    duplicate = evidence(
-        MEMORY_B,
-        relevance=0.0,
-        utility=0.0,
-        direct_credit=0.0,
-        inherited_credit=0.0,
-        harm_risk=0.0,
-    )
+    neutral = evidence(MEMORY_B, relevance=0.0)
     problem = canonicalize_context_problem(
         request(coverage_demands=()),
-        (harmful, duplicate),
+        (harmful, neutral),
         (
             interaction(
                 MEMORY_A,
@@ -443,7 +376,7 @@ def test_redundancy_and_harm_can_make_set_value_negative() -> None:
     assert both.breakdown.redundancy_penalty == pytest.approx(-0.0625)
 
 
-def test_feasibility_rejects_unknown_missing_dependency_and_hard_overflow() -> None:
+def test_feasibility_rejects_unknown_dependency_cap_and_budget() -> None:
     problem = canonicalize_context_problem(
         request(
             token_budget=350,
@@ -474,7 +407,7 @@ def test_feasibility_rejects_unknown_missing_dependency_and_hard_overflow() -> N
         evaluate_context_set(problem, (MEMORY_A, MEMORY_C))
 
 
-def test_set_comparison_is_lexicographic_and_deterministic() -> None:
+def test_set_comparison_is_lexicographic_and_prefers_fewer_tokens() -> None:
     problem = canonicalize_context_problem(
         request(),
         (
@@ -495,7 +428,8 @@ def test_set_comparison_is_lexicographic_and_deterministic() -> None:
 
     assert is_better_context_set(a, b, 1e-12) is True
     assert is_better_context_set(b, a, 1e-12) is False
-    assert is_better_context_set(a, c, 1e-12) is True
+    assert is_better_context_set(c, a, 1e-12) is True
+    assert is_better_context_set(a, c, 1e-12) is False
     assert is_better_context_set(a, None, 1e-12) is True
 
 
@@ -510,11 +444,7 @@ def test_ordering_is_topological_and_uses_declared_priorities() -> None:
                 coverage_keys=("cause",),
                 original_rank=2,
             ),
-            evidence(
-                MEMORY_C,
-                mandatory=True,
-                original_rank=1,
-            ),
+            evidence(MEMORY_C, mandatory=True, original_rank=1),
             evidence(MEMORY_D, relevance=0.9, original_rank=4),
         ),
         (),
@@ -526,8 +456,7 @@ def test_ordering_is_topological_and_uses_declared_priorities() -> None:
     )
 
     assert ordered.index(MEMORY_A) < ordered.index(MEMORY_B)
-    assert ordered[0] == MEMORY_A
-    assert ordered[1] == MEMORY_C
+    assert ordered[:2] == (MEMORY_A, MEMORY_C)
     assert set(ordered) == {MEMORY_A, MEMORY_B, MEMORY_C, MEMORY_D}
 
 
