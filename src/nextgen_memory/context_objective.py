@@ -5,7 +5,6 @@ from __future__ import annotations
 from collections import Counter, defaultdict
 from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
-from math import isclose
 from types import MappingProxyType
 from uuid import UUID
 
@@ -54,20 +53,20 @@ class CanonicalContextProblem:
             raise ContextCompilerValidationError(
                 "canonical candidates must be sorted by memory_id"
             )
-        if len({item.memory_id for item in candidates}) != len(candidates):
+        candidate_ids = {item.memory_id for item in candidates}
+        if len(candidate_ids) != len(candidates):
             raise ContextCompilerValidationError(
                 "canonical candidates must have unique memory IDs"
             )
-        expected_ids = {item.memory_id for item in candidates}
-        if set(self.candidate_by_id) != expected_ids:
+        if set(self.candidate_by_id) != candidate_ids:
             raise ContextCompilerValidationError(
                 "candidate_by_id must cover canonical candidates exactly"
             )
-        if set(self.prerequisite_closure) != expected_ids:
+        if set(self.prerequisite_closure) != candidate_ids:
             raise ContextCompilerValidationError(
                 "prerequisite_closure must cover canonical candidates exactly"
             )
-        if not self.mandatory_closure.issubset(expected_ids):
+        if not self.mandatory_closure.issubset(candidate_ids):
             raise ContextCompilerValidationError(
                 "mandatory_closure must contain canonical candidate IDs"
             )
@@ -284,8 +283,7 @@ def canonicalize_context_problem(
         for memory_id in sorted(representatives, key=str):
             if memory_id in removed or memory_id in mandatory_closure:
                 continue
-            unavailable = full_closure[memory_id].intersection(removed)
-            if unavailable:
+            if full_closure[memory_id].intersection(removed):
                 removed.add(memory_id)
                 omissions.append(
                     ContextOmission(
@@ -313,8 +311,6 @@ def canonicalize_context_problem(
         anchor_ids,
         omissions,
     )
-
-    # Anchor preservation guarantees surviving dependencies remain available.
     closure = {
         memory_id: frozenset(
             prerequisite
@@ -343,7 +339,6 @@ def canonicalize_context_problem(
         surviving[memory_id]
         for memory_id in sorted(surviving, key=str)
     )
-    canonical_mandatory = mandatory_closure.intersection(surviving)
     sorted_omissions = tuple(
         sorted(
             omissions,
@@ -360,7 +355,9 @@ def canonicalize_context_problem(
         candidate_by_id=surviving,
         interactions=active_interactions,
         prerequisite_closure=closure,
-        mandatory_closure=frozenset(canonical_mandatory),
+        mandatory_closure=frozenset(
+            mandatory_closure.intersection(surviving)
+        ),
         initial_omissions=sorted_omissions,
     )
 
@@ -432,8 +429,12 @@ def evaluate_context_set(
                 )
 
     policy = problem.request.objective_policy
-    relevance_value = sum(policy.relevance_weight * item.relevance for item in items)
-    utility_value = sum(policy.utility_weight * item.utility for item in items)
+    relevance_value = sum(
+        policy.relevance_weight * item.relevance for item in items
+    )
+    utility_value = sum(
+        policy.utility_weight * item.utility for item in items
+    )
     direct_credit_value = sum(
         policy.direct_credit_weight * item.direct_credit for item in items
     )
@@ -445,7 +446,9 @@ def evaluate_context_set(
         )
         for item in items
     )
-    harm_penalty = -sum(policy.harm_weight * item.harm_risk for item in items)
+    harm_penalty = -sum(
+        policy.harm_weight * item.harm_risk for item in items
+    )
 
     covered_keys = frozenset(
         key for item in items for key in item.coverage_keys
@@ -502,12 +505,11 @@ def evaluate_context_set(
     for (left, right), pair in problem.interactions.items():
         if left not in selected or right not in selected:
             continue
-        bounded = _clamp(
+        contribution = policy.pair_interaction_weight * _clamp(
             pair.value,
             -policy.pair_interaction_cap,
             policy.pair_interaction_cap,
         )
-        contribution = policy.pair_interaction_weight * bounded
         if pair.kind is ContextInteractionKind.SYNERGY:
             synergy_bonus += contribution
         else:
@@ -528,7 +530,9 @@ def evaluate_context_set(
         redundancy_penalty,
     )
     total_set_value = sum(components)
-    value_per_token = total_set_value / evidence_tokens if evidence_tokens else 0.0
+    value_per_token = (
+        total_set_value / evidence_tokens if evidence_tokens else 0.0
+    )
     breakdown = ContextObjectiveBreakdown(
         relevance_value=relevance_value,
         utility_value=utility_value,
@@ -711,8 +715,7 @@ def _deduplicate_content(
     required_keys = set(request.required_coverage_keys)
     for content_hash in sorted(grouped):
         values = grouped[content_hash]
-        contents = {item.content for item in values}
-        if len(contents) > 1:
+        if len({item.content for item in values}) > 1:
             raise ContextCompilerValidationError(
                 "one content_hash maps to conflicting exact content"
             )
@@ -765,8 +768,7 @@ def _build_prerequisite_closure(
 ) -> dict[UUID, frozenset[UUID]]:
     all_ids = frozenset(candidates)
     for item in candidates.values():
-        unknown = set(item.prerequisite_memory_ids).difference(all_ids)
-        if unknown:
+        if set(item.prerequisite_memory_ids).difference(all_ids):
             raise ContextDependencyError(
                 "candidate references an unknown prerequisite"
             )
