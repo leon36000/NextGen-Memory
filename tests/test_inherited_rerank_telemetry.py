@@ -5,6 +5,13 @@ from dataclasses import FrozenInstanceError, replace
 from uuid import UUID
 
 import pytest
+
+from nextgen_memory.bounded_inherited_reranker import (
+    BoundedInheritedRerankerConfig,
+    InheritedAwareRerankedMemory,
+    InheritedEvidenceDisposition,
+    InheritedScoreBreakdown,
+)
 from nextgen_memory.inherited_rerank_telemetry import (
     InheritedRerankObservation,
     InheritedRerankSummary,
@@ -14,13 +21,6 @@ from nextgen_memory.inherited_rerank_telemetry import (
     InMemoryInheritedRerankTelemetrySink,
     build_inherited_rerank_telemetry,
     fingerprint_bounded_inherited_policy,
-)
-
-from nextgen_memory.bounded_inherited_reranker import (
-    BoundedInheritedRerankerConfig,
-    InheritedAwareRerankedMemory,
-    InheritedEvidenceDisposition,
-    InheritedScoreBreakdown,
 )
 from nextgen_memory.retrieval import ResearchRetrievalHit
 from nextgen_memory.utility_reranker import (
@@ -122,9 +122,7 @@ def breakdown(
         uncertainty_reliability=0.8,
         confidence_reliability=minimum_structural_confidence,
         uncapped_component=(
-            applied_component
-            if uncapped_component is None
-            else uncapped_component
+            applied_component if uncapped_component is None else uncapped_component
         ),
         applied_component=applied_component,
         disposition=disposition,
@@ -165,9 +163,7 @@ def reranked_results() -> tuple[InheritedAwareRerankedMemory, ...]:
             final_rank=3,
             final_score=0.70,
             inherited_breakdown=breakdown(
-                disposition=(
-                    InheritedEvidenceDisposition.BELOW_MINIMUM_CONFIDENCE
-                ),
+                disposition=(InheritedEvidenceDisposition.BELOW_MINIMUM_CONFIDENCE),
                 applied_component=0.0,
                 contribution_count=3,
                 value_sum=0.4,
@@ -386,6 +382,8 @@ def test_rendered_json_contains_no_direct_or_raw_content_fields() -> None:
             (
                 replace(
                     reranked_results()[0],
+                    base=replace(reranked_results()[0].base, final_rank=1),
+                    final_rank=1,
                     final_score=0.90,
                 ),
             ),
@@ -396,6 +394,8 @@ def test_rendered_json_contains_no_direct_or_raw_content_fields() -> None:
             (
                 replace(
                     reranked_results()[0],
+                    base=replace(reranked_results()[0].base, final_rank=1),
+                    final_rank=1,
                     final_score=0.89,
                     inherited_breakdown=replace(
                         reranked_results()[0].inherited_breakdown,
@@ -410,6 +410,8 @@ def test_rendered_json_contains_no_direct_or_raw_content_fields() -> None:
             (
                 replace(
                     reranked_results()[0],
+                    base=replace(reranked_results()[0].base, final_rank=1),
+                    final_rank=1,
                     inherited_breakdown=replace(
                         reranked_results()[0].inherited_breakdown,
                         policy_version="other",

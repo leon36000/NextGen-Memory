@@ -78,36 +78,22 @@ class InheritedRerankObservation:
             )
         base_score = _finite_number("base_score", self.base_score)
         final_score = _finite_number("final_score", self.final_score)
-        applied_component = _finite_number(
-            "applied_component", self.applied_component
-        )
-        uncapped_component = _finite_number(
-            "uncapped_component", self.uncapped_component
-        )
+        applied_component = _finite_number("applied_component", self.applied_component)
+        uncapped_component = _finite_number("uncapped_component", self.uncapped_component)
         if not isinstance(self.disposition, InheritedEvidenceDisposition):
             raise InheritedRerankTelemetryValidationError(
                 "disposition must be an InheritedEvidenceDisposition"
             )
-        contribution_count = _nonnegative_integer(
-            "contribution_count", self.contribution_count
-        )
+        contribution_count = _nonnegative_integer("contribution_count", self.contribution_count)
         value_sum = _optional_finite_number("value_sum", self.value_sum)
-        absolute_value_sum = _optional_finite_number(
-            "absolute_value_sum", self.absolute_value_sum
-        )
-        standard_error_sum = _optional_finite_number(
-            "standard_error_sum", self.standard_error_sum
-        )
+        absolute_value_sum = _optional_finite_number("absolute_value_sum", self.absolute_value_sum)
+        standard_error_sum = _optional_finite_number("standard_error_sum", self.standard_error_sum)
         minimum_structural_confidence = _optional_probability(
             "minimum_structural_confidence",
             self.minimum_structural_confidence,
         )
-        count_shrinkage = _probability(
-            "count_shrinkage", self.count_shrinkage
-        )
-        path_coherence = _probability(
-            "path_coherence", self.path_coherence
-        )
+        count_shrinkage = _probability("count_shrinkage", self.count_shrinkage)
+        path_coherence = _probability("path_coherence", self.path_coherence)
         uncertainty_reliability = _probability(
             "uncertainty_reliability",
             self.uncertainty_reliability,
@@ -116,9 +102,7 @@ class InheritedRerankObservation:
             "confidence_reliability",
             self.confidence_reliability,
         )
-        policy_version = _required_text(
-            "policy_version", self.policy_version
-        )
+        policy_version = _required_text("policy_version", self.policy_version)
         _require_hash("policy_fingerprint", self.policy_fingerprint)
         _require_hash("content_hash", self.content_hash)
 
@@ -178,9 +162,7 @@ class InheritedRerankObservation:
         object.__setattr__(self, "uncapped_component", uncapped_component)
         object.__setattr__(self, "contribution_count", contribution_count)
         object.__setattr__(self, "value_sum", value_sum)
-        object.__setattr__(
-            self, "absolute_value_sum", absolute_value_sum
-        )
+        object.__setattr__(self, "absolute_value_sum", absolute_value_sum)
         object.__setattr__(self, "standard_error_sum", standard_error_sum)
         object.__setattr__(
             self,
@@ -220,9 +202,7 @@ class InheritedRerankObservation:
             "value_sum": self.value_sum,
             "absolute_value_sum": self.absolute_value_sum,
             "standard_error_sum": self.standard_error_sum,
-            "minimum_structural_confidence": (
-                self.minimum_structural_confidence
-            ),
+            "minimum_structural_confidence": (self.minimum_structural_confidence),
             "count_shrinkage": self.count_shrinkage,
             "path_coherence": self.path_coherence,
             "uncertainty_reliability": self.uncertainty_reliability,
@@ -278,18 +258,14 @@ class InheritedRerankSummary:
                 "disposition counts must partition candidate_count"
             )
         if (
-            counts["promoted_count"]
-            + counts["demoted_count"]
-            + counts["unchanged_count"]
+            counts["promoted_count"] + counts["demoted_count"] + counts["unchanged_count"]
             != counts["candidate_count"]
         ):
             raise InheritedRerankTelemetryValidationError(
                 "rank-change counts must partition candidate_count"
             )
         if not isinstance(self.top_changed, bool):
-            raise InheritedRerankTelemetryValidationError(
-                "top_changed must be a boolean"
-            )
+            raise InheritedRerankTelemetryValidationError("top_changed must be a boolean")
         if counts["candidate_count"] == 0:
             if (
                 self.base_top_memory_id is not None
@@ -302,17 +278,13 @@ class InheritedRerankSummary:
         else:
             _require_uuid("base_top_memory_id", self.base_top_memory_id)
             _require_uuid("final_top_memory_id", self.final_top_memory_id)
-            expected_top_changed = (
-                self.base_top_memory_id != self.final_top_memory_id
-            )
+            expected_top_changed = self.base_top_memory_id != self.final_top_memory_id
             if self.top_changed != expected_top_changed:
                 raise InheritedRerankTelemetryValidationError(
                     "top_changed does not match top-memory identities"
                 )
 
-        signed_adjustment_sum = _finite_number(
-            "signed_adjustment_sum", self.signed_adjustment_sum
-        )
+        signed_adjustment_sum = _finite_number("signed_adjustment_sum", self.signed_adjustment_sum)
         absolute_adjustment_sum = _nonnegative_number(
             "absolute_adjustment_sum", self.absolute_adjustment_sum
         )
@@ -320,24 +292,16 @@ class InheritedRerankSummary:
             "maximum_absolute_adjustment_observed",
             self.maximum_absolute_adjustment_observed,
         )
-        configured_hard_cap = _nonnegative_number(
-            "configured_hard_cap", self.configured_hard_cap
-        )
-        if abs(signed_adjustment_sum) > (
-            absolute_adjustment_sum + _SCORE_TOLERANCE
-        ):
+        configured_hard_cap = _nonnegative_number("configured_hard_cap", self.configured_hard_cap)
+        if abs(signed_adjustment_sum) > (absolute_adjustment_sum + _SCORE_TOLERANCE):
             raise InheritedRerankTelemetryValidationError(
                 "absolute adjustment sum is smaller than signed adjustment magnitude"
             )
-        if maximum_absolute_adjustment_observed > (
-            configured_hard_cap + _SCORE_TOLERANCE
-        ):
+        if maximum_absolute_adjustment_observed > (configured_hard_cap + _SCORE_TOLERANCE):
             raise InheritedRerankTelemetryValidationError(
                 "observed adjustment exceeds configured hard cap"
             )
-        if maximum_absolute_adjustment_observed > (
-            absolute_adjustment_sum + _SCORE_TOLERANCE
-        ):
+        if maximum_absolute_adjustment_observed > (absolute_adjustment_sum + _SCORE_TOLERANCE):
             raise InheritedRerankTelemetryValidationError(
                 "maximum adjustment exceeds absolute adjustment sum"
             )
@@ -345,12 +309,8 @@ class InheritedRerankSummary:
 
         for name, value in counts.items():
             object.__setattr__(self, name, value)
-        object.__setattr__(
-            self, "signed_adjustment_sum", signed_adjustment_sum
-        )
-        object.__setattr__(
-            self, "absolute_adjustment_sum", absolute_adjustment_sum
-        )
+        object.__setattr__(self, "signed_adjustment_sum", signed_adjustment_sum)
+        object.__setattr__(self, "absolute_adjustment_sum", absolute_adjustment_sum)
         object.__setattr__(
             self,
             "maximum_absolute_adjustment_observed",
@@ -370,20 +330,14 @@ class InheritedRerankSummary:
             "unchanged_count": self.unchanged_count,
             "top_changed": self.top_changed,
             "base_top_memory_id": (
-                str(self.base_top_memory_id)
-                if self.base_top_memory_id is not None
-                else None
+                str(self.base_top_memory_id) if self.base_top_memory_id is not None else None
             ),
             "final_top_memory_id": (
-                str(self.final_top_memory_id)
-                if self.final_top_memory_id is not None
-                else None
+                str(self.final_top_memory_id) if self.final_top_memory_id is not None else None
             ),
             "signed_adjustment_sum": self.signed_adjustment_sum,
             "absolute_adjustment_sum": self.absolute_adjustment_sum,
-            "maximum_absolute_adjustment_observed": (
-                self.maximum_absolute_adjustment_observed
-            ),
+            "maximum_absolute_adjustment_observed": (self.maximum_absolute_adjustment_observed),
             "configured_hard_cap": self.configured_hard_cap,
             "content_hash": self.content_hash,
         }
@@ -406,15 +360,10 @@ class InheritedRerankTelemetryBatch:
         _require_uuid("id", self.id)
         _require_uuid("space_id", self.space_id)
         _require_uuid("router_decision_id", self.router_decision_id)
-        policy_version = _required_text(
-            "policy_version", self.policy_version
-        )
+        policy_version = _required_text("policy_version", self.policy_version)
         _require_hash("policy_fingerprint", self.policy_fingerprint)
         observations = tuple(self.observations)
-        if any(
-            not isinstance(item, InheritedRerankObservation)
-            for item in observations
-        ):
+        if any(not isinstance(item, InheritedRerankObservation) for item in observations):
             raise InheritedRerankTelemetryValidationError(
                 "observations must contain InheritedRerankObservation values"
             )
@@ -519,16 +468,11 @@ class InMemoryInheritedRerankTelemetrySink:
             self._batches[batch.id] = batch
             return
         if existing != batch:
-            raise InheritedRerankTelemetryConflictError(
-                "inherited rerank telemetry batch conflict"
-            )
+            raise InheritedRerankTelemetryConflictError("inherited rerank telemetry batch conflict")
 
     @property
     def batches(self) -> tuple[InheritedRerankTelemetryBatch, ...]:
-        return tuple(
-            self._batches[batch_id]
-            for batch_id in sorted(self._batches, key=str)
-        )
+        return tuple(self._batches[batch_id] for batch_id in sorted(self._batches, key=str))
 
 
 def fingerprint_bounded_inherited_policy(
@@ -559,10 +503,7 @@ def build_inherited_rerank_telemetry(
             "config must be a BoundedInheritedRerankerConfig"
         )
     normalized_results = tuple(results)
-    if any(
-        not isinstance(item, InheritedAwareRerankedMemory)
-        for item in normalized_results
-    ):
+    if any(not isinstance(item, InheritedAwareRerankedMemory) for item in normalized_results):
         raise InheritedRerankTelemetryValidationError(
             "results must contain InheritedAwareRerankedMemory values"
         )
@@ -618,9 +559,7 @@ def build_inherited_rerank_telemetry(
             "value_sum": inherited.value_sum,
             "absolute_value_sum": inherited.absolute_value_sum,
             "standard_error_sum": inherited.standard_error_sum,
-            "minimum_structural_confidence": (
-                inherited.minimum_structural_confidence
-            ),
+            "minimum_structural_confidence": (inherited.minimum_structural_confidence),
             "count_shrinkage": inherited.count_shrinkage,
             "path_coherence": inherited.path_coherence,
             "uncertainty_reliability": inherited.uncertainty_reliability,
@@ -628,9 +567,7 @@ def build_inherited_rerank_telemetry(
             "policy_version": config.policy_version,
             "policy_fingerprint": policy_fingerprint,
         }
-        observation_payloads.append(
-            {**payload, "content_hash": _hash_payload(payload)}
-        )
+        observation_payloads.append({**payload, "content_hash": _hash_payload(payload)})
 
     summary_payload = _build_summary_payload(
         normalized_results,
@@ -674,9 +611,7 @@ def build_inherited_rerank_telemetry(
         applied_count=summary_payload["applied_count"],
         no_evidence_count=summary_payload["no_evidence_count"],
         below_minimum_count=summary_payload["below_minimum_count"],
-        below_minimum_confidence=(
-            summary_payload["below_minimum_confidence"]
-        ),
+        below_minimum_confidence=(summary_payload["below_minimum_confidence"]),
         promoted_count=summary_payload["promoted_count"],
         demoted_count=summary_payload["demoted_count"],
         unchanged_count=summary_payload["unchanged_count"],
@@ -692,9 +627,7 @@ def build_inherited_rerank_telemetry(
             else None
         ),
         signed_adjustment_sum=summary_payload["signed_adjustment_sum"],
-        absolute_adjustment_sum=(
-            summary_payload["absolute_adjustment_sum"]
-        ),
+        absolute_adjustment_sum=(summary_payload["absolute_adjustment_sum"]),
         maximum_absolute_adjustment_observed=(
             summary_payload["maximum_absolute_adjustment_observed"]
         ),
@@ -718,14 +651,10 @@ def _policy_payload(
 ) -> dict[str, Any]:
     return {
         "inherited_weight": config.inherited_weight,
-        "maximum_absolute_adjustment": (
-            config.maximum_absolute_adjustment
-        ),
+        "maximum_absolute_adjustment": (config.maximum_absolute_adjustment),
         "prior_contribution_count": config.prior_contribution_count,
         "minimum_contribution_count": config.minimum_contribution_count,
-        "minimum_structural_confidence": (
-            config.minimum_structural_confidence
-        ),
+        "minimum_structural_confidence": (config.minimum_structural_confidence),
         "value_scale": config.value_scale,
         "uncertainty_floor": config.uncertainty_floor,
         "policy_version": config.policy_version,
@@ -756,9 +685,7 @@ def _observation_from_payload(
         value_sum=payload["value_sum"],
         absolute_value_sum=payload["absolute_value_sum"],
         standard_error_sum=payload["standard_error_sum"],
-        minimum_structural_confidence=(
-            payload["minimum_structural_confidence"]
-        ),
+        minimum_structural_confidence=(payload["minimum_structural_confidence"]),
         count_shrinkage=payload["count_shrinkage"],
         path_coherence=payload["path_coherence"],
         uncertainty_reliability=payload["uncertainty_reliability"],
@@ -776,16 +703,10 @@ def _build_summary_payload(
 ) -> dict[str, Any]:
     dispositions = [item.inherited_breakdown.disposition for item in results]
     rank_deltas = [item.base.final_rank - item.final_rank for item in results]
-    adjustments = [
-        item.inherited_breakdown.applied_component for item in results
-    ]
+    adjustments = [item.inherited_breakdown.applied_component for item in results]
     candidate_count = len(results)
     base_top = next(
-        (
-            item.base.hit.memory_id
-            for item in results
-            if item.base.final_rank == 1
-        ),
+        (item.base.hit.memory_id for item in results if item.base.final_rank == 1),
         None,
     )
     final_top = next(
@@ -794,28 +715,18 @@ def _build_summary_payload(
     )
     return {
         "candidate_count": candidate_count,
-        "applied_count": dispositions.count(
-            InheritedEvidenceDisposition.APPLIED
-        ),
-        "no_evidence_count": dispositions.count(
-            InheritedEvidenceDisposition.NO_EVIDENCE
-        ),
-        "below_minimum_count": dispositions.count(
-            InheritedEvidenceDisposition.BELOW_MINIMUM_COUNT
-        ),
+        "applied_count": dispositions.count(InheritedEvidenceDisposition.APPLIED),
+        "no_evidence_count": dispositions.count(InheritedEvidenceDisposition.NO_EVIDENCE),
+        "below_minimum_count": dispositions.count(InheritedEvidenceDisposition.BELOW_MINIMUM_COUNT),
         "below_minimum_confidence": dispositions.count(
             InheritedEvidenceDisposition.BELOW_MINIMUM_CONFIDENCE
         ),
         "promoted_count": sum(delta > 0 for delta in rank_deltas),
         "demoted_count": sum(delta < 0 for delta in rank_deltas),
         "unchanged_count": sum(delta == 0 for delta in rank_deltas),
-        "top_changed": (
-            candidate_count > 0 and base_top is not None and base_top != final_top
-        ),
+        "top_changed": (candidate_count > 0 and base_top is not None and base_top != final_top),
         "base_top_memory_id": str(base_top) if base_top is not None else None,
-        "final_top_memory_id": (
-            str(final_top) if final_top is not None else None
-        ),
+        "final_top_memory_id": (str(final_top) if final_top is not None else None),
         "signed_adjustment_sum": sum(adjustments),
         "absolute_adjustment_sum": sum(abs(value) for value in adjustments),
         "maximum_absolute_adjustment_observed": max(
@@ -831,13 +742,9 @@ def _require_contiguous_ranks(name: str, ranks: Sequence[int]) -> None:
     for rank in ranks:
         normalized.append(_positive_integer(name, rank))
     if len(normalized) != len(set(normalized)):
-        raise InheritedRerankTelemetryValidationError(
-            f"{name} contain duplicate values"
-        )
+        raise InheritedRerankTelemetryValidationError(f"{name} contain duplicate values")
     if sorted(normalized) != list(range(1, len(normalized) + 1)):
-        raise InheritedRerankTelemetryValidationError(
-            f"{name} must be contiguous"
-        )
+        raise InheritedRerankTelemetryValidationError(f"{name} must be contiguous")
 
 
 def _hash_payload(payload: Mapping[str, Any]) -> str:
@@ -853,34 +760,24 @@ def _hash_payload(payload: Mapping[str, Any]) -> str:
 
 def _require_uuid(name: str, value: object) -> None:
     if not isinstance(value, UUID):
-        raise InheritedRerankTelemetryValidationError(
-            f"{name} must be a UUID"
-        )
+        raise InheritedRerankTelemetryValidationError(f"{name} must be a UUID")
 
 
 def _required_text(name: str, value: object) -> str:
     if not isinstance(value, str):
-        raise InheritedRerankTelemetryValidationError(
-            f"{name} must be a string"
-        )
+        raise InheritedRerankTelemetryValidationError(f"{name} must be a string")
     normalized = value.strip()
     if not normalized:
-        raise InheritedRerankTelemetryValidationError(
-            f"{name} must not be empty"
-        )
+        raise InheritedRerankTelemetryValidationError(f"{name} must not be empty")
     return normalized
 
 
 def _finite_number(name: str, value: object) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise InheritedRerankTelemetryValidationError(
-            f"{name} must be a finite number"
-        )
+        raise InheritedRerankTelemetryValidationError(f"{name} must be a finite number")
     normalized = float(value)
     if not isfinite(normalized):
-        raise InheritedRerankTelemetryValidationError(
-            f"{name} must be a finite number"
-        )
+        raise InheritedRerankTelemetryValidationError(f"{name} must be a finite number")
     return normalized
 
 
@@ -893,18 +790,14 @@ def _optional_finite_number(name: str, value: object) -> float | None:
 def _nonnegative_number(name: str, value: object) -> float:
     normalized = _finite_number(name, value)
     if normalized < 0.0:
-        raise InheritedRerankTelemetryValidationError(
-            f"{name} must be non-negative"
-        )
+        raise InheritedRerankTelemetryValidationError(f"{name} must be non-negative")
     return normalized
 
 
 def _probability(name: str, value: object) -> float:
     normalized = _finite_number(name, value)
     if not 0.0 <= normalized <= 1.0:
-        raise InheritedRerankTelemetryValidationError(
-            f"{name} must be between zero and one"
-        )
+        raise InheritedRerankTelemetryValidationError(f"{name} must be between zero and one")
     return normalized
 
 
@@ -916,27 +809,21 @@ def _optional_probability(name: str, value: object) -> float | None:
 
 def _integer(name: str, value: object) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
-        raise InheritedRerankTelemetryValidationError(
-            f"{name} must be an integer"
-        )
+        raise InheritedRerankTelemetryValidationError(f"{name} must be an integer")
     return value
 
 
 def _positive_integer(name: str, value: object) -> int:
     normalized = _integer(name, value)
     if normalized <= 0:
-        raise InheritedRerankTelemetryValidationError(
-            f"{name} must be a positive integer"
-        )
+        raise InheritedRerankTelemetryValidationError(f"{name} must be a positive integer")
     return normalized
 
 
 def _nonnegative_integer(name: str, value: object) -> int:
     normalized = _integer(name, value)
     if normalized < 0:
-        raise InheritedRerankTelemetryValidationError(
-            f"{name} must be a non-negative integer"
-        )
+        raise InheritedRerankTelemetryValidationError(f"{name} must be a non-negative integer")
     return normalized
 
 
