@@ -1,0 +1,170 @@
+name: Rebuild bounded inherited fixtures v4
+
+on:
+  push:
+    branches: [bootstrap/rebuild-bounded-inherited-fixtures-v4]
+
+permissions:
+  contents: write
+
+jobs:
+  rebuild:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/bounded-inherited-reranker-v0
+          fetch-depth: 0
+
+      - name: Verify guarded feature head
+        run: test "$(git rev-parse HEAD)" = "aa683e2135df6e4e0250b5c7fd8e6516ddbbb458"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install development tools
+        run: python -m pip install -e '.[dev]'
+
+      - name: Extract and apply the reviewed AST rebuild
+        run: |
+          git fetch origin bootstrap/rebuild-bounded-inherited-fixtures-v2
+          git show origin/bootstrap/rebuild-bounded-inherited-fixtures-v2:.github/workflows/rebuild-bounded-inherited-fixtures-v2.yml > /tmp/source.yml
+          python - <<'PY'
+          from pathlib import Path
+
+          lines = Path('/tmp/source.yml').read_text(encoding='utf-8').splitlines()
+          start = next(
+              index
+              for index, line in enumerate(lines)
+              if line == "          python - <<'PY'"
+          )
+          end = next(
+              index
+              for index in range(start + 1, len(lines))
+              if lines[index] == '          PY'
+          )
+          code_lines = []
+          for line in lines[start + 1 : end]:
+              if line == '':
+                  code_lines.append('')
+                  continue
+              if not line.startswith('          '):
+                  raise SystemExit(f'unexpected YAML indentation: {line!r}')
+              code_lines.append(line[10:])
+          Path('/tmp/rebuild.py').write_text(
+              '\n'.join(code_lines) + '\n',
+              encoding='utf-8',
+          )
+          PY
+          python /tmp/rebuild.py
+
+      - name: Apply the two test-contract corrections
+        run: |
+          python - <<'PY'
+          from __future__ import annotations
+
+          import ast
+          import textwrap
+          from pathlib import Path
+
+          path = Path('tests/test_bounded_inherited_reranker.py')
+          text = path.read_text(encoding='utf-8')
+          old = 'first[0].final_score - first[0].base.final_score <= 0.05'
+          new = 'abs(first[0].inherited_breakdown.applied_component) <= 0.05'
+          if text.count(old) != 1:
+              raise SystemExit('expected one cap assertion')
+          text = text.replace(old, new, 1)
+          path.write_text(text, encoding='utf-8')
+
+          text = path.read_text(encoding='utf-8')
+          module = ast.parse(text)
+          node = next(
+              item
+              for item in module.body
+              if isinstance(item, ast.FunctionDef)
+              and item.name == 'test_reranker_rejects_non_uuid_scope_non_mapping_evidence_and_nonfinite_base_score'
+          )
+          if node.end_lineno is None:
+              raise SystemExit('test function has no end line')
+          replacement = textwrap.dedent('''
+          def test_reranker_rejects_non_uuid_scope_non_mapping_evidence_and_nonfinite_base_score() -> None:
+              with pytest.raises(
+                  BoundedInheritedRerankerValidationError,
+                  match="space_id",
+              ):
+                  BoundedInheritedReranker().rerank(
+                      space_id="bad",  # type: ignore[arg-type]
+                      base_results=(base_result(),),
+                      learning_evidence={MEMORY_A: learning_evidence()},
+                  )
+              with pytest.raises(
+                  BoundedInheritedRerankerValidationError,
+                  match="mapping",
+              ):
+                  BoundedInheritedReranker().rerank(
+                      space_id=SPACE,
+                      base_results=(base_result(),),
+                      learning_evidence=[],  # type: ignore[arg-type]
+                  )
+
+              valid = base_result()
+              malformed = object.__new__(RerankedMemory)
+              object.__setattr__(malformed, "hit", valid.hit)
+              object.__setattr__(malformed, "original_rank", valid.original_rank)
+              object.__setattr__(malformed, "final_rank", valid.final_rank)
+              object.__setattr__(malformed, "final_score", float("nan"))
+              object.__setattr__(malformed, "breakdown", valid.breakdown)
+              with pytest.raises(
+                  BoundedInheritedRerankerValidationError,
+                  match="finite",
+              ):
+                  BoundedInheritedReranker().rerank(
+                      space_id=SPACE,
+                      base_results=(malformed,),
+                      learning_evidence={MEMORY_A: learning_evidence()},
+                  )
+          ''').strip('\n').splitlines()
+          lines = text.splitlines()
+          lines[node.lineno - 1 : node.end_lineno] = [*replacement, '']
+          path.write_text('\n'.join(lines).rstrip() + '\n', encoding='utf-8')
+          PY
+
+      - name: Format, lint, and verify all behavior
+        run: |
+          ruff format \
+            tests/test_bounded_inherited_reranker.py \
+            tests/test_bounded_inherited_reranker_properties.py \
+            scripts/simulate_bounded_inherited_reranker_v0.py
+          ruff check . --fix
+          ruff check .
+          python -m pytest \
+            tests/test_bounded_inherited_reranker.py \
+            tests/test_bounded_inherited_reranker_properties.py \
+            tests/test_bounded_inherited_reranker_simulation.py \
+            -q
+          python -m pytest -q
+          python -m compileall -q src scripts
+          git diff --check
+
+      - name: Verify exact correction scope
+        run: |
+          cat > /tmp/expected <<'EOF'
+          scripts/simulate_bounded_inherited_reranker_v0.py
+          tests/test_bounded_inherited_reranker.py
+          tests/test_bounded_inherited_reranker_properties.py
+          EOF
+          git diff --name-only | sort > /tmp/actual
+          diff -u /tmp/expected /tmp/actual
+
+      - name: Commit and push fast-forward
+        run: |
+          git config user.name "NextGen Memory Automation"
+          git config user.email "actions@users.noreply.github.com"
+          git add \
+            scripts/simulate_bounded_inherited_reranker_v0.py \
+            tests/test_bounded_inherited_reranker.py \
+            tests/test_bounded_inherited_reranker_properties.py
+          git commit -m "test: align bounded inherited fixtures with stacked base"
+          git push origin HEAD:feat/bounded-inherited-reranker-v0
