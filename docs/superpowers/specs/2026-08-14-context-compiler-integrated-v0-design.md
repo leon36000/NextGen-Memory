@@ -232,7 +232,7 @@ Compilation fails for the entire call when:
 - content hashes, UUIDs, token estimates, ranks, signals, weights, or interaction statistics are invalid;
 - active pair interactions conflict for the same pair and evidence group.
 
-Non-mandatory memories below authority or confidence thresholds are omitted explicitly.
+Non-mandatory memories below authority or confidence thresholds are omitted explicitly. If one of their prerequisites is removed by those local thresholds, every dependent optional candidate is omitted with `dependency_unavailable` rather than compiled with a broken closure.
 
 Exact duplicate candidates are deduplicated. Distinct UUIDs with the same content hash are redundant representations; the deterministic best representative survives unless a mandatory candidate requires a different identity. Two mandatory same-content identities are allowed only when one is a prerequisite of the other or they cover disjoint required demands; otherwise compilation fails as an ambiguous mandatory duplication.
 
@@ -354,7 +354,7 @@ Run at most `local_search_pass_limit` deterministic passes over:
 - `drop`: remove one non-mandatory memory and any now-orphaned prerequisites, while preserving all dependencies;
 - `one-swap`: remove one removable closure and add one candidate closure.
 
-Accept only strict lexicographic improvements. Restart scanning after each accepted move. Stop at a local optimum or pass limit.
+Moves that remove mandatory evidence or break the prerequisite closure of any retained memory are infeasible. Accept only strict lexicographic improvements. Restart scanning after each accepted move. Stop at a local optimum or pass limit.
 
 ### 11.5 Mandatory fallbacks
 
@@ -389,8 +389,7 @@ Machine-readable reasons include:
 - `below_confidence`;
 - `duplicate_candidate`;
 - `duplicate_content`;
-- `missing_prerequisite`;
-- `dependency_cycle`;
+- `dependency_unavailable`;
 - `expert_cap`;
 - `token_budget`;
 - `item_limit`;
@@ -400,7 +399,7 @@ Machine-readable reasons include:
 - `not_selected_by_exact_solver`;
 - `not_selected_by_heuristic`.
 
-Hard-call failures such as mixed scope, mandatory overflow, conflicting identity, malformed interactions, or missing mandatory prerequisites are exceptions rather than omissions.
+Hard-call failures such as mixed scope, dependency cycles, unknown prerequisites, mandatory overflow, conflicting identity, malformed interactions, or missing mandatory prerequisites are exceptions rather than omissions.
 
 ## 14. Rendering and prompt-injection boundary
 
@@ -482,10 +481,12 @@ A fixed-seed suite of at least **5,000 generated instances** must verify:
 
 On fixed-seed small instances where both modes can run:
 
-- required coverage achieved by heuristic must match exact whenever a feasible required-complete set exists and the greedy coverage phase can reach it under the same hard constraints;
-- median heuristic/exact positive set-value ratio must be at least `0.95`;
-- fifth-percentile ratio must be at least `0.75`;
-- every ratio exception must remain fully reproducible in the emitted simulation artifact.
+- define required-coverage ratio as heuristic covered required weight divided by exact covered required weight, with ratio `1.0` when the exact denominator is zero;
+- median required-coverage ratio must be at least `0.98`;
+- fifth-percentile required-coverage ratio must be at least `0.90`;
+- among instances where exact and heuristic cover equal required weight and exact set value is positive, median heuristic/exact set-value ratio must be at least `0.95`;
+- the fifth-percentile value ratio for that comparable subset must be at least `0.75`;
+- every sub-threshold case must remain fully reproducible in the emitted simulation artifact.
 
 These are acceptance diagnostics for the synthetic distribution, not universal approximation guarantees.
 
