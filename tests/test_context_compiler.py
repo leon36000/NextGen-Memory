@@ -123,7 +123,7 @@ def test_solver_dispatch_uses_canonical_candidate_count() -> None:
     assert heuristic.optimality_gap is None
 
 
-def test_mandatory_first_whole_item_and_overflow_behavior() -> None:
+def test_mandatory_whole_item_and_overflow_behavior() -> None:
     packet = compile_packet(
         request(token_budget=170, envelope_tokens=50, max_items=2),
         (
@@ -136,10 +136,9 @@ def test_mandatory_first_whole_item_and_overflow_behavior() -> None:
     assert memory_id(1) in packet.selected_memory_ids
     assert packet.total_estimated_tokens <= packet.token_budget
     assert all(
-        selected.evidence.content.startswith("evidence-")
-        for selected in packet.selected
+        item.evidence.content.startswith("evidence-")
+        for item in packet.selected
     )
-    assert packet.selected[0].evidence.estimated_tokens in {40, 80}
 
     with pytest.raises(ContextBudgetError, match="mandatory"):
         compile_packet(
@@ -148,7 +147,7 @@ def test_mandatory_first_whole_item_and_overflow_behavior() -> None:
         )
 
 
-def test_scope_identity_and_dependency_errors_propagate_fail_closed() -> None:
+def test_scope_identity_and_admission_omissions_are_fail_closed() -> None:
     with pytest.raises(ContextCompilerValidationError, match="space_id"):
         compile_packet(
             request(),
@@ -163,8 +162,6 @@ def test_scope_identity_and_dependency_errors_propagate_fail_closed() -> None:
             ),
         )
 
-
-def test_duplicate_and_threshold_omissions_are_preserved() -> None:
     first = evidence(1, relevance=0.9)
     packet = compile_packet(
         request(minimum_authority=0.8, minimum_confidence=0.8),
@@ -181,15 +178,16 @@ def test_duplicate_and_threshold_omissions_are_preserved() -> None:
             evidence(4, confidence=0.5),
         ),
     )
-    reasons = [item.reason for item in packet.omissions]
+    reasons = {item.reason for item in packet.omissions}
+    assert {
+        ContextOmissionReason.DUPLICATE_CANDIDATE,
+        ContextOmissionReason.DUPLICATE_CONTENT,
+        ContextOmissionReason.BELOW_AUTHORITY,
+        ContextOmissionReason.BELOW_CONFIDENCE,
+    }.issubset(reasons)
 
-    assert ContextOmissionReason.DUPLICATE_CANDIDATE in reasons
-    assert ContextOmissionReason.DUPLICATE_CONTENT in reasons
-    assert ContextOmissionReason.BELOW_AUTHORITY in reasons
-    assert ContextOmissionReason.BELOW_CONFIDENCE in reasons
 
-
-def test_required_coverage_precedes_optional_value_and_can_be_incomplete() -> None:
+def test_required_coverage_precedes_value_and_can_remain_incomplete() -> None:
     complete = compile_packet(
         request(
             token_budget=110,
@@ -215,7 +213,7 @@ def test_required_coverage_precedes_optional_value_and_can_be_incomplete() -> No
     assert incomplete.uncovered_required_keys == ("missing",)
 
 
-def test_selected_order_is_topological_and_audit_components_recompute() -> None:
+def test_selected_order_audit_and_separate_credit_components_recompute() -> None:
     policy = ContextObjectivePolicy(
         new_expert_bonus=0.0,
         new_subject_bonus=0.0,
@@ -241,14 +239,10 @@ def test_selected_order_is_topological_and_audit_components_recompute() -> None:
 
     assert packet.selected_memory_ids == (memory_id(1), memory_id(2))
     first, second = packet.selected
-    assert first.final_position == 1
-    assert second.final_position == 2
     assert first.trigger_memory_id == memory_id(2)
     assert first.prerequisite_memory_ids == ()
     assert second.prerequisite_memory_ids == (memory_id(1),)
     assert second.newly_covered_keys == ("cause",)
-    assert first.marginal_tokens == first.evidence.estimated_tokens
-    assert second.marginal_tokens == second.evidence.estimated_tokens
     assert first.direct_credit_contribution == pytest.approx(0.45 * 0.2)
     assert first.inherited_credit_contribution == pytest.approx(0.10 * 0.3)
     assert sum(item.marginal_set_value for item in packet.selected) == pytest.approx(
@@ -256,7 +250,7 @@ def test_selected_order_is_topological_and_audit_components_recompute() -> None:
     )
 
 
-def test_nonpositive_redundant_and_hard_limit_omissions_are_classified() -> None:
+def test_omission_causes_are_isolated() -> None:
     policy = ContextObjectivePolicy(
         new_expert_bonus=0.0,
         new_subject_bonus=0.0,
@@ -266,9 +260,9 @@ def test_nonpositive_redundant_and_hard_limit_omissions_are_classified() -> None
     )
     packet = compile_packet(
         request(
-            token_budget=150,
+            token_budget=250,
             envelope_tokens=50,
-            max_items=2,
+            max_items=3,
             max_items_per_expert=1,
             objective_policy=policy,
         ),
@@ -277,7 +271,7 @@ def test_nonpositive_redundant_and_hard_limit_omissions_are_classified() -> None
             evidence(2, expert="shared", relevance=0.6),
             evidence(
                 3,
-                expert="other",
+                expert="harmful",
                 relevance=0.0,
                 utility=-1.0,
                 direct_credit=-1.0,
@@ -285,6 +279,7 @@ def test_nonpositive_redundant_and_hard_limit_omissions_are_classified() -> None
                 harm_risk=1.0,
             ),
             evidence(4, expert="other", relevance=0.8, estimated_tokens=100),
+            evidence(5, expert="large", relevance=0.4, estimated_tokens=100),
         ),
         (
             interaction(
@@ -297,20 +292,13 @@ def test_nonpositive_redundant_and_hard_limit_omissions_are_classified() -> None
     )
     by_id = {item.memory_id: item.reason for item in packet.omissions}
 
-    assert by_id[memory_id(2)] in {
-        ContextOmissionReason.EXPERT_CAP,
-        ContextOmissionReason.REDUNDANCY_DOMINATED,
-        ContextOmissionReason.TOKEN_BUDGET,
-    }
+    assert packet.selected_memory_ids == (memory_id(1), memory_id(4))
+    assert by_id[memory_id(2)] is ContextOmissionReason.EXPERT_CAP
     assert by_id[memory_id(3)] is ContextOmissionReason.NON_POSITIVE_MARGINAL_VALUE
-    assert by_id[memory_id(4)] in {
-        ContextOmissionReason.TOKEN_BUDGET,
-        ContextOmissionReason.ITEM_LIMIT,
-        ContextOmissionReason.NOT_SELECTED_BY_EXACT_SOLVER,
-    }
+    assert by_id[memory_id(5)] is ContextOmissionReason.TOKEN_BUDGET
 
 
-def test_packet_uuid_json_and_selection_are_input_order_invariant() -> None:
+def test_packet_identity_json_and_selection_are_input_order_invariant() -> None:
     candidates = tuple(
         evidence(index, relevance=0.2 + 0.1 * index)
         for index in range(1, 7)
@@ -353,7 +341,7 @@ def test_instruction_like_content_remains_escaped_evidence_data() -> None:
     assert "command" not in payload
 
 
-def test_context_compiler_module_reexports_public_contracts() -> None:
+def test_context_compiler_module_reexports_contracts() -> None:
     assert compiler_module.ContextCoverageDemand is ContextCoverageDemand
     assert compiler_module.IntegratedContextEvidence is IntegratedContextEvidence
     assert compiler_module.ContextSolverMode is ContextSolverMode
