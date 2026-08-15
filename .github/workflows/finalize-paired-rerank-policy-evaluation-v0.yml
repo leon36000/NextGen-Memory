@@ -1,0 +1,319 @@
+name: Finalize Paired Rerank Policy Evaluation v0
+
+on:
+  push:
+    branches: [bootstrap/paired-rerank-policy-evaluation-v0-finalize]
+
+permissions:
+  actions: read
+  contents: write
+  pull-requests: write
+
+jobs:
+  finalize:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: leon36000/NextGen-Memory
+      FEATURE_BRANCH: feat/paired-rerank-policy-evaluation-v0
+      BASE_BRANCH: feat/inherited-rerank-telemetry-v0
+      MARKER_BRANCH: bootstrap/paired-rerank-policy-evaluation-v0-finalize
+      PR_NUMBER: '17'
+    steps:
+      - name: Capture exact feature and base heads
+        id: target
+        run: |
+          set -euo pipefail
+          HEAD_SHA=$(gh api "repos/$REPO/git/ref/heads/$FEATURE_BRANCH" --jq '.object.sha')
+          BASE_SHA=$(gh api "repos/$REPO/git/ref/heads/$BASE_BRANCH" --jq '.object.sha')
+          test -n "$(gh api "repos/$REPO/contents/src/nextgen_memory/paired_rerank_policy_evaluation.py?ref=$FEATURE_BRANCH" --jq '.sha')"
+          test -n "$(gh api "repos/$REPO/contents/scripts/simulate_paired_rerank_policy_evaluation_v0.py?ref=$FEATURE_BRANCH" --jq '.sha')"
+          test -n "$(gh api "repos/$REPO/contents/docs/paired-rerank-policy-evaluation-v0.md?ref=$FEATURE_BRANCH" --jq '.sha')"
+          test -n "$(gh api "repos/$REPO/contents/docs/paired-rerank-policy-evaluation-v0-verification.md?ref=$FEATURE_BRANCH" --jq '.sha')"
+          test -n "$(gh api "repos/$REPO/contents/docs/paired-rerank-policy-evaluation-v0-red.md?ref=$FEATURE_BRANCH" --jq '.sha')"
+          INIT=$(gh api "repos/$REPO/contents/src/nextgen_memory/__init__.py?ref=$FEATURE_BRANCH" --jq '.content' | tr -d '\n' | base64 -d)
+          printf '%s' "$INIT" | grep -q 'PairedRerankPolicyEvaluator'
+          printf '%s' "$INIT" | grep -q 'fingerprint_paired_policy_evaluation_config'
+          echo "head_sha=$HEAD_SHA" >> "$GITHUB_OUTPUT"
+          echo "base_sha=$BASE_SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Wait for ordinary PR matrix on exact feature SHA
+        id: ci
+        run: |
+          set -euo pipefail
+          HEAD_SHA='${{ steps.target.outputs.head_sha }}'
+          for attempt in $(seq 1 150); do
+            RUN=$(gh api "repos/$REPO/actions/runs?head_sha=$HEAD_SHA&event=pull_request&per_page=50" \
+              --jq '[.workflow_runs[] | select(.name == "CI")][0] // empty')
+            if [ -n "$RUN" ]; then
+              STATUS=$(printf '%s' "$RUN" | jq -r '.status')
+              CONCLUSION=$(printf '%s' "$RUN" | jq -r '.conclusion // ""')
+              RUN_ID=$(printf '%s' "$RUN" | jq -r '.id')
+              if [ "$STATUS" = 'completed' ]; then
+                test "$CONCLUSION" = 'success'
+                gh api "repos/$REPO/actions/runs/$RUN_ID/jobs?per_page=100" > /tmp/jobs.json
+                jq -e '[.jobs[] | select(.name | contains("3.12")) | .conclusion] | length > 0 and all(. == "success")' /tmp/jobs.json
+                jq -e '[.jobs[] | select(.name | contains("3.13")) | .conclusion] | length > 0 and all(. == "success")' /tmp/jobs.json
+                echo "run_id=$RUN_ID" >> "$GITHUB_OUTPUT"
+                exit 0
+              fi
+            fi
+            sleep 10
+          done
+          echo 'Ordinary PR matrix did not complete successfully' >&2
+          exit 1
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.target.outputs.head_sha }}
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Verify exact diff and protected boundaries
+        run: |
+          set -euo pipefail
+          BASE_SHA='${{ steps.target.outputs.base_sha }}'
+          HEAD_SHA='${{ steps.target.outputs.head_sha }}'
+          test "$(git rev-parse HEAD)" = "$HEAD_SHA"
+          git diff --check "$BASE_SHA...$HEAD_SHA"
+          git diff --name-only "$BASE_SHA...$HEAD_SHA" | sort > /tmp/files.txt
+          cat > /tmp/expected-files.txt <<'EOF'
+          docs/paired-rerank-policy-evaluation-v0-red.md
+          docs/paired-rerank-policy-evaluation-v0-verification.md
+          docs/paired-rerank-policy-evaluation-v0.md
+          docs/superpowers/plans/2026-08-15-paired-rerank-policy-evaluation-v0.md
+          docs/superpowers/specs/2026-08-15-paired-rerank-policy-evaluation-v0-design.md
+          scripts/simulate_paired_rerank_policy_evaluation_v0.py
+          src/nextgen_memory/__init__.py
+          src/nextgen_memory/paired_rerank_policy_evaluation.py
+          tests/test_paired_rerank_policy_evaluation.py
+          tests/test_paired_rerank_policy_evaluation_properties.py
+          tests/test_paired_rerank_policy_evaluation_public_api.py
+          tests/test_paired_rerank_policy_evaluation_simulation.py
+          EOF
+          diff -u /tmp/expected-files.txt /tmp/files.txt
+          test -z "$(git diff --name-only "$BASE_SHA...$HEAD_SHA" -- \
+            src/nextgen_memory/inherited_rerank_telemetry.py \
+            src/nextgen_memory/bounded_inherited_reranker.py \
+            src/nextgen_memory/utility_reranker.py \
+            src/nextgen_memory/neon_utility.py \
+            src/nextgen_memory/causal_credit.py \
+            src/nextgen_memory/router.py \
+            src/nextgen_memory/retrieval.py \
+            migrations)"
+
+      - name: Install and reproduce lint, tests, coverage, compile, and wheel
+        run: |
+          set -euo pipefail
+          python -m pip install -e '.[dev]'
+          ruff check .
+          python -m pytest -q
+          python -m pytest --cov=nextgen_memory --cov-report=json -q
+          python -m compileall -q src scripts
+          python -m pip wheel . --no-deps -w /tmp/wheel
+          python -m pip install --force-reinstall /tmp/wheel/*.whl
+          python - <<'PY'
+          from nextgen_memory import (
+              PairedPolicyAbstentionReason,
+              PairedPolicyEvaluationConfig,
+              PairedPolicyVerdict,
+              PairedRerankPolicyEvaluation,
+              PairedRerankPolicyEvaluationValidationError,
+              PairedRerankPolicyEvaluator,
+              PairedRerankPolicyTrial,
+              fingerprint_paired_policy_evaluation_config,
+          )
+          assert PairedPolicyAbstentionReason.INSUFFICIENT_PAIRS.value == 'insufficient_pairs'
+          assert PairedPolicyEvaluationConfig().minimum_pairs == 8
+          assert PairedPolicyVerdict.PROMISING.value == 'promising'
+          assert PairedRerankPolicyEvaluation.__name__ == 'PairedRerankPolicyEvaluation'
+          assert PairedRerankPolicyEvaluationValidationError.__name__.endswith('ValidationError')
+          assert PairedRerankPolicyEvaluator.__name__ == 'PairedRerankPolicyEvaluator'
+          assert PairedRerankPolicyTrial.__name__ == 'PairedRerankPolicyTrial'
+          assert callable(fingerprint_paired_policy_evaluation_config)
+          PY
+          python -m pytest --collect-only -q > /tmp/collect.txt
+          python - <<'PY'
+          import re
+          from pathlib import Path
+          text = Path('/tmp/collect.txt').read_text(encoding='utf-8')
+          matches = re.findall(r'(\d+) tests? collected', text)
+          if not matches:
+              raise SystemExit('unable to parse test count')
+          Path('/tmp/tests.txt').write_text(matches[-1], encoding='utf-8')
+          PY
+          jq -r '.totals.percent_covered' coverage.json > /tmp/coverage.txt
+          sha256sum /tmp/wheel/*.whl | awk '{print $1}' > /tmp/wheel-sha.txt
+
+      - name: Verify deterministic simulation under three hash seeds
+        run: |
+          set -euo pipefail
+          python scripts/simulate_paired_rerank_policy_evaluation_v0.py > /tmp/sim-default.json
+          PYTHONHASHSEED=1 python scripts/simulate_paired_rerank_policy_evaluation_v0.py > /tmp/sim-1.json
+          PYTHONHASHSEED=999 python scripts/simulate_paired_rerank_policy_evaluation_v0.py > /tmp/sim-999.json
+          cmp /tmp/sim-default.json /tmp/sim-1.json
+          cmp /tmp/sim-default.json /tmp/sim-999.json
+          jq -e '.variance_experiment.trial_count == 64' /tmp/sim-default.json
+          jq -e '.variance_experiment.paired_standard_error < .variance_experiment.unpaired_standard_error' /tmp/sim-default.json
+          jq -e '.variance_experiment.standard_error_ratio < 0.25' /tmp/sim-default.json
+          jq -e '.variance_experiment.verdict == "promising"' /tmp/sim-default.json
+          jq -e '.scenario_count == 6' /tmp/sim-default.json
+          jq -e '.verdict_scenarios == {"harmful":"harmful","inconclusive":"inconclusive","insufficient_evidence":"insufficient_evidence","neutral":"neutral","promising":"promising","too_costly":"too_costly"}' /tmp/sim-default.json
+          jq -e '.memory_level_credit_emitted == false' /tmp/sim-default.json
+          sha256sum /tmp/sim-default.json | awk '{print $1}' > /tmp/simulation-sha.txt
+
+      - name: Generate deterministic evaluation JSON and verify privacy
+        run: |
+          set -euo pipefail
+          python - <<'PY' > /tmp/evaluation.json
+          from scripts.simulate_paired_rerank_policy_evaluation_v0 import (
+              _trials_from_deltas,
+          )
+          from nextgen_memory import PairedRerankPolicyEvaluator
+          evaluation = PairedRerankPolicyEvaluator().evaluate(
+              _trials_from_deltas('final-example', (0.1,) * 8)
+          )
+          print(evaluation.render_json())
+          PY
+          python - <<'PY'
+          from pathlib import Path
+          serialized = Path('/tmp/evaluation.json').read_text(encoding='utf-8').lower()
+          forbidden = (
+              'query', 'prompt', 'answer', 'memory_body', 'body_text',
+              'command', 'stdout', 'stderr', 'patch', 'environment',
+              'secret', 'api_key', 'feedback_note', 'memory_credit',
+              'memory_id', 'relation_path', 'edge_path',
+          )
+          for term in forbidden:
+              assert term not in serialized, term
+          PY
+          jq -e '.trial_count == 8' /tmp/evaluation.json
+          jq -e '.verdict == "promising"' /tmp/evaluation.json
+          jq -e '.score_standard_error == 0.0' /tmp/evaluation.json
+          sha256sum /tmp/evaluation.json | awk '{print $1}' > /tmp/evaluation-sha.txt
+
+      - name: Scan exact diff for high-signal secrets
+        run: |
+          set -euo pipefail
+          BASE_SHA='${{ steps.target.outputs.base_sha }}'
+          HEAD_SHA='${{ steps.target.outputs.head_sha }}'
+          if git diff "$BASE_SHA...$HEAD_SHA" | grep -E '(sk-[A-Za-z0-9]{20,}|ghp_[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16}|mongodb\+srv://|postgres(ql)?://|BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY)'; then
+            echo 'High-signal secret pattern found' >&2
+            exit 1
+          fi
+
+      - name: Compute exact verification facts
+        id: facts
+        run: |
+          echo "tests=$(cat /tmp/tests.txt)" >> "$GITHUB_OUTPUT"
+          echo "coverage=$(cat /tmp/coverage.txt)" >> "$GITHUB_OUTPUT"
+          echo "wheel_sha=$(cat /tmp/wheel-sha.txt)" >> "$GITHUB_OUTPUT"
+          echo "simulation_sha=$(cat /tmp/simulation-sha.txt)" >> "$GITHUB_OUTPUT"
+          echo "evaluation_sha=$(cat /tmp/evaluation-sha.txt)" >> "$GITHUB_OUTPUT"
+          echo "paired_se=$(jq -r '.variance_experiment.paired_standard_error' /tmp/sim-default.json)" >> "$GITHUB_OUTPUT"
+          echo "unpaired_se=$(jq -r '.variance_experiment.unpaired_standard_error' /tmp/sim-default.json)" >> "$GITHUB_OUTPUT"
+          echo "se_ratio=$(jq -r '.variance_experiment.standard_error_ratio' /tmp/sim-default.json)" >> "$GITHUB_OUTPUT"
+
+      - name: Update draft PR with exact evidence
+        run: |
+          cat > /tmp/body.md <<EOF
+          ## Résumé
+
+          Ajoute **Paired Rerank Policy Evaluation v0**, un évaluateur de politiques par replays strictement appariés.
+
+          La PR reste empilée sur \`feat/inherited-rerank-telemetry-v0\`, brouillon et non fusionnée.
+
+          ## Contrat apparié
+
+          - même espace et décision de routage ;
+          - mêmes candidats, rangs et scores de base ;
+          - hashes de contexte et de continuation obligatoires ;
+          - différence traitement–contrôle calculée dans chaque paire ;
+          - aucun propensity implicite et aucune revendication OPE observationnelle ;
+          - aucun reward ou verdict copié vers les mémoires individuelles.
+
+          ## Statistiques et verdicts
+
+          - moyenne, écart type échantillonnal, erreur standard et intervalle de confiance appariés ;
+          - deltas succès, tokens et latence ;
+          - gates de quantité, incertitude, dommage et coût ;
+          - verdicts \`insufficient_evidence\`, \`harmful\`, \`too_costly\`, \`promising\`, \`neutral\`, \`inconclusive\` ;
+          - retry exact et permutation des essais déterministes ;
+          - conflit détecté sur réutilisation d'un trial UUID avec contenu différent.
+
+          ## TDD
+
+          - RED noyau : module absent ;
+          - RED simulation : noyau et propriétés verts, script absent ;
+          - RED API : interne vert, exports racine absents ;
+          - GREEN final : **${{ steps.facts.outputs.tests }} tests**.
+
+          ## Vérification GitHub Actions
+
+          - commit exact : \`${{ steps.target.outputs.head_sha }}\` ;
+          - base exacte : \`${{ steps.target.outputs.base_sha }}\` ;
+          - workflow CI : \`${{ steps.ci.outputs.run_id }}\` ;
+          - Python 3.12 et 3.13 : Ruff et suite complète réussis ;
+          - conclusion globale : **success**.
+
+          ## Propriétés et simulation
+
+          - **5 000 expériences déterministes** couvrant les deux abstentions et les cinq verdicts directionnels ;
+          - simulation corrélée : erreur standard appariée \`${{ steps.facts.outputs.paired_se }}\` contre non appariée \`${{ steps.facts.outputs.unpaired_se }}\` ;
+          - ratio d'erreur standard : \`${{ steps.facts.outputs.se_ratio }}\` ;
+          - les six verdicts sont reproduits ;
+          - JSON byte-identique sous trois \`PYTHONHASHSEED\` ;
+          - SHA-256 simulation : \`${{ steps.facts.outputs.simulation_sha }}\`.
+
+          ## Reproduction indépendante
+
+          - couverture globale : **${{ steps.facts.outputs.coverage }} %** ;
+          - compileall source et simulation : réussi ;
+          - wheel construit, réinstallé et API importée ;
+          - SHA-256 du wheel : \`${{ steps.facts.outputs.wheel_sha }}\` ;
+          - SHA-256 de l'évaluation JSON : \`${{ steps.facts.outputs.evaluation_sha }}\` ;
+          - diff limité aux **12 fichiers** prévus ;
+          - télémétrie, rerankers, causal credit, routing, retrieval et migrations inchangés ;
+          - scans de secrets et confidentialité : propres.
+
+          ## Garde-fous
+
+          - aucune fusion ;
+          - aucune modification de main ;
+          - aucune écriture DB, feedback ou télémétrie ;
+          - aucune sélection ou activation automatique de politique ;
+          - OPE observationnelle et calibration de drift reportées à des contrats séparés.
+          EOF
+          sed -i 's/^          //' /tmp/body.md
+          gh pr edit "$PR_NUMBER" --repo "$REPO" --body-file /tmp/body.md
+
+      - name: Persist machine-readable verification marker
+        run: |
+          set -euo pipefail
+          jq -n \
+            --argjson pull_request 17 \
+            --arg head_sha '${{ steps.target.outputs.head_sha }}' \
+            --arg base_sha '${{ steps.target.outputs.base_sha }}' \
+            --argjson ci_run_id '${{ steps.ci.outputs.run_id }}' \
+            --argjson tests '${{ steps.facts.outputs.tests }}' \
+            --argjson coverage '${{ steps.facts.outputs.coverage }}' \
+            --arg wheel_sha256 '${{ steps.facts.outputs.wheel_sha }}' \
+            --arg simulation_sha256 '${{ steps.facts.outputs.simulation_sha }}' \
+            --arg evaluation_sha256 '${{ steps.facts.outputs.evaluation_sha }}' \
+            --argjson paired_standard_error '${{ steps.facts.outputs.paired_se }}' \
+            --argjson unpaired_standard_error '${{ steps.facts.outputs.unpaired_se }}' \
+            --argjson standard_error_ratio '${{ steps.facts.outputs.se_ratio }}' \
+            '{pull_request:$pull_request,branch:"feat/paired-rerank-policy-evaluation-v0",base_sha:$base_sha,head_sha:$head_sha,ci_run_id:$ci_run_id,conclusion:"success",python:["3.12","3.13"],tests:$tests,coverage_percent:$coverage,property_cases:5000,changed_files:12,wheel_sha256:$wheel_sha256,simulation:{scenario_count:6,paired_standard_error:$paired_standard_error,unpaired_standard_error:$unpaired_standard_error,standard_error_ratio:$standard_error_ratio,sha256:$simulation_sha256},evaluation_json_sha256:$evaluation_sha256,matched_replay_only:true,propensity_used:false,memory_level_credit_emitted:false,protected_files_changed:false,database_changed:false,merged:false,verified_at:(now|todate)}' > /tmp/marker.json
+          CONTENT=$(base64 -w0 /tmp/marker.json)
+          PATH_NAME='bootstrap/paired-rerank-policy-evaluation-v0-verification.json'
+          EXISTING_SHA=$(gh api "repos/$REPO/contents/$PATH_NAME?ref=$MARKER_BRANCH" --jq '.sha' 2>/dev/null || true)
+          if [ -n "$EXISTING_SHA" ]; then
+            gh api --method PUT "repos/$REPO/contents/$PATH_NAME" -f message='chore: record Paired Rerank Policy Evaluation v0 verification' -f branch="$MARKER_BRANCH" -f sha="$EXISTING_SHA" -f content="$CONTENT" >/dev/null
+          else
+            gh api --method PUT "repos/$REPO/contents/$PATH_NAME" -f message='chore: record Paired Rerank Policy Evaluation v0 verification' -f branch="$MARKER_BRANCH" -f content="$CONTENT" >/dev/null
+          fi
