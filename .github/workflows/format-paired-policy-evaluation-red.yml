@@ -1,0 +1,48 @@
+name: Format Paired Policy Evaluation RED
+
+on:
+  push:
+    branches: [bootstrap/paired-policy-evaluation-red-format]
+
+permissions:
+  contents: write
+
+jobs:
+  format:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/paired-rerank-policy-evaluation-v0
+          fetch-depth: 0
+      - name: Verify guarded target head
+        run: test "$(git rev-parse HEAD)" = "9643b1b714f271dfb2f09922286e82ac9be67d3b"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install development tools
+        run: python -m pip install -e '.[dev]'
+      - name: Apply import-only correction
+        run: ruff check tests/test_paired_rerank_policy_evaluation.py --select I001 --fix
+      - name: Require lint GREEN and exact missing-module RED
+        run: |
+          ruff check .
+          set +e
+          python -m pytest tests/test_paired_rerank_policy_evaluation.py -q > /tmp/red.txt 2>&1
+          status=$?
+          set -e
+          cat /tmp/red.txt
+          test "$status" -ne 0
+          grep -F "No module named 'nextgen_memory.paired_rerank_policy_evaluation'" /tmp/red.txt
+      - name: Verify exact scope
+        run: |
+          test "$(git diff --name-only)" = "tests/test_paired_rerank_policy_evaluation.py"
+          git diff --check
+      - name: Commit and push fast-forward
+        run: |
+          git config user.name "NextGen Memory Automation"
+          git config user.email "actions@users.noreply.github.com"
+          git add tests/test_paired_rerank_policy_evaluation.py
+          git commit -m "style: normalize paired policy evaluation RED imports"
+          git push origin HEAD:feat/paired-rerank-policy-evaluation-v0
