@@ -1,0 +1,111 @@
+name: Publish Inherited Rerank Telemetry GREEN 3
+
+on:
+  push:
+    branches: [bootstrap/inherited-rerank-telemetry-green-3]
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/inherited-rerank-telemetry-v0
+          fetch-depth: 0
+
+      - name: Verify guarded feature head
+        run: test "$(git rev-parse HEAD)" = "0e49685c8c627dc5b5f8ff1f1826a7c65d882a4b"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install development tools
+        run: python -m pip install -e '.[dev]'
+
+      - name: Insert valid singleton ranks into targeted negative fixtures
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path("tests/test_inherited_rerank_telemetry.py")
+          lines = path.read_text(encoding="utf-8").splitlines()
+          targets = (
+              "final_score=0.90,",
+              "final_score=0.89,",
+              'policy_version="other",',
+          )
+          inserted = 0
+          for target in targets:
+              positions = [
+                  index for index, line in enumerate(lines)
+                  if line.strip() == target
+              ]
+              if len(positions) != 1:
+                  raise SystemExit(
+                      f"{target}: expected one target line, found {len(positions)}"
+                  )
+              target_index = positions[0]
+              outer_index = None
+              for index in range(target_index - 1, -1, -1):
+                  if lines[index].strip() == "reranked_results()[0],":
+                      outer_index = index
+                      break
+              if outer_index is None:
+                  raise SystemExit(f"{target}: outer replace fixture not found")
+              indentation = lines[outer_index][
+                  : len(lines[outer_index]) - len(lines[outer_index].lstrip())
+              ]
+              marker = (
+                  f"{indentation}base=replace("
+                  "reranked_results()[0].base, final_rank=1),"
+              )
+              if marker in lines:
+                  raise SystemExit(f"{target}: rank patch already present")
+              lines[outer_index + 1 : outer_index + 1] = [
+                  marker,
+                  f"{indentation}final_rank=1,",
+              ]
+              inserted += 1
+          if inserted != 3:
+              raise SystemExit(f"expected three fixture patches, got {inserted}")
+          path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+          PY
+
+      - name: Format and verify focused and complete behavior
+        run: |
+          ruff format \
+            src/nextgen_memory/inherited_rerank_telemetry.py \
+            tests/test_inherited_rerank_telemetry.py
+          ruff check \
+            src/nextgen_memory/inherited_rerank_telemetry.py \
+            tests/test_inherited_rerank_telemetry.py \
+            --fix
+          ruff check .
+          python -m pytest tests/test_inherited_rerank_telemetry.py -q
+          python -m pytest -q
+          python -m compileall -q src
+          git diff --check
+
+      - name: Verify exact correction scope
+        run: |
+          cat > /tmp/allowed <<'EOF'
+          src/nextgen_memory/inherited_rerank_telemetry.py
+          tests/test_inherited_rerank_telemetry.py
+          EOF
+          git diff --name-only | sort > /tmp/actual
+          while read -r path; do grep -Fx "$path" /tmp/allowed >/dev/null; done < /tmp/actual
+
+      - name: Commit and push fast-forward
+        run: |
+          git config user.name "NextGen Memory Automation"
+          git config user.email "actions@users.noreply.github.com"
+          git add \
+            src/nextgen_memory/inherited_rerank_telemetry.py \
+            tests/test_inherited_rerank_telemetry.py
+          git commit -m "test: target inherited telemetry validation cases"
+          git push origin HEAD:feat/inherited-rerank-telemetry-v0
