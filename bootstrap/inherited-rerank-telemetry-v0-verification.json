@@ -1,0 +1,26 @@
+{
+  "pull_request": 16,
+  "branch": "feat/inherited-rerank-telemetry-v0",
+  "base_sha": "ead611e8cd7caee5a59c6ce19b671625975e976e",
+  "head_sha": "d00992d20f970717268a8a7355f19ab487def4e9",
+  "ci_run_id": 31859278936,
+  "conclusion": "success",
+  "python": [
+    "3.12.13",
+    "3.13"
+  ],
+  "tests": 323,
+  "coverage_percent": 90.43611323641927,
+  "property_cases": 5000,
+  "changed_files": 9,
+  "wheel_sha256": "ae06e5b72e74ad8747413a69bf1e0a79f1dc3373ae7de9dd8f395ff7758bd549",
+  "canonical_json_sha256": "f79de971c0831634ee34ab571fc2e741e9ad6af25b97d2b72829ba022da16509",
+  "deterministic_retry": true,
+  "input_permutation_invariant": true,
+  "aggregate_only": true,
+  "direct_feedback_included": false,
+  "protected_files_changed": false,
+  "database_changed": false,
+  "merged": false,
+  "verified_at": "2026-08-15T02:32:51Z"
+}
