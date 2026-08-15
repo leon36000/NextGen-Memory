@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import FrozenInstanceError, replace
+from dataclasses import FrozenInstanceError
 from datetime import UTC, datetime
 from math import isclose, tanh
 from types import MappingProxyType
@@ -24,7 +24,6 @@ from nextgen_memory.learning_evidence import (
 from nextgen_memory.retrieval import ResearchRetrievalHit
 from nextgen_memory.utility_reranker import (
     RerankedMemory,
-    UtilityEvidence,
     UtilityScoreBreakdown,
 )
 
@@ -45,13 +44,11 @@ def hit(
     return ResearchRetrievalHit(
         memory_id=memory_id,
         backend_ref=f"paper:{memory_id}",
+        rank=rank,
+        score=score,
         title=f"Paper {memory_id}",
         source_uri=f"https://example.invalid/{memory_id}",
-        source_type="paper",
-        year=2026,
         tags=("memory",),
-        score=score,
-        rank=rank,
     )
 
 
@@ -60,29 +57,28 @@ def base_result(
     *,
     final_rank: int = 1,
     final_score: float = 0.8,
-    direct_reward: float = 0.4,
 ) -> RerankedMemory:
-    retrieval_hit = hit(memory_id, rank=final_rank, score=final_score)
+    retrieval_hit = hit(
+        memory_id,
+        rank=final_rank,
+        score=final_score,
+    )
     return RerankedMemory(
         hit=retrieval_hit,
+        original_rank=final_rank,
         final_rank=final_rank,
         final_score=final_score,
-        score_breakdown=UtilityScoreBreakdown(
-            relevance_component=final_score,
-            reward_component=0.0,
-            verdict_component=0.0,
-            harm_penalty=0.0,
-            token_penalty=0.0,
-            latency_penalty=0.0,
-            final_score=final_score,
-        ),
-        utility_evidence=UtilityEvidence(
-            memory_id=memory_id,
-            feedback_count=3,
-            avg_reward=direct_reward,
-            positive_count=2,
-            negative_count=1,
-            last_feedback_at=NOW,
+        breakdown=UtilityScoreBreakdown(
+            relevance=final_score,
+            utility=0.0,
+            harm_risk=0.0,
+            token_cost=0.0,
+            latency_cost=0.0,
+            weighted_relevance=final_score,
+            weighted_utility=0.0,
+            weighted_harm_penalty=0.0,
+            weighted_token_penalty=0.0,
+            weighted_latency_penalty=0.0,
         ),
     )
 
@@ -297,11 +293,15 @@ def test_hard_cap_applies_after_saturation() -> None:
         minimum_structural_confidence=1.0,
     )
 
-    breakdown = BoundedInheritedReranker(config).rerank(
-        space_id=SPACE,
-        base_results=(base_result(),),
-        learning_evidence={MEMORY_A: evidence},
-    )[0].inherited_breakdown
+    breakdown = (
+        BoundedInheritedReranker(config)
+        .rerank(
+            space_id=SPACE,
+            base_results=(base_result(),),
+            learning_evidence={MEMORY_A: evidence},
+        )[0]
+        .inherited_breakdown
+    )
 
     assert breakdown.uncapped_component > 0.05
     assert breakdown.applied_component == 0.05
@@ -359,16 +359,12 @@ def test_lower_structural_confidence_reduces_adjustment_above_gate() -> None:
     lower = reranker.rerank(
         space_id=SPACE,
         base_results=(base_result(),),
-        learning_evidence={
-            MEMORY_A: learning_evidence(minimum_structural_confidence=0.6)
-        },
+        learning_evidence={MEMORY_A: learning_evidence(minimum_structural_confidence=0.6)},
     )[0].inherited_breakdown
     higher = reranker.rerank(
         space_id=SPACE,
         base_results=(base_result(),),
-        learning_evidence={
-            MEMORY_A: learning_evidence(minimum_structural_confidence=0.95)
-        },
+        learning_evidence={MEMORY_A: learning_evidence(minimum_structural_confidence=0.95)},
     )[0].inherited_breakdown
 
     assert lower.confidence_reliability < higher.confidence_reliability
@@ -402,17 +398,13 @@ def test_direct_evidence_never_changes_inherited_component() -> None:
     reranker = BoundedInheritedReranker()
     first = reranker.rerank(
         space_id=SPACE,
-        base_results=(base_result(direct_reward=-1.0),),
-        learning_evidence={
-            MEMORY_A: learning_evidence(direct_reward=-1.0)
-        },
+        base_results=(base_result(),),
+        learning_evidence={MEMORY_A: learning_evidence(direct_reward=-1.0)},
     )[0]
     second = reranker.rerank(
         space_id=SPACE,
-        base_results=(base_result(direct_reward=1.0),),
-        learning_evidence={
-            MEMORY_A: learning_evidence(direct_reward=1.0)
-        },
+        base_results=(base_result(),),
+        learning_evidence={MEMORY_A: learning_evidence(direct_reward=1.0)},
     )[0]
 
     assert first.inherited_breakdown == second.inherited_breakdown
@@ -447,7 +439,7 @@ def test_reranking_is_deterministic_and_can_change_order_only_by_bounded_compone
     assert first == second
     assert [item.base.hit.memory_id for item in first] == [MEMORY_B, MEMORY_A]
     assert [item.final_rank for item in first] == [1, 2]
-    assert first[0].final_score - first[0].base.final_score <= 0.05
+    assert abs(first[0].inherited_breakdown.applied_component) <= 0.05
     assert first[1].final_score == first[1].base.final_score
 
 
@@ -525,9 +517,7 @@ def test_reranker_rejects_scope_and_mapping_key_mismatch() -> None:
         BoundedInheritedReranker().rerank(
             space_id=SPACE,
             base_results=(base_result(),),
-            learning_evidence={
-                MEMORY_A: learning_evidence(space_id=OTHER_SPACE)
-            },
+            learning_evidence={MEMORY_A: learning_evidence(space_id=OTHER_SPACE)},
         )
     with pytest.raises(BoundedInheritedRerankerValidationError, match="key"):
         BoundedInheritedReranker().rerank(
@@ -538,20 +528,36 @@ def test_reranker_rejects_scope_and_mapping_key_mismatch() -> None:
 
 
 def test_reranker_rejects_non_uuid_scope_non_mapping_evidence_and_nonfinite_base_score() -> None:
-    with pytest.raises(BoundedInheritedRerankerValidationError, match="space_id"):
+    with pytest.raises(
+        BoundedInheritedRerankerValidationError,
+        match="space_id",
+    ):
         BoundedInheritedReranker().rerank(
             space_id="bad",  # type: ignore[arg-type]
             base_results=(base_result(),),
             learning_evidence={MEMORY_A: learning_evidence()},
         )
-    with pytest.raises(BoundedInheritedRerankerValidationError, match="mapping"):
+    with pytest.raises(
+        BoundedInheritedRerankerValidationError,
+        match="mapping",
+    ):
         BoundedInheritedReranker().rerank(
             space_id=SPACE,
             base_results=(base_result(),),
             learning_evidence=[],  # type: ignore[arg-type]
         )
-    malformed = replace(base_result(), final_score=float("nan"))
-    with pytest.raises(BoundedInheritedRerankerValidationError, match="finite"):
+
+    valid = base_result()
+    malformed = object.__new__(RerankedMemory)
+    object.__setattr__(malformed, "hit", valid.hit)
+    object.__setattr__(malformed, "original_rank", valid.original_rank)
+    object.__setattr__(malformed, "final_rank", valid.final_rank)
+    object.__setattr__(malformed, "final_score", float("nan"))
+    object.__setattr__(malformed, "breakdown", valid.breakdown)
+    with pytest.raises(
+        BoundedInheritedRerankerValidationError,
+        match="finite",
+    ):
         BoundedInheritedReranker().rerank(
             space_id=SPACE,
             base_results=(malformed,),
@@ -570,7 +576,6 @@ def test_result_contracts_are_immutable_and_preserve_base() -> None:
     assert isinstance(result, InheritedAwareRerankedMemory)
     assert isinstance(result.inherited_breakdown, InheritedScoreBreakdown)
     assert result.base is base
-    assert result.base.score_breakdown is base.score_breakdown
-    assert result.base.utility_evidence is base.utility_evidence
+    assert result.base.breakdown is base.breakdown
     with pytest.raises(FrozenInstanceError):
         result.final_score = 0.0  # type: ignore[misc]

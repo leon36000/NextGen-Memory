@@ -20,7 +20,6 @@ from nextgen_memory.learning_evidence import (
 from nextgen_memory.retrieval import ResearchRetrievalHit
 from nextgen_memory.utility_reranker import (
     RerankedMemory,
-    UtilityEvidence,
     UtilityScoreBreakdown,
 )
 
@@ -39,38 +38,37 @@ class Scenario:
     inherited_b: InheritedUtilityEvidence
 
 
-def _base(memory_id: UUID, *, rank: int, score: float) -> RerankedMemory:
+def _base(
+    memory_id: UUID,
+    *,
+    rank: int,
+    score: float,
+) -> RerankedMemory:
     hit = ResearchRetrievalHit(
         memory_id=memory_id,
         backend_ref=f"simulation:{memory_id}",
+        rank=rank,
+        score=score,
         title=f"Simulation {memory_id}",
         source_uri=f"https://example.invalid/{memory_id}",
-        source_type="simulation",
-        year=2026,
         tags=("inherited-credit",),
-        score=score,
-        rank=rank,
     )
     return RerankedMemory(
         hit=hit,
+        original_rank=rank,
         final_rank=rank,
         final_score=score,
-        score_breakdown=UtilityScoreBreakdown(
-            relevance_component=score,
-            reward_component=0.0,
-            verdict_component=0.0,
-            harm_penalty=0.0,
-            token_penalty=0.0,
-            latency_penalty=0.0,
-            final_score=score,
-        ),
-        utility_evidence=UtilityEvidence(
-            memory_id=memory_id,
-            feedback_count=0,
-            avg_reward=None,
-            positive_count=0,
-            negative_count=0,
-            last_feedback_at=None,
+        breakdown=UtilityScoreBreakdown(
+            relevance=score,
+            utility=0.0,
+            harm_risk=0.0,
+            token_cost=0.0,
+            latency_cost=0.0,
+            weighted_relevance=score,
+            weighted_utility=0.0,
+            weighted_harm_penalty=0.0,
+            weighted_token_penalty=0.0,
+            weighted_latency_penalty=0.0,
         ),
     )
 
@@ -213,9 +211,7 @@ def simulate_bounded_inherited_reranker_v0() -> dict[str, Any]:
             learning_evidence=evidence,
         )
         bounded_top = bounded[0].base.hit.memory_id
-        bounded_b = next(
-            item for item in bounded if item.base.hit.memory_id == MEMORY_B
-        )
+        bounded_b = next(item for item in bounded if item.base.hit.memory_id == MEMORY_B)
         expected_is_strong_promotion = scenario.expected_top == MEMORY_B
         if naive_top != scenario.expected_top:
             naive_false_promotions += 1
@@ -233,24 +229,14 @@ def simulate_bounded_inherited_reranker_v0() -> dict[str, Any]:
                 "base_b": scenario.base_b,
                 "naive_score_b": naive_scores[MEMORY_B],
                 "bounded_score_b": bounded_b.final_score,
-                "bounded_adjustment_b": (
-                    bounded_b.inherited_breakdown.applied_component
-                ),
-                "bounded_disposition_b": (
-                    bounded_b.inherited_breakdown.disposition.value
-                ),
-                "count_shrinkage_b": (
-                    bounded_b.inherited_breakdown.count_shrinkage
-                ),
-                "path_coherence_b": (
-                    bounded_b.inherited_breakdown.path_coherence
-                ),
+                "bounded_adjustment_b": (bounded_b.inherited_breakdown.applied_component),
+                "bounded_disposition_b": (bounded_b.inherited_breakdown.disposition.value),
+                "count_shrinkage_b": (bounded_b.inherited_breakdown.count_shrinkage),
+                "path_coherence_b": (bounded_b.inherited_breakdown.path_coherence),
                 "uncertainty_reliability_b": (
                     bounded_b.inherited_breakdown.uncertainty_reliability
                 ),
-                "confidence_reliability_b": (
-                    bounded_b.inherited_breakdown.confidence_reliability
-                ),
+                "confidence_reliability_b": (bounded_b.inherited_breakdown.confidence_reliability),
             }
         )
 
