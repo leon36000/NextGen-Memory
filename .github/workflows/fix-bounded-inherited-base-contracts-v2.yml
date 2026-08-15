@@ -1,0 +1,266 @@
+name: Fix bounded inherited stacked-base contracts v2
+
+on:
+  push:
+    branches: [bootstrap/fix-bounded-inherited-base-contracts-v2]
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/bounded-inherited-reranker-v0
+          fetch-depth: 0
+
+      - name: Verify guarded target head
+        run: test "$(git rev-parse HEAD)" = "aa683e2135df6e4e0250b5c7fd8e6516ddbbb458"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install development tools
+        run: python -m pip install -e '.[dev]'
+
+      - name: Replace test and simulation helpers atomically
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          def replace_region(
+              text: str,
+              start_marker: str,
+              end_marker: str,
+              replacement: str,
+              label: str,
+          ) -> str:
+              if text.count(start_marker) != 1 or text.count(end_marker) != 1:
+                  raise SystemExit(f"{label}: markers are not unique")
+              start = text.index(start_marker)
+              end = text.index(end_marker, start)
+              return text[:start] + replacement + text[end:]
+
+          def remove_line_once(text: str, exact_line: str, label: str) -> str:
+              count = text.count(exact_line)
+              if count != 1:
+                  raise SystemExit(f"{label}: expected one line, found {count}")
+              return text.replace(exact_line, "", 1)
+
+          test_path = Path("tests/test_bounded_inherited_reranker.py")
+          test_text = test_path.read_text(encoding="utf-8")
+          test_text = remove_line_once(
+              test_text,
+              "    UtilityEvidence,\n",
+              "unit-test UtilityEvidence import",
+          )
+          test_function = '''def base_result(
+              memory_id: UUID = MEMORY_A,
+              *,
+              final_rank: int = 1,
+              final_score: float = 0.8,
+          ) -> RerankedMemory:
+              retrieval_hit = hit(memory_id, rank=final_rank, score=final_score)
+              return RerankedMemory(
+                  hit=retrieval_hit,
+                  original_rank=final_rank,
+                  final_rank=final_rank,
+                  final_score=final_score,
+                  breakdown=UtilityScoreBreakdown(
+                      relevance=final_score,
+                      utility=0.0,
+                      harm_risk=0.0,
+                      token_cost=0.0,
+                      latency_cost=0.0,
+                      weighted_relevance=final_score,
+                      weighted_utility=0.0,
+                      weighted_harm_penalty=0.0,
+                      weighted_token_penalty=0.0,
+                      weighted_latency_penalty=0.0,
+                  ),
+              )
+          '''
+          test_function = "\n".join(
+              line[10:] if line.startswith("          ") else line
+              for line in test_function.splitlines()
+          ) + "\n\n"
+          test_text = replace_region(
+              test_text,
+              "def base_result(\n",
+              "def learning_evidence(\n",
+              test_function,
+              "unit-test base_result",
+          )
+          for old in (
+              "base_results=(base_result(direct_reward=-1.0),),",
+              "base_results=(base_result(direct_reward=1.0),),",
+          ):
+              if test_text.count(old) != 1:
+                  raise SystemExit(f"missing direct-evidence fixture call: {old}")
+              test_text = test_text.replace(old, "base_results=(base_result(),),", 1)
+          old_assertions = (
+              "    assert result.base.score_breakdown is base.score_breakdown\n"
+              "    assert result.base.utility_evidence is base.utility_evidence\n"
+          )
+          if test_text.count(old_assertions) != 1:
+              raise SystemExit("missing legacy base-preservation assertions")
+          test_text = test_text.replace(
+              old_assertions,
+              "    assert result.base.breakdown is base.breakdown\n",
+              1,
+          )
+          test_path.write_text(test_text, encoding="utf-8")
+
+          property_path = Path(
+              "tests/test_bounded_inherited_reranker_properties.py"
+          )
+          property_text = property_path.read_text(encoding="utf-8")
+          property_text = remove_line_once(
+              property_text,
+              "    UtilityEvidence,\n",
+              "property UtilityEvidence import",
+          )
+          property_function = '''def _base_result(
+              memory_id: UUID,
+              *,
+              rank: int,
+              score: float,
+          ) -> RerankedMemory:
+              hit = ResearchRetrievalHit(
+                  memory_id=memory_id,
+                  backend_ref=f"paper:{memory_id}",
+                  title=f"Paper {memory_id}",
+                  source_uri=f"https://example.invalid/{memory_id}",
+                  tags=("memory",),
+                  score=score,
+                  rank=rank,
+              )
+              return RerankedMemory(
+                  hit=hit,
+                  original_rank=rank,
+                  final_rank=rank,
+                  final_score=score,
+                  breakdown=UtilityScoreBreakdown(
+                      relevance=score,
+                      utility=0.0,
+                      harm_risk=0.0,
+                      token_cost=0.0,
+                      latency_cost=0.0,
+                      weighted_relevance=score,
+                      weighted_utility=0.0,
+                      weighted_harm_penalty=0.0,
+                      weighted_token_penalty=0.0,
+                      weighted_latency_penalty=0.0,
+                  ),
+              )
+          '''
+          property_function = "\n".join(
+              line[10:] if line.startswith("          ") else line
+              for line in property_function.splitlines()
+          ) + "\n\n"
+          property_text = replace_region(
+              property_text,
+              "def _base_result(\n",
+              "def _direct_evidence(\n",
+              property_function,
+              "property _base_result",
+          )
+          property_path.write_text(property_text, encoding="utf-8")
+
+          simulation_path = Path(
+              "scripts/simulate_bounded_inherited_reranker_v0.py"
+          )
+          simulation_text = simulation_path.read_text(encoding="utf-8")
+          simulation_text = remove_line_once(
+              simulation_text,
+              "    UtilityEvidence,\n",
+              "simulation UtilityEvidence import",
+          )
+          simulation_function = '''def _base(
+              memory_id: UUID,
+              *,
+              rank: int,
+              score: float,
+          ) -> RerankedMemory:
+              hit = ResearchRetrievalHit(
+                  memory_id=memory_id,
+                  backend_ref=f"simulation:{memory_id}",
+                  title=f"Simulation {memory_id}",
+                  source_uri=f"https://example.invalid/{memory_id}",
+                  tags=("inherited-credit",),
+                  score=score,
+                  rank=rank,
+              )
+              return RerankedMemory(
+                  hit=hit,
+                  original_rank=rank,
+                  final_rank=rank,
+                  final_score=score,
+                  breakdown=UtilityScoreBreakdown(
+                      relevance=score,
+                      utility=0.0,
+                      harm_risk=0.0,
+                      token_cost=0.0,
+                      latency_cost=0.0,
+                      weighted_relevance=score,
+                      weighted_utility=0.0,
+                      weighted_harm_penalty=0.0,
+                      weighted_token_penalty=0.0,
+                      weighted_latency_penalty=0.0,
+                  ),
+              )
+          '''
+          simulation_function = "\n".join(
+              line[10:] if line.startswith("          ") else line
+              for line in simulation_function.splitlines()
+          ) + "\n\n"
+          simulation_text = replace_region(
+              simulation_text,
+              "def _base(",
+              "def _neutral_inherited()",
+              simulation_function,
+              "simulation _base",
+          )
+          simulation_path.write_text(simulation_text, encoding="utf-8")
+          PY
+
+      - name: Format and verify the integrated correction
+        run: |
+          ruff format \
+            tests/test_bounded_inherited_reranker.py \
+            tests/test_bounded_inherited_reranker_properties.py \
+            scripts/simulate_bounded_inherited_reranker_v0.py
+          ruff check .
+          python -m pytest \
+            tests/test_bounded_inherited_reranker.py \
+            tests/test_bounded_inherited_reranker_properties.py \
+            tests/test_bounded_inherited_reranker_simulation.py \
+            -q
+          python -m pytest -q
+          python -m compileall -q src scripts
+          git diff --check
+
+      - name: Verify exact correction scope
+        run: |
+          cat > /tmp/expected <<'EOF'
+          scripts/simulate_bounded_inherited_reranker_v0.py
+          tests/test_bounded_inherited_reranker.py
+          tests/test_bounded_inherited_reranker_properties.py
+          EOF
+          git diff --name-only | sort > /tmp/actual
+          diff -u /tmp/expected /tmp/actual
+
+      - name: Commit and push fast-forward
+        run: |
+          git config user.name "NextGen Memory Automation"
+          git config user.email "actions@users.noreply.github.com"
+          git add \
+            scripts/simulate_bounded_inherited_reranker_v0.py \
+            tests/test_bounded_inherited_reranker.py \
+            tests/test_bounded_inherited_reranker_properties.py
+          git commit -m "test: align bounded inherited fixtures with stacked base"
+          git push origin HEAD:feat/bounded-inherited-reranker-v0
