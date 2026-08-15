@@ -1,0 +1,31 @@
+{
+  "pull_request": 15,
+  "branch": "feat/bounded-inherited-reranker-v0",
+  "base_sha": "0d50f92f23e326a61b13b3ef7987a1b67ea18108",
+  "head_sha": "ead611e8cd7caee5a59c6ce19b671625975e976e",
+  "ci_run_id": 31858173445,
+  "conclusion": "success",
+  "python": [
+    "3.12.13",
+    "3.13"
+  ],
+  "tests": 305,
+  "coverage_percent": 90.70028011204482,
+  "property_cases": 10000,
+  "direct_permutation_cases": 2000,
+  "changed_files": 12,
+  "wheel_sha256": "707d60e9282194fa5566e835142ab9ac1f20af8f0e70d31ede8c5cead4bb57fd",
+  "simulation": {
+    "scenario_count": 5,
+    "naive_false_promotions": 4,
+    "bounded_false_promotions": 0,
+    "bounded_strong_promotions": 1,
+    "maximum_absolute_adjustment": 0.05,
+    "sha256": "3617121601d12da3a0d82c7a0c42cab6f12bd2446e3d33d48a37b0edbb0fcf7f"
+  },
+  "protected_files_changed": false,
+  "direct_double_counted": false,
+  "database_changed": false,
+  "merged": false,
+  "verified_at": "2026-08-15T02:05:57Z"
+}
