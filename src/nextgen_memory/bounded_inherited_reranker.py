@@ -39,9 +39,7 @@ class BoundedInheritedRerankerConfig:
     policy_version: str = "bounded-inherited-reranker-v0"
 
     def __post_init__(self) -> None:
-        inherited_weight = _nonnegative_number(
-            "inherited_weight", self.inherited_weight
-        )
+        inherited_weight = _nonnegative_number("inherited_weight", self.inherited_weight)
         maximum_absolute_adjustment = _nonnegative_number(
             "maximum_absolute_adjustment",
             self.maximum_absolute_adjustment,
@@ -63,12 +61,8 @@ class BoundedInheritedRerankerConfig:
             self.minimum_structural_confidence,
         )
         value_scale = _positive_number("value_scale", self.value_scale)
-        uncertainty_floor = _positive_number(
-            "uncertainty_floor", self.uncertainty_floor
-        )
-        policy_version = _required_text(
-            "policy_version", self.policy_version
-        )
+        uncertainty_floor = _positive_number("uncertainty_floor", self.uncertainty_floor)
+        policy_version = _required_text("policy_version", self.policy_version)
 
         object.__setattr__(self, "inherited_weight", inherited_weight)
         object.__setattr__(
@@ -117,32 +111,18 @@ class InheritedScoreBreakdown:
     policy_version: str
 
     def __post_init__(self) -> None:
-        contribution_count = _nonnegative_integer(
-            "contribution_count", self.contribution_count
-        )
+        contribution_count = _nonnegative_integer("contribution_count", self.contribution_count)
         value_sum = _optional_finite_number("value_sum", self.value_sum)
-        absolute_value_sum = _optional_finite_number(
-            "absolute_value_sum", self.absolute_value_sum
-        )
-        standard_error_sum = _optional_finite_number(
-            "standard_error_sum", self.standard_error_sum
-        )
+        absolute_value_sum = _optional_finite_number("absolute_value_sum", self.absolute_value_sum)
+        standard_error_sum = _optional_finite_number("standard_error_sum", self.standard_error_sum)
         minimum_structural_confidence = _optional_probability(
             "minimum_structural_confidence",
             self.minimum_structural_confidence,
         )
-        inherited_mean = _optional_finite_number(
-            "inherited_mean", self.inherited_mean
-        )
-        signed_signal = _bounded_unit_number(
-            "signed_signal", self.signed_signal
-        )
-        count_shrinkage = _probability(
-            "count_shrinkage", self.count_shrinkage
-        )
-        path_coherence = _probability(
-            "path_coherence", self.path_coherence
-        )
+        inherited_mean = _optional_finite_number("inherited_mean", self.inherited_mean)
+        signed_signal = _bounded_unit_number("signed_signal", self.signed_signal)
+        count_shrinkage = _probability("count_shrinkage", self.count_shrinkage)
+        path_coherence = _probability("path_coherence", self.path_coherence)
         uncertainty_reliability = _probability(
             "uncertainty_reliability",
             self.uncertainty_reliability,
@@ -151,19 +131,13 @@ class InheritedScoreBreakdown:
             "confidence_reliability",
             self.confidence_reliability,
         )
-        uncapped_component = _finite_number(
-            "uncapped_component", self.uncapped_component
-        )
-        applied_component = _finite_number(
-            "applied_component", self.applied_component
-        )
+        uncapped_component = _finite_number("uncapped_component", self.uncapped_component)
+        applied_component = _finite_number("applied_component", self.applied_component)
         if not isinstance(self.disposition, InheritedEvidenceDisposition):
             raise BoundedInheritedRerankerValidationError(
                 "disposition must be an InheritedEvidenceDisposition"
             )
-        policy_version = _required_text(
-            "policy_version", self.policy_version
-        )
+        policy_version = _required_text("policy_version", self.policy_version)
 
         if contribution_count == 0:
             if any(
@@ -200,12 +174,8 @@ class InheritedScoreBreakdown:
 
         object.__setattr__(self, "contribution_count", contribution_count)
         object.__setattr__(self, "value_sum", value_sum)
-        object.__setattr__(
-            self, "absolute_value_sum", absolute_value_sum
-        )
-        object.__setattr__(
-            self, "standard_error_sum", standard_error_sum
-        )
+        object.__setattr__(self, "absolute_value_sum", absolute_value_sum)
+        object.__setattr__(self, "standard_error_sum", standard_error_sum)
         object.__setattr__(
             self,
             "minimum_structural_confidence",
@@ -225,9 +195,7 @@ class InheritedScoreBreakdown:
             "confidence_reliability",
             confidence_reliability,
         )
-        object.__setattr__(
-            self, "uncapped_component", uncapped_component
-        )
+        object.__setattr__(self, "uncapped_component", uncapped_component)
         object.__setattr__(self, "applied_component", applied_component)
         object.__setattr__(self, "policy_version", policy_version)
 
@@ -243,14 +211,10 @@ class InheritedAwareRerankedMemory:
 
     def __post_init__(self) -> None:
         if not isinstance(self.base, RerankedMemory):
-            raise BoundedInheritedRerankerValidationError(
-                "base must be a RerankedMemory"
-            )
+            raise BoundedInheritedRerankerValidationError("base must be a RerankedMemory")
         final_rank = _positive_integer("final_rank", self.final_rank)
         final_score = _finite_number("final_score", self.final_score)
-        if not isinstance(
-            self.inherited_breakdown, InheritedScoreBreakdown
-        ):
+        if not isinstance(self.inherited_breakdown, InheritedScoreBreakdown):
             raise BoundedInheritedRerankerValidationError(
                 "inherited_breakdown must be an InheritedScoreBreakdown"
             )
@@ -265,9 +229,7 @@ class BoundedInheritedReranker:
         self,
         config: BoundedInheritedRerankerConfig | None = None,
     ) -> None:
-        if config is not None and not isinstance(
-            config, BoundedInheritedRerankerConfig
-        ):
+        if config is not None and not isinstance(config, BoundedInheritedRerankerConfig):
             raise BoundedInheritedRerankerValidationError(
                 "config must be a BoundedInheritedRerankerConfig"
             )
@@ -285,18 +247,11 @@ class BoundedInheritedReranker:
         learning_evidence: Mapping[UUID, NodeLearningEvidence],
     ) -> tuple[InheritedAwareRerankedMemory, ...]:
         if not isinstance(space_id, UUID):
-            raise BoundedInheritedRerankerValidationError(
-                "space_id must be a UUID"
-            )
+            raise BoundedInheritedRerankerValidationError("space_id must be a UUID")
         if not isinstance(learning_evidence, Mapping):
-            raise BoundedInheritedRerankerValidationError(
-                "learning_evidence must be a mapping"
-            )
+            raise BoundedInheritedRerankerValidationError("learning_evidence must be a mapping")
         normalized_results = tuple(base_results)
-        if any(
-            not isinstance(result, RerankedMemory)
-            for result in normalized_results
-        ):
+        if any(not isinstance(result, RerankedMemory) for result in normalized_results):
             raise BoundedInheritedRerankerValidationError(
                 "base_results must contain RerankedMemory values"
             )
@@ -308,27 +263,16 @@ class BoundedInheritedReranker:
             )
 
         ranks = [result.final_rank for result in normalized_results]
-        if any(
-            isinstance(rank, bool)
-            or not isinstance(rank, int)
-            or rank <= 0
-            for rank in ranks
-        ):
+        if any(isinstance(rank, bool) or not isinstance(rank, int) or rank <= 0 for rank in ranks):
             raise BoundedInheritedRerankerValidationError(
                 "base final rank must be a positive integer"
             )
         if len(ranks) != len(set(ranks)):
-            raise BoundedInheritedRerankerValidationError(
-                "base final rank values must be unique"
-            )
+            raise BoundedInheritedRerankerValidationError("base final rank values must be unique")
         if sorted(ranks) != list(range(1, len(ranks) + 1)):
-            raise BoundedInheritedRerankerValidationError(
-                "base final ranks must be contiguous"
-            )
+            raise BoundedInheritedRerankerValidationError("base final ranks must be contiguous")
         if any(not isfinite(result.final_score) for result in normalized_results):
-            raise BoundedInheritedRerankerValidationError(
-                "base final scores must be finite"
-            )
+            raise BoundedInheritedRerankerValidationError("base final scores must be finite")
 
         evidence_keys = set(learning_evidence)
         if any(not isinstance(key, UUID) for key in evidence_keys):
@@ -361,9 +305,7 @@ class BoundedInheritedReranker:
                     "learning evidence belongs to another space"
                 )
 
-        scored: list[
-            tuple[float, int, str, RerankedMemory, InheritedScoreBreakdown]
-        ] = []
+        scored: list[tuple[float, int, str, RerankedMemory, InheritedScoreBreakdown]] = []
         for base in normalized_results:
             evidence = learning_evidence[base.hit.memory_id]
             breakdown = self._score_inherited(evidence)
@@ -425,15 +367,9 @@ class BoundedInheritedReranker:
             )
 
         count = inherited.contribution_count
-        value_sum = _required_observed(
-            "value_sum", inherited.value_sum
-        )
-        absolute_value_sum = _required_observed(
-            "absolute_value_sum", inherited.absolute_value_sum
-        )
-        standard_error_sum = _required_observed(
-            "standard_error_sum", inherited.standard_error_sum
-        )
+        value_sum = _required_observed("value_sum", inherited.value_sum)
+        absolute_value_sum = _required_observed("absolute_value_sum", inherited.absolute_value_sum)
+        standard_error_sum = _required_observed("standard_error_sum", inherited.standard_error_sum)
         confidence = _required_observed(
             "minimum_structural_confidence",
             inherited.minimum_structural_confidence,
@@ -441,9 +377,7 @@ class BoundedInheritedReranker:
 
         inherited_mean = value_sum / count
         signed_signal = tanh(inherited_mean / config.value_scale)
-        count_shrinkage = count / (
-            count + config.prior_contribution_count
-        )
+        count_shrinkage = count / (count + config.prior_contribution_count)
         if absolute_value_sum == 0.0:
             path_coherence = 1.0 if value_sum == 0.0 else 0.0
         else:
@@ -452,9 +386,7 @@ class BoundedInheritedReranker:
                 abs(value_sum) / absolute_value_sum,
             )
         uncertainty_reliability = 1.0 / (
-            1.0
-            + standard_error_sum
-            / (absolute_value_sum + config.uncertainty_floor)
+            1.0 + standard_error_sum / (absolute_value_sum + config.uncertainty_floor)
         )
         confidence_reliability = confidence
         uncapped_component = (
@@ -470,9 +402,7 @@ class BoundedInheritedReranker:
             disposition = InheritedEvidenceDisposition.BELOW_MINIMUM_COUNT
             applied_component = 0.0
         elif confidence < config.minimum_structural_confidence:
-            disposition = (
-                InheritedEvidenceDisposition.BELOW_MINIMUM_CONFIDENCE
-            )
+            disposition = InheritedEvidenceDisposition.BELOW_MINIMUM_CONFIDENCE
             applied_component = 0.0
         else:
             disposition = InheritedEvidenceDisposition.APPLIED
@@ -503,78 +433,58 @@ class BoundedInheritedReranker:
 
 def _required_observed(name: str, value: float | None) -> float:
     if value is None or not isfinite(value):
-        raise BoundedInheritedRerankerValidationError(
-            f"observed inherited {name} must be finite"
-        )
+        raise BoundedInheritedRerankerValidationError(f"observed inherited {name} must be finite")
     return float(value)
 
 
 def _required_text(name: str, value: object) -> str:
     if not isinstance(value, str):
-        raise BoundedInheritedRerankerValidationError(
-            f"{name} must be a string"
-        )
+        raise BoundedInheritedRerankerValidationError(f"{name} must be a string")
     normalized = value.strip()
     if not normalized:
-        raise BoundedInheritedRerankerValidationError(
-            f"{name} must not be empty"
-        )
+        raise BoundedInheritedRerankerValidationError(f"{name} must not be empty")
     return normalized
 
 
 def _finite_number(name: str, value: object) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise BoundedInheritedRerankerValidationError(
-            f"{name} must be a finite number"
-        )
+        raise BoundedInheritedRerankerValidationError(f"{name} must be a finite number")
     normalized = float(value)
     if not isfinite(normalized):
-        raise BoundedInheritedRerankerValidationError(
-            f"{name} must be a finite number"
-        )
+        raise BoundedInheritedRerankerValidationError(f"{name} must be a finite number")
     return normalized
 
 
 def _nonnegative_number(name: str, value: object) -> float:
     normalized = _finite_number(name, value)
     if normalized < 0.0:
-        raise BoundedInheritedRerankerValidationError(
-            f"{name} must be non-negative"
-        )
+        raise BoundedInheritedRerankerValidationError(f"{name} must be non-negative")
     return normalized
 
 
 def _positive_number(name: str, value: object) -> float:
     normalized = _finite_number(name, value)
     if normalized <= 0.0:
-        raise BoundedInheritedRerankerValidationError(
-            f"{name} must be positive"
-        )
+        raise BoundedInheritedRerankerValidationError(f"{name} must be positive")
     return normalized
 
 
 def _positive_integer(name: str, value: object) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
-        raise BoundedInheritedRerankerValidationError(
-            f"{name} must be a positive integer"
-        )
+        raise BoundedInheritedRerankerValidationError(f"{name} must be a positive integer")
     return value
 
 
 def _nonnegative_integer(name: str, value: object) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-        raise BoundedInheritedRerankerValidationError(
-            f"{name} must be a non-negative integer"
-        )
+        raise BoundedInheritedRerankerValidationError(f"{name} must be a non-negative integer")
     return value
 
 
 def _probability(name: str, value: object) -> float:
     normalized = _finite_number(name, value)
     if not 0.0 <= normalized <= 1.0:
-        raise BoundedInheritedRerankerValidationError(
-            f"{name} must be between zero and one"
-        )
+        raise BoundedInheritedRerankerValidationError(f"{name} must be between zero and one")
     return normalized
 
 
@@ -593,7 +503,5 @@ def _optional_finite_number(name: str, value: object) -> float | None:
 def _bounded_unit_number(name: str, value: object) -> float:
     normalized = _finite_number(name, value)
     if not -1.0 <= normalized <= 1.0:
-        raise BoundedInheritedRerankerValidationError(
-            f"{name} must be between minus one and one"
-        )
+        raise BoundedInheritedRerankerValidationError(f"{name} must be between minus one and one")
     return normalized

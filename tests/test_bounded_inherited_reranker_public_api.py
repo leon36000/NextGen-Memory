@@ -15,9 +15,7 @@ def test_package_exports_stable_bounded_inherited_reranker_v0_api() -> None:
     expected = {
         "BoundedInheritedReranker": BoundedInheritedReranker,
         "BoundedInheritedRerankerConfig": BoundedInheritedRerankerConfig,
-        "BoundedInheritedRerankerValidationError": (
-            BoundedInheritedRerankerValidationError
-        ),
+        "BoundedInheritedRerankerValidationError": (BoundedInheritedRerankerValidationError),
         "InheritedAwareRerankedMemory": InheritedAwareRerankedMemory,
         "InheritedEvidenceDisposition": InheritedEvidenceDisposition,
         "InheritedScoreBreakdown": InheritedScoreBreakdown,
