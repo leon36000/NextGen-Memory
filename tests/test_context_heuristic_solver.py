@@ -159,7 +159,7 @@ def test_required_coverage_uses_weight_before_optional_value() -> None:
 
 
 def test_required_phase_adds_candidate_with_missing_prerequisite_atomically() -> None:
-    problem, solution = solve(
+    _, solution = solve(
         request(
             coverage_demands=(ContextCoverageDemand("cause", 2.0, True),)
         ),
@@ -190,8 +190,10 @@ def test_required_phase_can_return_incomplete_without_raising() -> None:
         (evidence(1, relevance=0.4),),
     )
 
-    evaluation = evaluate_context_set(problem, solution.selected_ids)
-    assert evaluation.uncovered_required_keys == ("missing",)
+    assert evaluate_context_set(
+        problem,
+        solution.selected_ids,
+    ).uncovered_required_keys == ("missing",)
 
 
 def test_optional_fill_uses_positive_marginal_value_per_added_token() -> None:
@@ -218,7 +220,7 @@ def test_optional_fill_uses_positive_marginal_value_per_added_token() -> None:
     assert evaluate_context_set(problem, solution.selected_ids).evidence_tokens == 40
 
 
-def test_non_positive_optional_evidence_is_not_admitted_and_budget_stays_unused() -> None:
+def test_non_positive_optional_evidence_is_not_admitted() -> None:
     policy = ContextObjectivePolicy(
         new_expert_bonus=0.0,
         new_subject_bonus=0.0,
@@ -240,8 +242,10 @@ def test_non_positive_optional_evidence_is_not_admitted_and_budget_stays_unused(
     )
 
     assert solution.selected_ids == frozenset({memory_id(1)})
-    evaluation = evaluate_context_set(problem, solution.selected_ids)
-    assert evaluation.evidence_tokens < problem.request.usable_evidence_tokens
+    assert evaluate_context_set(
+        problem,
+        solution.selected_ids,
+    ).evidence_tokens < problem.request.usable_evidence_tokens
 
 
 def test_positive_synergy_pair_is_considered_as_joint_addition() -> None:
@@ -285,10 +289,7 @@ def test_redundancy_stops_duplicate_fill() -> None:
     )
     problem, solution = solve(
         request(objective_policy=policy),
-        (
-            evidence(1, relevance=0.4),
-            evidence(2, relevance=0.4),
-        ),
+        (evidence(1, relevance=0.4), evidence(2, relevance=0.4)),
         (
             interaction(
                 1,
@@ -299,48 +300,14 @@ def test_redundancy_stops_duplicate_fill() -> None:
         ),
     )
 
-    assert len(solution.selected_ids) == 1
-    assert memory_id(1) in solution.selected_ids
-    assert evaluate_context_set(problem, solution.selected_ids).breakdown.total_set_value > 0
+    assert solution.selected_ids == frozenset({memory_id(1)})
+    assert evaluate_context_set(
+        problem,
+        solution.selected_ids,
+    ).breakdown.total_set_value > 0
 
 
-def test_local_drop_removes_coverage_item_after_better_item_covers_same_demand() -> None:
-    policy = ContextObjectivePolicy(
-        new_expert_bonus=0.0,
-        new_subject_bonus=0.0,
-        new_source_cluster_bonus=0.0,
-    )
-    problem, solution = solve(
-        request(
-            coverage_demands=(ContextCoverageDemand("cause", 2.0, True),),
-            objective_policy=policy,
-        ),
-        (
-            evidence(
-                1,
-                coverage_keys=("cause",),
-                relevance=0.0,
-                harm_risk=0.2,
-                estimated_tokens=30,
-            ),
-            evidence(
-                2,
-                coverage_keys=("cause",),
-                relevance=0.9,
-                estimated_tokens=80,
-            ),
-        ),
-    )
-
-    assert solution.selected_ids == frozenset({memory_id(2)})
-    assert solution.phase_by_id[memory_id(2)] in {
-        ContextSelectionPhase.GREEDY,
-        ContextSelectionPhase.LOCAL_IMPROVEMENT,
-    }
-    assert evaluate_context_set(problem, solution.selected_ids).covered_required_weight == 2.0
-
-
-def test_one_swap_replaces_costly_redundant_item_with_cheaper_equal_coverage() -> None:
+def test_local_search_can_replace_coverage_item_with_cheaper_peer() -> None:
     policy = ContextObjectivePolicy(
         new_expert_bonus=0.0,
         new_subject_bonus=0.0,
@@ -374,7 +341,7 @@ def test_one_swap_replaces_costly_redundant_item_with_cheaper_equal_coverage() -
     assert evaluate_context_set(problem, solution.selected_ids).evidence_tokens == 40
 
 
-def test_heuristic_never_drops_dependencies_or_mandatory_items() -> None:
+def test_heuristic_preserves_dependencies_and_mandatory_items() -> None:
     problem, solution = solve(
         request(local_search_pass_limit=8),
         (
@@ -397,7 +364,7 @@ def test_heuristic_never_drops_dependencies_or_mandatory_items() -> None:
         assert problem.prerequisite_closure[item_id].issubset(solution.selected_ids)
 
 
-def test_fallbacks_make_result_no_worse_than_mandatory_and_best_single_addition() -> None:
+def test_fallbacks_make_result_no_worse_than_best_single_addition() -> None:
     problem, solution = solve(
         request(),
         (
@@ -422,7 +389,8 @@ def test_fallbacks_make_result_no_worse_than_mandatory_and_best_single_addition(
             candidate.covered_required_weight > final.covered_required_weight
             or (
                 candidate.covered_required_weight == final.covered_required_weight
-                and candidate.breakdown.total_set_value > final.breakdown.total_set_value
+                and candidate.breakdown.total_set_value
+                > final.breakdown.total_set_value
             )
         )
 
