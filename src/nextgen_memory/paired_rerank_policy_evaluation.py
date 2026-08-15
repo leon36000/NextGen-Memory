@@ -85,27 +85,17 @@ class PairedRerankPolicyTrial:
             raise PairedRerankPolicyEvaluationValidationError(
                 "control and treatment telemetry must match trial space"
             )
-        if (
-            self.control_batch.router_decision_id
-            != self.treatment_batch.router_decision_id
-        ):
+        if self.control_batch.router_decision_id != self.treatment_batch.router_decision_id:
             raise PairedRerankPolicyEvaluationValidationError(
                 "control and treatment must share one router decision"
             )
-        if (
-            self.control_batch.policy_fingerprint
-            == self.treatment_batch.policy_fingerprint
-        ):
+        if self.control_batch.policy_fingerprint == self.treatment_batch.policy_fingerprint:
             raise PairedRerankPolicyEvaluationValidationError(
                 "control and treatment must use distinct policies"
             )
 
-        control_by_memory = {
-            item.memory_id: item for item in self.control_batch.observations
-        }
-        treatment_by_memory = {
-            item.memory_id: item for item in self.treatment_batch.observations
-        }
+        control_by_memory = {item.memory_id: item for item in self.control_batch.observations}
+        treatment_by_memory = {item.memory_id: item for item in self.treatment_batch.observations}
         if set(control_by_memory) != set(treatment_by_memory):
             raise PairedRerankPolicyEvaluationValidationError(
                 "control and treatment candidate sets must match exactly"
@@ -131,8 +121,7 @@ class PairedRerankPolicyTrial:
     @property
     def success_delta(self) -> float:
         return float(
-            int(self.treatment_outcome.task_success)
-            - int(self.control_outcome.task_success)
+            int(self.treatment_outcome.task_success) - int(self.control_outcome.task_success)
         )
 
     @property
@@ -141,10 +130,7 @@ class PairedRerankPolicyTrial:
 
     @property
     def latency_delta_ms(self) -> float:
-        return (
-            self.treatment_outcome.latency_ms
-            - self.control_outcome.latency_ms
-        )
+        return self.treatment_outcome.latency_ms - self.control_outcome.latency_ms
 
     @property
     def treatment_top_changed(self) -> bool:
@@ -174,17 +160,11 @@ class PairedRerankPolicyTrial:
             "control_batch_id": str(self.control_batch.id),
             "control_batch_content_hash": self.control_batch.content_hash,
             "control_policy_version": self.control_batch.policy_version,
-            "control_policy_fingerprint": (
-                self.control_batch.policy_fingerprint
-            ),
+            "control_policy_fingerprint": (self.control_batch.policy_fingerprint),
             "treatment_batch_id": str(self.treatment_batch.id),
-            "treatment_batch_content_hash": (
-                self.treatment_batch.content_hash
-            ),
+            "treatment_batch_content_hash": (self.treatment_batch.content_hash),
             "treatment_policy_version": self.treatment_batch.policy_version,
-            "treatment_policy_fingerprint": (
-                self.treatment_batch.policy_fingerprint
-            ),
+            "treatment_policy_fingerprint": (self.treatment_batch.policy_fingerprint),
             "control_outcome": _outcome_payload(self.control_outcome),
             "treatment_outcome": _outcome_payload(self.treatment_outcome),
         }
@@ -218,9 +198,7 @@ class PairedPolicyEvaluationConfig:
             raise PairedRerankPolicyEvaluationValidationError(
                 "harmful_effect_threshold must be negative"
             )
-        neutral_effect_band = _nonnegative_number(
-            "neutral_effect_band", self.neutral_effect_band
-        )
+        neutral_effect_band = _nonnegative_number("neutral_effect_band", self.neutral_effect_band)
         if minimum_promising_effect < neutral_effect_band:
             raise PairedRerankPolicyEvaluationValidationError(
                 "minimum_promising_effect must be at least neutral_effect_band"
@@ -236,12 +214,8 @@ class PairedPolicyEvaluationConfig:
             "maximum_latency_increase_ratio",
             self.maximum_latency_increase_ratio,
         )
-        minimum_success_delta = _bounded_delta(
-            "minimum_success_delta", self.minimum_success_delta
-        )
-        policy_version = _required_text(
-            "policy_version", self.policy_version
-        )
+        minimum_success_delta = _bounded_delta("minimum_success_delta", self.minimum_success_delta)
+        policy_version = _required_text("policy_version", self.policy_version)
 
         object.__setattr__(self, "minimum_pairs", minimum_pairs)
         object.__setattr__(self, "confidence_z", confidence_z)
@@ -355,8 +329,7 @@ class PairedRerankPolicyEvaluation:
             "treatment_mean_absolute_adjustment",
         )
         normalized: dict[str, float] = {
-            name: _finite_number(name, getattr(self, name))
-            for name in numeric_fields
+            name: _finite_number(name, getattr(self, name)) for name in numeric_fields
         }
         if normalized["score_standard_deviation"] < 0.0:
             raise PairedRerankPolicyEvaluationValidationError(
@@ -366,10 +339,7 @@ class PairedRerankPolicyEvaluation:
             raise PairedRerankPolicyEvaluationValidationError(
                 "score_standard_error must be non-negative"
             )
-        if (
-            normalized["score_confidence_lower"]
-            > normalized["score_confidence_upper"]
-        ):
+        if normalized["score_confidence_lower"] > normalized["score_confidence_upper"]:
             raise PairedRerankPolicyEvaluationValidationError(
                 "score confidence interval is reversed"
             )
@@ -416,13 +386,9 @@ class PairedRerankPolicyEvaluation:
                 "trial_ids length must equal trial_count"
             )
         if any(not isinstance(trial_id, UUID) for trial_id in trial_ids):
-            raise PairedRerankPolicyEvaluationValidationError(
-                "trial_ids must contain UUID values"
-            )
+            raise PairedRerankPolicyEvaluationValidationError("trial_ids must contain UUID values")
         if len(trial_ids) != len(set(trial_ids)):
-            raise PairedRerankPolicyEvaluationValidationError(
-                "trial_ids must be unique"
-            )
+            raise PairedRerankPolicyEvaluationValidationError("trial_ids must be unique")
         if trial_ids != tuple(sorted(trial_ids, key=str)):
             raise PairedRerankPolicyEvaluationValidationError(
                 "trial_ids must use deterministic lexical order"
@@ -441,9 +407,7 @@ class PairedRerankPolicyEvaluation:
             "control_policy_version": self.control_policy_version,
             "control_policy_fingerprint": self.control_policy_fingerprint,
             "treatment_policy_version": self.treatment_policy_version,
-            "treatment_policy_fingerprint": (
-                self.treatment_policy_fingerprint
-            ),
+            "treatment_policy_fingerprint": (self.treatment_policy_fingerprint),
             "continuation_set_hash": self.continuation_set_hash,
             "context_collection_hash": self.context_collection_hash,
             "trial_count": self.trial_count,
@@ -458,17 +422,11 @@ class PairedRerankPolicyEvaluation:
             "token_increase_ratio": self.token_increase_ratio,
             "latency_increase_ratio": self.latency_increase_ratio,
             "treatment_top_change_rate": self.treatment_top_change_rate,
-            "treatment_applied_observation_rate": (
-                self.treatment_applied_observation_rate
-            ),
-            "treatment_mean_absolute_adjustment": (
-                self.treatment_mean_absolute_adjustment
-            ),
+            "treatment_applied_observation_rate": (self.treatment_applied_observation_rate),
+            "treatment_mean_absolute_adjustment": (self.treatment_mean_absolute_adjustment),
             "verdict": self.verdict.value,
             "abstention_reason": (
-                self.abstention_reason.value
-                if self.abstention_reason is not None
-                else None
+                self.abstention_reason.value if self.abstention_reason is not None else None
             ),
             "config_version": self.config_version,
             "config_fingerprint": self.config_fingerprint,
@@ -510,10 +468,7 @@ class PairedRerankPolicyEvaluator:
             raise PairedRerankPolicyEvaluationValidationError(
                 "evaluation requires at least one paired trial"
             )
-        if any(
-            not isinstance(item, PairedRerankPolicyTrial)
-            for item in normalized
-        ):
+        if any(not isinstance(item, PairedRerankPolicyTrial) for item in normalized):
             raise PairedRerankPolicyEvaluationValidationError(
                 "trials must contain PairedRerankPolicyTrial values"
             )
@@ -531,34 +486,20 @@ class PairedRerankPolicyEvaluator:
         first = ordered[0]
         for item in ordered[1:]:
             if item.space_id != first.space_id:
-                raise PairedRerankPolicyEvaluationValidationError(
-                    "all trials must share one space"
-                )
-            if (
-                item.control_batch.policy_fingerprint
-                != first.control_batch.policy_fingerprint
-            ):
+                raise PairedRerankPolicyEvaluationValidationError("all trials must share one space")
+            if item.control_batch.policy_fingerprint != first.control_batch.policy_fingerprint:
                 raise PairedRerankPolicyEvaluationValidationError(
                     "all trials must share one control policy"
                 )
-            if (
-                item.treatment_batch.policy_fingerprint
-                != first.treatment_batch.policy_fingerprint
-            ):
+            if item.treatment_batch.policy_fingerprint != first.treatment_batch.policy_fingerprint:
                 raise PairedRerankPolicyEvaluationValidationError(
                     "all trials must share one treatment policy"
                 )
-            if (
-                item.control_batch.policy_version
-                != first.control_batch.policy_version
-            ):
+            if item.control_batch.policy_version != first.control_batch.policy_version:
                 raise PairedRerankPolicyEvaluationValidationError(
                     "all trials must share one control policy version"
                 )
-            if (
-                item.treatment_batch.policy_version
-                != first.treatment_batch.policy_version
-            ):
+            if item.treatment_batch.policy_version != first.treatment_batch.policy_version:
                 raise PairedRerankPolicyEvaluationValidationError(
                     "all trials must share one treatment policy version"
                 )
@@ -573,27 +514,15 @@ class PairedRerankPolicyEvaluator:
         latency_deltas = [item.latency_delta_ms for item in ordered]
         trial_count = len(ordered)
         mean_score_delta = _mean(score_deltas)
-        score_standard_deviation = (
-            stdev(score_deltas) if trial_count > 1 else 0.0
-        )
+        score_standard_deviation = stdev(score_deltas) if trial_count > 1 else 0.0
         score_standard_error = score_standard_deviation / sqrt(trial_count)
-        score_confidence_lower = (
-            mean_score_delta
-            - self.config.confidence_z * score_standard_error
-        )
-        score_confidence_upper = (
-            mean_score_delta
-            + self.config.confidence_z * score_standard_error
-        )
+        score_confidence_lower = mean_score_delta - self.config.confidence_z * score_standard_error
+        score_confidence_upper = mean_score_delta + self.config.confidence_z * score_standard_error
         mean_success_delta = _mean(success_deltas)
         mean_token_delta = _mean(token_deltas)
         mean_latency_delta_ms = _mean(latency_deltas)
-        total_control_tokens = sum(
-            item.control_outcome.tokens for item in ordered
-        )
-        total_control_latency = sum(
-            item.control_outcome.latency_ms for item in ordered
-        )
+        total_control_tokens = sum(item.control_outcome.tokens for item in ordered)
+        total_control_latency = sum(item.control_outcome.latency_ms for item in ordered)
         token_increase_ratio = sum(token_deltas) / max(
             total_control_tokens,
             1,
@@ -602,12 +531,8 @@ class PairedRerankPolicyEvaluator:
             total_control_latency,
             1.0,
         )
-        treatment_top_change_rate = _mean(
-            [float(item.treatment_top_changed) for item in ordered]
-        )
-        total_treatment_candidates = sum(
-            item.treatment_candidate_count for item in ordered
-        )
+        treatment_top_change_rate = _mean([float(item.treatment_top_changed) for item in ordered])
+        total_treatment_candidates = sum(item.treatment_candidate_count for item in ordered)
         treatment_applied_observation_rate = sum(
             item.treatment_applied_observation_count for item in ordered
         ) / max(total_treatment_candidates, 1)
@@ -624,28 +549,16 @@ class PairedRerankPolicyEvaluator:
             token_increase_ratio=token_increase_ratio,
             latency_increase_ratio=latency_increase_ratio,
         )
-        config_fingerprint = fingerprint_paired_policy_evaluation_config(
-            self.config
-        )
+        config_fingerprint = fingerprint_paired_policy_evaluation_config(self.config)
         context_collection_hash = _hash_payload(
-            {
-                "context_hashes": sorted(
-                    item.context_set_hash for item in ordered
-                )
-            }
+            {"context_hashes": sorted(item.context_set_hash for item in ordered)}
         )
         aggregate_payload = {
             "space_id": str(first.space_id),
             "control_policy_version": first.control_batch.policy_version,
-            "control_policy_fingerprint": (
-                first.control_batch.policy_fingerprint
-            ),
-            "treatment_policy_version": (
-                first.treatment_batch.policy_version
-            ),
-            "treatment_policy_fingerprint": (
-                first.treatment_batch.policy_fingerprint
-            ),
+            "control_policy_fingerprint": (first.control_batch.policy_fingerprint),
+            "treatment_policy_version": (first.treatment_batch.policy_version),
+            "treatment_policy_fingerprint": (first.treatment_batch.policy_fingerprint),
             "continuation_set_hash": first.continuation_set_hash,
             "context_collection_hash": context_collection_hash,
             "trial_count": trial_count,
@@ -660,17 +573,11 @@ class PairedRerankPolicyEvaluator:
             "token_increase_ratio": token_increase_ratio,
             "latency_increase_ratio": latency_increase_ratio,
             "treatment_top_change_rate": treatment_top_change_rate,
-            "treatment_applied_observation_rate": (
-                treatment_applied_observation_rate
-            ),
-            "treatment_mean_absolute_adjustment": (
-                treatment_mean_absolute_adjustment
-            ),
+            "treatment_applied_observation_rate": (treatment_applied_observation_rate),
+            "treatment_mean_absolute_adjustment": (treatment_mean_absolute_adjustment),
             "verdict": verdict.value,
             "abstention_reason": (
-                abstention_reason.value
-                if abstention_reason is not None
-                else None
+                abstention_reason.value if abstention_reason is not None else None
             ),
             "config_version": self.config.policy_version,
             "config_fingerprint": config_fingerprint,
@@ -686,15 +593,9 @@ class PairedRerankPolicyEvaluator:
             id=evaluation_id,
             space_id=first.space_id,
             control_policy_version=first.control_batch.policy_version,
-            control_policy_fingerprint=(
-                first.control_batch.policy_fingerprint
-            ),
-            treatment_policy_version=(
-                first.treatment_batch.policy_version
-            ),
-            treatment_policy_fingerprint=(
-                first.treatment_batch.policy_fingerprint
-            ),
+            control_policy_fingerprint=(first.control_batch.policy_fingerprint),
+            treatment_policy_version=(first.treatment_batch.policy_version),
+            treatment_policy_fingerprint=(first.treatment_batch.policy_fingerprint),
             continuation_set_hash=first.continuation_set_hash,
             context_collection_hash=context_collection_hash,
             trial_count=trial_count,
@@ -709,12 +610,8 @@ class PairedRerankPolicyEvaluator:
             token_increase_ratio=token_increase_ratio,
             latency_increase_ratio=latency_increase_ratio,
             treatment_top_change_rate=treatment_top_change_rate,
-            treatment_applied_observation_rate=(
-                treatment_applied_observation_rate
-            ),
-            treatment_mean_absolute_adjustment=(
-                treatment_mean_absolute_adjustment
-            ),
+            treatment_applied_observation_rate=(treatment_applied_observation_rate),
+            treatment_mean_absolute_adjustment=(treatment_mean_absolute_adjustment),
             verdict=verdict,
             abstention_reason=abstention_reason,
             config_version=self.config.policy_version,
@@ -748,16 +645,10 @@ class PairedRerankPolicyEvaluator:
             return PairedPolicyVerdict.HARMFUL, None
 
         resource_limits_pass = (
-            token_increase_ratio
-            <= self.config.maximum_token_increase_ratio
-            and latency_increase_ratio
-            <= self.config.maximum_latency_increase_ratio
+            token_increase_ratio <= self.config.maximum_token_increase_ratio
+            and latency_increase_ratio <= self.config.maximum_latency_increase_ratio
         )
-        if (
-            not resource_limits_pass
-            and confidence_lower
-            < self.config.minimum_promising_effect
-        ):
+        if not resource_limits_pass and confidence_lower < self.config.minimum_promising_effect:
             return PairedPolicyVerdict.TOO_COSTLY, None
         if (
             confidence_lower >= self.config.minimum_promising_effect
@@ -791,12 +682,8 @@ def fingerprint_paired_policy_evaluation_config(
             "harmful_effect_threshold": config.harmful_effect_threshold,
             "neutral_effect_band": config.neutral_effect_band,
             "maximum_standard_error": config.maximum_standard_error,
-            "maximum_token_increase_ratio": (
-                config.maximum_token_increase_ratio
-            ),
-            "maximum_latency_increase_ratio": (
-                config.maximum_latency_increase_ratio
-            ),
+            "maximum_token_increase_ratio": (config.maximum_token_increase_ratio),
+            "maximum_latency_increase_ratio": (config.maximum_latency_increase_ratio),
             "minimum_success_delta": config.minimum_success_delta,
             "policy_version": config.policy_version,
         }
@@ -814,9 +701,7 @@ def _outcome_payload(outcome: OutcomeMeasurement) -> dict[str, Any]:
 
 def _mean(values: Sequence[float | int]) -> float:
     if not values:
-        raise PairedRerankPolicyEvaluationValidationError(
-            "mean requires at least one value"
-        )
+        raise PairedRerankPolicyEvaluationValidationError("mean requires at least one value")
     return sum(float(value) for value in values) / len(values)
 
 
@@ -837,9 +722,7 @@ def _close(left: float, right: float) -> bool:
 
 def _require_uuid(name: str, value: object) -> None:
     if not isinstance(value, UUID):
-        raise PairedRerankPolicyEvaluationValidationError(
-            f"{name} must be a UUID"
-        )
+        raise PairedRerankPolicyEvaluationValidationError(f"{name} must be a UUID")
 
 
 def _require_hash(name: str, value: object) -> None:
@@ -851,45 +734,33 @@ def _require_hash(name: str, value: object) -> None:
 
 def _required_text(name: str, value: object) -> str:
     if not isinstance(value, str):
-        raise PairedRerankPolicyEvaluationValidationError(
-            f"{name} must be a string"
-        )
+        raise PairedRerankPolicyEvaluationValidationError(f"{name} must be a string")
     normalized = value.strip()
     if not normalized:
-        raise PairedRerankPolicyEvaluationValidationError(
-            f"{name} must not be empty"
-        )
+        raise PairedRerankPolicyEvaluationValidationError(f"{name} must not be empty")
     return normalized
 
 
 def _finite_number(name: str, value: object) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise PairedRerankPolicyEvaluationValidationError(
-            f"{name} must be a finite number"
-        )
+        raise PairedRerankPolicyEvaluationValidationError(f"{name} must be a finite number")
     normalized = float(value)
     if not isfinite(normalized):
-        raise PairedRerankPolicyEvaluationValidationError(
-            f"{name} must be a finite number"
-        )
+        raise PairedRerankPolicyEvaluationValidationError(f"{name} must be a finite number")
     return normalized
 
 
 def _positive_number(name: str, value: object) -> float:
     normalized = _finite_number(name, value)
     if normalized <= 0.0:
-        raise PairedRerankPolicyEvaluationValidationError(
-            f"{name} must be positive"
-        )
+        raise PairedRerankPolicyEvaluationValidationError(f"{name} must be positive")
     return normalized
 
 
 def _nonnegative_number(name: str, value: object) -> float:
     normalized = _finite_number(name, value)
     if normalized < 0.0:
-        raise PairedRerankPolicyEvaluationValidationError(
-            f"{name} must be non-negative"
-        )
+        raise PairedRerankPolicyEvaluationValidationError(f"{name} must be non-negative")
     return normalized
 
 
@@ -904,7 +775,5 @@ def _bounded_delta(name: str, value: object) -> float:
 
 def _positive_integer(name: str, value: object) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
-        raise PairedRerankPolicyEvaluationValidationError(
-            f"{name} must be a positive integer"
-        )
+        raise PairedRerankPolicyEvaluationValidationError(f"{name} must be a positive integer")
     return value

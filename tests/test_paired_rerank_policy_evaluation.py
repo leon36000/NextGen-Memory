@@ -6,16 +6,6 @@ from dataclasses import FrozenInstanceError, replace
 from uuid import UUID
 
 import pytest
-from nextgen_memory.paired_rerank_policy_evaluation import (
-    PairedPolicyAbstentionReason,
-    PairedPolicyEvaluationConfig,
-    PairedPolicyVerdict,
-    PairedRerankPolicyEvaluation,
-    PairedRerankPolicyEvaluationValidationError,
-    PairedRerankPolicyEvaluator,
-    PairedRerankPolicyTrial,
-    fingerprint_paired_policy_evaluation_config,
-)
 
 from nextgen_memory.bounded_inherited_reranker import (
     BoundedInheritedRerankerConfig,
@@ -27,6 +17,16 @@ from nextgen_memory.causal_credit import OutcomeMeasurement
 from nextgen_memory.inherited_rerank_telemetry import (
     InheritedRerankTelemetryBatch,
     build_inherited_rerank_telemetry,
+)
+from nextgen_memory.paired_rerank_policy_evaluation import (
+    PairedPolicyAbstentionReason,
+    PairedPolicyEvaluationConfig,
+    PairedPolicyVerdict,
+    PairedRerankPolicyEvaluation,
+    PairedRerankPolicyEvaluationValidationError,
+    PairedRerankPolicyEvaluator,
+    PairedRerankPolicyTrial,
+    fingerprint_paired_policy_evaluation_config,
 )
 from nextgen_memory.retrieval import ResearchRetrievalHit
 from nextgen_memory.utility_reranker import (
@@ -135,9 +135,7 @@ def control_config() -> BoundedInheritedRerankerConfig:
 
 
 def treatment_config() -> BoundedInheritedRerankerConfig:
-    return BoundedInheritedRerankerConfig(
-        policy_version="bounded-inherited-treatment-v0"
-    )
+    return BoundedInheritedRerankerConfig(policy_version="bounded-inherited-treatment-v0")
 
 
 def telemetry_batch(
@@ -157,9 +155,7 @@ def telemetry_batch(
                 base=base_a,
                 final_rank=1,
                 final_score=base_a.final_score,
-                inherited_breakdown=no_evidence_breakdown(
-                    config.policy_version
-                ),
+                inherited_breakdown=no_evidence_breakdown(config.policy_version),
             ),
         )
         if include_b:
@@ -169,9 +165,7 @@ def telemetry_batch(
                     base=base_b,
                     final_rank=2,
                     final_score=base_b.final_score,
-                    inherited_breakdown=no_evidence_breakdown(
-                        config.policy_version
-                    ),
+                    inherited_breakdown=no_evidence_breakdown(config.policy_version),
                 ),
             )
     else:
@@ -189,16 +183,12 @@ def telemetry_batch(
                 base=base_a,
                 final_rank=2,
                 final_score=base_a.final_score,
-                inherited_breakdown=no_evidence_breakdown(
-                    config.policy_version
-                ),
+                inherited_breakdown=no_evidence_breakdown(config.policy_version),
             ),
         )
         if not include_b:
             results = (results[1],)
-            results = (
-                replace(results[0], final_rank=1),
-            )
+            results = (replace(results[0], final_rank=1),)
     return build_inherited_rerank_telemetry(
         space_id=space_id,
         router_decision_id=decision_id,
@@ -276,10 +266,7 @@ def trials_from_deltas(
     deltas: tuple[float, ...],
     **kwargs: object,
 ) -> tuple[PairedRerankPolicyTrial, ...]:
-    return tuple(
-        trial(index, score_delta=delta, **kwargs)
-        for index, delta in enumerate(deltas)
-    )
+    return tuple(trial(index, score_delta=delta, **kwargs) for index, delta in enumerate(deltas))
 
 
 def test_trial_is_matched_immutable_and_exposes_exact_deltas() -> None:
@@ -460,9 +447,7 @@ def test_config_rejects_invalid_values(overrides: dict[str, object]) -> None:
 
 
 def test_promising_evaluation_uses_paired_statistics_and_diagnostics() -> None:
-    evaluation = PairedRerankPolicyEvaluator().evaluate(
-        trials_from_deltas((0.1,) * 8)
-    )
+    evaluation = PairedRerankPolicyEvaluator().evaluate(trials_from_deltas((0.1,) * 8))
 
     assert isinstance(evaluation, PairedRerankPolicyEvaluation)
     assert evaluation.verdict is PairedPolicyVerdict.PROMISING
@@ -487,23 +472,15 @@ def test_promising_evaluation_uses_paired_statistics_and_diagnostics() -> None:
 
 
 def test_insufficient_pair_and_high_standard_error_abstentions() -> None:
-    insufficient = PairedRerankPolicyEvaluator().evaluate(
-        trials_from_deltas((0.1, 0.1))
-    )
+    insufficient = PairedRerankPolicyEvaluator().evaluate(trials_from_deltas((0.1, 0.1)))
     noisy = PairedRerankPolicyEvaluator(
         PairedPolicyEvaluationConfig(maximum_standard_error=0.05)
     ).evaluate(trials_from_deltas((0.5, -0.5) * 4))
 
     assert insufficient.verdict is PairedPolicyVerdict.INSUFFICIENT_EVIDENCE
-    assert (
-        insufficient.abstention_reason
-        is PairedPolicyAbstentionReason.INSUFFICIENT_PAIRS
-    )
+    assert insufficient.abstention_reason is PairedPolicyAbstentionReason.INSUFFICIENT_PAIRS
     assert noisy.verdict is PairedPolicyVerdict.INSUFFICIENT_EVIDENCE
-    assert (
-        noisy.abstention_reason
-        is PairedPolicyAbstentionReason.STANDARD_ERROR_TOO_HIGH
-    )
+    assert noisy.abstention_reason is PairedPolicyAbstentionReason.STANDARD_ERROR_TOO_HIGH
     assert noisy.score_standard_error > 0.05
 
 
@@ -518,9 +495,7 @@ def test_harmful_costly_neutral_and_inconclusive_verdicts() -> None:
         )
     )
     neutral = evaluator.evaluate(trials_from_deltas((0.0,) * 8))
-    inconclusive = evaluator.evaluate(
-        trials_from_deltas((0.0, 0.04) * 4)
-    )
+    inconclusive = evaluator.evaluate(trials_from_deltas((0.0, 0.04) * 4))
 
     assert harmful.verdict is PairedPolicyVerdict.HARMFUL
     assert harmful.score_confidence_upper <= -0.02
@@ -581,9 +556,7 @@ def test_conflicting_trial_id_and_mixed_policy_pairs_fail_closed() -> None:
         PairedRerankPolicyEvaluationValidationError,
         match="conflicting trial_id",
     ):
-        PairedRerankPolicyEvaluator().evaluate(
-            (*base_trials, conflicting)
-        )
+        PairedRerankPolicyEvaluator().evaluate((*base_trials, conflicting))
 
     alternate_treatment = telemetry_batch(
         config=BoundedInheritedRerankerConfig(
@@ -633,9 +606,9 @@ def test_evaluation_requires_at_least_one_trial_and_valid_types() -> None:
 
 
 def test_evaluation_json_contains_no_memory_credit_or_raw_content() -> None:
-    rendered = PairedRerankPolicyEvaluator().evaluate(
-        trials_from_deltas((0.1,) * 8)
-    ).render_json().lower()
+    rendered = (
+        PairedRerankPolicyEvaluator().evaluate(trials_from_deltas((0.1,) * 8)).render_json().lower()
+    )
 
     for forbidden in (
         "query",
