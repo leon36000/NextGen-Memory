@@ -34,9 +34,7 @@ SPACE = UUID("90000000-0000-0000-0000-000000000001")
 DECISION = UUID("90000000-0000-0000-0000-000000000002")
 MEMORY_A = UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
 MEMORY_B = UUID("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")
-CONTINUATION_HASH = hashlib.sha256(
-    b"paired-policy-property-continuation-v0"
-).hexdigest()
+CONTINUATION_HASH = hashlib.sha256(b"paired-policy-property-continuation-v0").hexdigest()
 FORBIDDEN = (
     "query",
     "prompt",
@@ -139,9 +137,7 @@ def _telemetry_batches():
         maximum_absolute_adjustment=0.0,
         policy_version="paired-property-control-v0",
     )
-    treatment_config = BoundedInheritedRerankerConfig(
-        policy_version="paired-property-treatment-v0"
-    )
+    treatment_config = BoundedInheritedRerankerConfig(policy_version="paired-property-treatment-v0")
     base_a = _base_result(MEMORY_A, rank=1, score=0.80)
     base_b = _base_result(MEMORY_B, rank=2, score=0.79)
     control_results = (
@@ -196,9 +192,7 @@ def _trial_id(experiment: int, trial_index: int) -> UUID:
 
 
 def _context_hash(experiment: int, trial_index: int) -> str:
-    return hashlib.sha256(
-        f"paired-property:{experiment}:{trial_index}".encode()
-    ).hexdigest()
+    return hashlib.sha256(f"paired-property:{experiment}:{trial_index}".encode()).hexdigest()
 
 
 def _outcome(
@@ -230,13 +224,9 @@ def _scenario(experiment: int):
     if category == 1:
         return {
             "deltas": (0.5, -0.5) * 4,
-            "config": PairedPolicyEvaluationConfig(
-                maximum_standard_error=0.05
-            ),
+            "config": PairedPolicyEvaluationConfig(maximum_standard_error=0.05),
             "verdict": PairedPolicyVerdict.INSUFFICIENT_EVIDENCE,
-            "abstention": (
-                PairedPolicyAbstentionReason.STANDARD_ERROR_TOO_HIGH
-            ),
+            "abstention": (PairedPolicyAbstentionReason.STANDARD_ERROR_TOO_HIGH),
             "treatment_tokens": 100,
             "treatment_latency": 1000.0,
         }
@@ -317,9 +307,7 @@ def _trials(experiment: int, scenario: dict[str, object]):
 
 def test_5000_generated_experiments_preserve_statistics_verdicts_and_privacy() -> None:
     verdict_counts = {verdict: 0 for verdict in PairedPolicyVerdict}
-    abstention_counts = {
-        reason: 0 for reason in PairedPolicyAbstentionReason
-    }
+    abstention_counts = {reason: 0 for reason in PairedPolicyAbstentionReason}
 
     for experiment in range(5000):
         scenario = _scenario(experiment)
@@ -334,9 +322,7 @@ def test_5000_generated_experiments_preserve_statistics_verdicts_and_privacy() -
         assert first == second
         assert first.render_json() == second.render_json()
         assert first.trial_count == len(trials)
-        assert first.trial_ids == tuple(
-            sorted((item.trial_id for item in trials), key=str)
-        )
+        assert first.trial_ids == tuple(sorted((item.trial_id for item in trials), key=str))
         assert first.verdict is scenario["verdict"]
         assert first.abstention_reason is scenario["abstention"]
 
@@ -345,9 +331,7 @@ def test_5000_generated_experiments_preserve_statistics_verdicts_and_privacy() -
         expected_stdev = stdev(deltas) if len(deltas) > 1 else 0.0
         expected_se = expected_stdev / sqrt(len(deltas))
         assert first.mean_score_delta == pytest.approx(expected_mean)
-        assert first.score_standard_deviation == pytest.approx(
-            expected_stdev
-        )
+        assert first.score_standard_deviation == pytest.approx(expected_stdev)
         assert first.score_standard_error == pytest.approx(expected_se)
         assert first.score_confidence_lower == pytest.approx(
             expected_mean - config.confidence_z * expected_se
@@ -356,9 +340,7 @@ def test_5000_generated_experiments_preserve_statistics_verdicts_and_privacy() -
             expected_mean + config.confidence_z * expected_se
         )
         assert first.mean_success_delta == 0.0
-        assert first.mean_token_delta == pytest.approx(
-            int(scenario["treatment_tokens"]) - 100
-        )
+        assert first.mean_token_delta == pytest.approx(int(scenario["treatment_tokens"]) - 100)
         assert first.mean_latency_delta_ms == pytest.approx(
             float(scenario["treatment_latency"]) - 1000.0
         )
@@ -370,9 +352,7 @@ def test_5000_generated_experiments_preserve_statistics_verdicts_and_privacy() -
         )
         assert first.treatment_top_change_rate == 1.0
         assert first.treatment_applied_observation_rate == 0.5
-        assert first.treatment_mean_absolute_adjustment == pytest.approx(
-            0.03
-        )
+        assert first.treatment_mean_absolute_adjustment == pytest.approx(0.03)
         assert len(first.id.hex) == 32
         assert len(first.content_hash) == 64
         assert len(first.context_collection_hash) == 64

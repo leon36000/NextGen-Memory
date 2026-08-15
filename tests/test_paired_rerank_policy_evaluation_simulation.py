@@ -15,10 +15,7 @@ def test_paired_estimator_reduces_standard_error_under_correlated_outcomes() -> 
     assert variance["mean_score_delta"] > 0.04
     assert variance["paired_standard_error"] > 0.0
     assert variance["unpaired_standard_error"] > 0.0
-    assert (
-        variance["paired_standard_error"]
-        < variance["unpaired_standard_error"]
-    )
+    assert variance["paired_standard_error"] < variance["unpaired_standard_error"]
     assert variance["standard_error_ratio"] < 0.25
     assert variance["verdict"] == "promising"
 

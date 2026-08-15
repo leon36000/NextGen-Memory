@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import random
 from math import sqrt
@@ -19,7 +20,6 @@ from nextgen_memory.inherited_rerank_telemetry import (
     build_inherited_rerank_telemetry,
 )
 from nextgen_memory.paired_rerank_policy_evaluation import (
-    PairedPolicyEvaluationConfig,
     PairedRerankPolicyEvaluator,
     PairedRerankPolicyTrial,
 )
@@ -33,10 +33,7 @@ SPACE = UUID("70000000-0000-0000-0000-000000000001")
 DECISION = UUID("70000000-0000-0000-0000-000000000002")
 MEMORY_A = UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
 MEMORY_B = UUID("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")
-CONTINUATION_HASH = (
-    "f5ff3b39e4b835e699ca83eaef938ff20228809ec5f45b3c"
-    "e6e2452c03446b6d"
-)
+CONTINUATION_HASH = "f5ff3b39e4b835e699ca83eaef938ff20228809ec5f45b3ce6e2452c03446b6d"
 
 
 def _base_result(
@@ -173,9 +170,12 @@ CONTROL_BATCH, TREATMENT_BATCH = _telemetry_batches()
 
 
 def _context_hash(prefix: str, index: int) -> str:
-    import hashlib
-
     return hashlib.sha256(f"{prefix}:{index}".encode()).hexdigest()
+
+
+def _stable_trial_id(prefix: str, index: int) -> UUID:
+    digest = hashlib.sha256(f"{prefix}:{index}".encode()).digest()
+    return UUID(bytes=digest[:16])
 
 
 def _outcome(
@@ -234,7 +234,7 @@ def _trials_from_deltas(
 ) -> tuple[PairedRerankPolicyTrial, ...]:
     return tuple(
         _trial(
-            trial_id=UUID(int=(hash(name) & ((1 << 64) - 1)) << 32 | index + 1),
+            trial_id=_stable_trial_id(name, index),
             context_prefix=name,
             index=index,
             control_score=0.0,
@@ -284,9 +284,7 @@ def _variance_experiment() -> dict[str, float | int | str]:
         "mean_score_delta": evaluation.mean_score_delta,
         "paired_standard_error": evaluation.score_standard_error,
         "unpaired_standard_error": unpaired_standard_error,
-        "standard_error_ratio": (
-            evaluation.score_standard_error / unpaired_standard_error
-        ),
+        "standard_error_ratio": (evaluation.score_standard_error / unpaired_standard_error),
         "verdict": evaluation.verdict.value,
     }
 
