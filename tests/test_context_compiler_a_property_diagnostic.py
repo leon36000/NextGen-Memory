@@ -22,22 +22,27 @@ def _load_property_module():
     return module
 
 
-def test_first_generated_property_case_uses_only_input_evidence() -> None:
+def test_generated_packets_use_only_their_input_evidence() -> None:
     source = _load_property_module()
-    compile_request, candidates, interactions = source.build_case(
-        random.Random(source.SEED),
-        0,
-    )
-    packet = IntegratedContextCompiler().compile(
-        compile_request,
-        candidates,
-        interactions,
-    )
-    candidate_ids = {item.memory_id for item in candidates}
-    selected_ids = set(packet.selected_memory_ids)
+    rng = random.Random(source.SEED)
+    compiler = IntegratedContextCompiler()
 
-    assert selected_ids.issubset(candidate_ids), {
-        "candidate_ids": tuple(sorted(map(str, candidate_ids))),
-        "selected_ids": tuple(sorted(map(str, selected_ids))),
-        "solver_mode": packet.solver_mode.value,
-    }
+    for case_index in range(5000):
+        compile_request, candidates, interactions = source.build_case(
+            rng,
+            case_index,
+        )
+        packet = compiler.compile(
+            compile_request,
+            candidates,
+            interactions,
+        )
+        candidate_ids = {item.memory_id for item in candidates}
+        selected_ids = set(packet.selected_memory_ids)
+
+        assert selected_ids.issubset(candidate_ids), {
+            "case_index": case_index,
+            "candidate_ids": tuple(sorted(map(str, candidate_ids))),
+            "selected_ids": tuple(sorted(map(str, selected_ids))),
+            "solver_mode": packet.solver_mode.value,
+        }
