@@ -1,0 +1,328 @@
+name: Fix bounded inherited stacked-base contracts
+
+on:
+  push:
+    branches: [bootstrap/fix-bounded-inherited-base-contracts]
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/bounded-inherited-reranker-v0
+          fetch-depth: 0
+
+      - name: Verify guarded target head
+        run: test "$(git rev-parse HEAD)" = "aa683e2135df6e4e0250b5c7fd8e6516ddbbb458"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install development tools
+        run: python -m pip install -e '.[dev]'
+
+      - name: Align fixture constructors with the stacked base
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          def replace_once(text: str, old: str, new: str, label: str) -> str:
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f"{label}: expected one match, found {count}")
+              return text.replace(old, new, 1)
+
+          test_path = Path("tests/test_bounded_inherited_reranker.py")
+          test_text = test_path.read_text(encoding="utf-8")
+          test_text = replace_once(
+              test_text,
+              """from nextgen_memory.utility_reranker import (
+              RerankedMemory,
+              UtilityEvidence,
+              UtilityScoreBreakdown,
+          )
+          """,
+              """from nextgen_memory.utility_reranker import (
+              RerankedMemory,
+              UtilityScoreBreakdown,
+          )
+          """,
+              "unit-test utility imports",
+          )
+          test_text = replace_once(
+              test_text,
+              """        source_type="paper",
+              year=2026,
+          """,
+              "",
+              "unit-test obsolete hit fields",
+          )
+          test_text = replace_once(
+              test_text,
+              """    direct_reward: float = 0.4,
+          """,
+              "",
+              "unit-test obsolete direct reward parameter",
+          )
+          test_text = replace_once(
+              test_text,
+              """    return RerankedMemory(
+              hit=retrieval_hit,
+              final_rank=final_rank,
+              final_score=final_score,
+              score_breakdown=UtilityScoreBreakdown(
+                  relevance_component=final_score,
+                  reward_component=0.0,
+                  verdict_component=0.0,
+                  harm_penalty=0.0,
+                  token_penalty=0.0,
+                  latency_penalty=0.0,
+                  final_score=final_score,
+              ),
+              utility_evidence=UtilityEvidence(
+                  memory_id=memory_id,
+                  feedback_count=3,
+                  avg_reward=direct_reward,
+                  positive_count=2,
+                  negative_count=1,
+                  last_feedback_at=NOW,
+              ),
+          )
+          """,
+              """    return RerankedMemory(
+              hit=retrieval_hit,
+              original_rank=final_rank,
+              final_rank=final_rank,
+              final_score=final_score,
+              breakdown=UtilityScoreBreakdown(
+                  relevance=final_score,
+                  utility=0.0,
+                  harm_risk=0.0,
+                  token_cost=0.0,
+                  latency_cost=0.0,
+                  weighted_relevance=final_score,
+                  weighted_utility=0.0,
+                  weighted_harm_penalty=0.0,
+                  weighted_token_penalty=0.0,
+                  weighted_latency_penalty=0.0,
+              ),
+          )
+          """,
+              "unit-test reranked-memory fixture",
+          )
+          test_text = replace_once(
+              test_text,
+              "base_results=(base_result(direct_reward=-1.0),),",
+              "base_results=(base_result(),),",
+              "negative direct fixture call",
+          )
+          test_text = replace_once(
+              test_text,
+              "base_results=(base_result(direct_reward=1.0),),",
+              "base_results=(base_result(),),",
+              "positive direct fixture call",
+          )
+          test_text = replace_once(
+              test_text,
+              """    assert result.base.score_breakdown is base.score_breakdown
+              assert result.base.utility_evidence is base.utility_evidence
+          """,
+              """    assert result.base.breakdown is base.breakdown
+          """,
+              "base-preservation assertions",
+          )
+          test_path.write_text(test_text, encoding="utf-8")
+
+          property_path = Path(
+              "tests/test_bounded_inherited_reranker_properties.py"
+          )
+          property_text = property_path.read_text(encoding="utf-8")
+          property_text = replace_once(
+              property_text,
+              """from nextgen_memory.utility_reranker import (
+              RerankedMemory,
+              UtilityEvidence,
+              UtilityScoreBreakdown,
+          )
+          """,
+              """from nextgen_memory.utility_reranker import (
+              RerankedMemory,
+              UtilityScoreBreakdown,
+          )
+          """,
+              "property utility imports",
+          )
+          property_text = replace_once(
+              property_text,
+              """        source_type="paper",
+              year=2026,
+          """,
+              "",
+              "property obsolete hit fields",
+          )
+          property_text = replace_once(
+              property_text,
+              """    return RerankedMemory(
+              hit=hit,
+              final_rank=rank,
+              final_score=score,
+              score_breakdown=UtilityScoreBreakdown(
+                  relevance_component=score,
+                  reward_component=0.0,
+                  verdict_component=0.0,
+                  harm_penalty=0.0,
+                  token_penalty=0.0,
+                  latency_penalty=0.0,
+                  final_score=score,
+              ),
+              utility_evidence=UtilityEvidence(
+                  memory_id=memory_id,
+                  feedback_count=0,
+                  avg_reward=None,
+                  positive_count=0,
+                  negative_count=0,
+                  last_feedback_at=None,
+              ),
+          )
+          """,
+              """    return RerankedMemory(
+              hit=hit,
+              original_rank=rank,
+              final_rank=rank,
+              final_score=score,
+              breakdown=UtilityScoreBreakdown(
+                  relevance=score,
+                  utility=0.0,
+                  harm_risk=0.0,
+                  token_cost=0.0,
+                  latency_cost=0.0,
+                  weighted_relevance=score,
+                  weighted_utility=0.0,
+                  weighted_harm_penalty=0.0,
+                  weighted_token_penalty=0.0,
+                  weighted_latency_penalty=0.0,
+              ),
+          )
+          """,
+              "property reranked-memory fixture",
+          )
+          property_path.write_text(property_text, encoding="utf-8")
+
+          simulation_path = Path(
+              "scripts/simulate_bounded_inherited_reranker_v0.py"
+          )
+          simulation_text = simulation_path.read_text(encoding="utf-8")
+          simulation_text = replace_once(
+              simulation_text,
+              """from nextgen_memory.utility_reranker import (
+              RerankedMemory,
+              UtilityEvidence,
+              UtilityScoreBreakdown,
+          )
+          """,
+              """from nextgen_memory.utility_reranker import (
+              RerankedMemory,
+              UtilityScoreBreakdown,
+          )
+          """,
+              "simulation utility imports",
+          )
+          simulation_text = replace_once(
+              simulation_text,
+              """        source_type="simulation",
+              year=2026,
+          """,
+              "",
+              "simulation obsolete hit fields",
+          )
+          simulation_text = replace_once(
+              simulation_text,
+              """    return RerankedMemory(
+              hit=hit,
+              final_rank=rank,
+              final_score=score,
+              score_breakdown=UtilityScoreBreakdown(
+                  relevance_component=score,
+                  reward_component=0.0,
+                  verdict_component=0.0,
+                  harm_penalty=0.0,
+                  token_penalty=0.0,
+                  latency_penalty=0.0,
+                  final_score=score,
+              ),
+              utility_evidence=UtilityEvidence(
+                  memory_id=memory_id,
+                  feedback_count=0,
+                  avg_reward=None,
+                  positive_count=0,
+                  negative_count=0,
+                  last_feedback_at=None,
+              ),
+          )
+          """,
+              """    return RerankedMemory(
+              hit=hit,
+              original_rank=rank,
+              final_rank=rank,
+              final_score=score,
+              breakdown=UtilityScoreBreakdown(
+                  relevance=score,
+                  utility=0.0,
+                  harm_risk=0.0,
+                  token_cost=0.0,
+                  latency_cost=0.0,
+                  weighted_relevance=score,
+                  weighted_utility=0.0,
+                  weighted_harm_penalty=0.0,
+                  weighted_token_penalty=0.0,
+                  weighted_latency_penalty=0.0,
+              ),
+          )
+          """,
+              "simulation reranked-memory fixture",
+          )
+          simulation_path.write_text(simulation_text, encoding="utf-8")
+          PY
+
+      - name: Format and verify focused contracts
+        run: |
+          ruff format \
+            tests/test_bounded_inherited_reranker.py \
+            tests/test_bounded_inherited_reranker_properties.py \
+            scripts/simulate_bounded_inherited_reranker_v0.py
+          ruff check .
+          python -m pytest \
+            tests/test_bounded_inherited_reranker.py \
+            tests/test_bounded_inherited_reranker_properties.py \
+            tests/test_bounded_inherited_reranker_simulation.py \
+            -q
+          python -m pytest -q
+          python -m compileall -q src scripts
+          git diff --check
+
+      - name: Verify exact correction scope
+        run: |
+          cat > /tmp/expected <<'EOF'
+          scripts/simulate_bounded_inherited_reranker_v0.py
+          tests/test_bounded_inherited_reranker.py
+          tests/test_bounded_inherited_reranker_properties.py
+          EOF
+          git diff --name-only | sort > /tmp/actual
+          diff -u /tmp/expected /tmp/actual
+
+      - name: Commit and push fast-forward
+        run: |
+          git config user.name "NextGen Memory Automation"
+          git config user.email "actions@users.noreply.github.com"
+          git add \
+            scripts/simulate_bounded_inherited_reranker_v0.py \
+            tests/test_bounded_inherited_reranker.py \
+            tests/test_bounded_inherited_reranker_properties.py
+          git commit -m "test: align bounded inherited fixtures with stacked base"
+          git push origin HEAD:feat/bounded-inherited-reranker-v0
