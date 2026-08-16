@@ -207,7 +207,7 @@ def test_thresholds_omit_optional_candidates_and_their_dependents() -> None:
 
 
 def test_mandatory_or_mandatory_prerequisite_threshold_failure_is_hard_error() -> None:
-    with pytest.raises(ContextCompilerValidationError, match="mandatory.*authority"):
+    with pytest.raises(ContextCompilerValidationError, match=r"mandatory.*authority"):
         CanonicalContextPool.build(
             request(min_authority=0.8),
             (item(MEMORY_A, mandatory=True, authority=0.5),),
