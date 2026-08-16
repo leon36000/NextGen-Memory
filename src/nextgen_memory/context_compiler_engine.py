@@ -11,8 +11,8 @@ from types import MappingProxyType
 from uuid import UUID, uuid5
 
 from .context_exact_solver import (
-    ExactContextSolver,
     ContextSelectionSolution,
+    ExactContextSolver,
     is_context_set_feasible,
     mandatory_context_closure,
 )
@@ -23,12 +23,12 @@ from .integrated_context_compiler import (
     ContextObjectiveBreakdown,
     ContextOmission,
     ContextOmissionReason,
+    ContextPairInteraction,
     ContextSelectionPhase,
     ContextSetEvaluator,
     ContextSolverMode,
     IntegratedContextCompileRequest,
     IntegratedContextEvidence,
-    ContextPairInteraction,
 )
 
 _PACKET_DIRECTIVE = (
