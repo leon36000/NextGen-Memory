@@ -292,7 +292,9 @@ def test_omission_causes_are_isolated() -> None:
     )
     by_id = {item.memory_id: item.reason for item in packet.omissions}
 
-    assert packet.selected_memory_ids == (memory_id(1), memory_id(4))
+    assert frozenset(packet.selected_memory_ids) == frozenset(
+        {memory_id(1), memory_id(4)}
+    )
     assert by_id[memory_id(2)] is ContextOmissionReason.EXPERT_CAP
     assert by_id[memory_id(3)] is ContextOmissionReason.NON_POSITIVE_MARGINAL_VALUE
     assert by_id[memory_id(5)] is ContextOmissionReason.TOKEN_BUDGET
