@@ -16,8 +16,8 @@ from nextgen_memory import (
     ContextSelectionPhase,
     ContextSolverMode,
     EvidenceFidelity,
-    IntegratedContextCompileRequest,
     IntegratedContextCompiler,
+    IntegratedContextCompileRequest,
     IntegratedContextEvidence,
     IntegratedContextPacket,
 )
@@ -40,8 +40,8 @@ def test_context_compiler_contracts_are_public_and_dependency_free() -> None:
         ContextSelectionPhase,
         ContextSolverMode,
         EvidenceFidelity,
-        IntegratedContextCompileRequest,
         IntegratedContextCompiler,
+        IntegratedContextCompileRequest,
         IntegratedContextEvidence,
         IntegratedContextPacket,
     )
