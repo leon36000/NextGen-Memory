@@ -5,7 +5,6 @@ from dataclasses import FrozenInstanceError
 from uuid import UUID
 
 import pytest
-
 from nextgen_memory.corrective_retrieval_preflight import (
     CapabilityProbeAuthorization,
     CorrectivePreflightPolicy,
