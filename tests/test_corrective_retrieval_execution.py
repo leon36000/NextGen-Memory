@@ -5,17 +5,17 @@ import inspect
 from dataclasses import FrozenInstanceError, fields
 
 import pytest
+
+from nextgen_memory.corrective_retrieval_contracts import (
+    ProviderStatusClass,
+    RetrievalFailureClass,
+)
 from nextgen_memory.corrective_retrieval_execution import (
     EmbeddingBudgetDecision,
     EmbeddingBudgetGuard,
     EmbeddingBudgetPolicy,
     RetryDirective,
     classify_provider_failure,
-)
-
-from nextgen_memory.corrective_retrieval_contracts import (
-    ProviderStatusClass,
-    RetrievalFailureClass,
 )
 
 
