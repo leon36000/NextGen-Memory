@@ -25,7 +25,7 @@ def policy(**overrides: object) -> EmbeddingBudgetPolicy:
         "rpm_limit": 3,
         "tpm_limit": 100,
         "window_seconds": 60,
-        "known_attempt_timestamps": (940, 980),
+        "known_attempt_timestamps": (980, 990),
         "known_token_estimates": (20, 30),
     }
     values.update(overrides)
