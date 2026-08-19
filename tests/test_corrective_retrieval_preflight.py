@@ -13,6 +13,7 @@ from nextgen_memory.corrective_retrieval_preflight import (
     RetrievalPipelinePreflight,
     pipeline_fingerprint,
 )
+
 from nextgen_memory.corrective_retrieval_contracts import (
     RetrievalCapabilityProfile,
     RetrievalFailureClass,
