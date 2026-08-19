@@ -359,11 +359,13 @@ class RetrievalAttemptResult:
             raise CorrectiveRetrievalValidationError(
                 "provider_status_class is inconsistent with failure_class"
             )
-        if self.failure_class is not RetrievalFailureClass.RATE_LIMITED:
-            if self.retry_after_seconds is not None:
-                raise CorrectiveRetrievalValidationError(
-                    "retry_after_seconds is only valid for rate limiting"
-                )
+        if (
+            self.failure_class is not RetrievalFailureClass.RATE_LIMITED
+            and self.retry_after_seconds is not None
+        ):
+            raise CorrectiveRetrievalValidationError(
+                "retry_after_seconds is only valid for rate limiting"
+            )
 
 
 def canonical_json_sha256(value: object) -> str:
