@@ -6,17 +6,17 @@ from uuid import UUID
 
 import pytest
 
-from nextgen_memory.corrective_retrieval_contracts import (
-    RetrievalCapabilityProfile,
-    RetrievalFailureClass,
-    RetrievalMode,
-)
 from nextgen_memory.corrective_retrieval_preflight import (
     CapabilityProbeAuthorization,
     CorrectivePreflightPolicy,
     PreflightReason,
     RetrievalPipelinePreflight,
     pipeline_fingerprint,
+)
+from nextgen_memory.corrective_retrieval_contracts import (
+    RetrievalCapabilityProfile,
+    RetrievalFailureClass,
+    RetrievalMode,
 )
 
 SPACE = UUID("11111111-1111-1111-1111-111111111111")
