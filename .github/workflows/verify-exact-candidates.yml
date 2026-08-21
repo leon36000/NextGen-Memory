@@ -1,0 +1,44 @@
+name: Verify exact candidate SHAs
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - candidate: autonomous-policy
+            sha: 4e49920b84f393836e4ed4a19f744aa2b3c402e2
+            python-version: '3.12'
+          - candidate: autonomous-policy
+            sha: 4e49920b84f393836e4ed4a19f744aa2b3c402e2
+            python-version: '3.13'
+          - candidate: shapley-order-guard
+            sha: 5f842f8bbb5b6e662a20b1a7860f2dc3c0642f1a
+            python-version: '3.12'
+          - candidate: shapley-order-guard
+            sha: 5f842f8bbb5b6e662a20b1a7860f2dc3c0642f1a
+            python-version: '3.13'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ matrix.sha }}
+          fetch-depth: 1
+      - name: Prove exact checkout
+        run: test "$(git rev-parse HEAD)" = "${{ matrix.sha }}"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - name: Install project and development tools
+        run: python -m pip install -e '.[dev]'
+      - name: Lint exact candidate
+        run: ruff check .
+      - name: Test exact candidate
+        run: python -m pytest -q
