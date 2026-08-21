@@ -567,13 +567,13 @@ class PrecedenceShapleyEstimator:
         graph: MemoryDependencyGraph,
         orders: Sequence[Sequence[UUID]] | None,
     ) -> tuple[tuple[tuple[UUID, ...], ...], InteractionEstimationMode]:
-        all_orders = graph.topological_orders()
+        player_count = len(graph.players)
         if orders is None:
-            if len(graph.players) > self.config.exact_player_limit:
+            if player_count > self.config.exact_player_limit:
                 raise ValueError(
                     "sampled orders are required above exact_player_limit"
                 )
-            return all_orders, InteractionEstimationMode.EXACT
+            return graph.topological_orders(), InteractionEstimationMode.EXACT
 
         normalized = tuple(tuple(order) for order in orders)
         if not normalized:
@@ -585,10 +585,13 @@ class PrecedenceShapleyEstimator:
         if any(not graph.is_valid_order(order) for order in normalized):
             raise ValueError("every order must be a valid topological order")
         normalized = tuple(sorted(normalized, key=_order_sort_key))
+        if player_count > self.config.exact_player_limit:
+            return normalized, InteractionEstimationMode.SAMPLED
+
+        all_orders = graph.topological_orders()
         mode = (
             InteractionEstimationMode.EXACT
-            if len(graph.players) <= self.config.exact_player_limit
-            and normalized == all_orders
+            if normalized == all_orders
             else InteractionEstimationMode.SAMPLED
         )
         return normalized, mode
