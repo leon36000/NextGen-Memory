@@ -1,0 +1,116 @@
+name: one-shot-shapley-order-patch
+
+on:
+  push:
+    branches:
+      - fix/shapley-order-enumeration-guard-20260821
+
+permissions:
+  contents: write
+
+jobs:
+  patch-and-verify:
+    if: github.event.head_commit.message == 'chore: trigger one-shot Shapley patch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/shapley-order-enumeration-guard-20260821
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Apply exact bounded-order patch
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('src/nextgen_memory/interaction_credit.py')
+          source = path.read_text(encoding='utf-8')
+          old = '''    def _resolve_orders(
+              self,
+              graph: MemoryDependencyGraph,
+              orders: Sequence[Sequence[UUID]] | None,
+          ) -> tuple[tuple[tuple[UUID, ...], ...], InteractionEstimationMode]:
+              all_orders = graph.topological_orders()
+              if orders is None:
+                  if len(graph.players) > self.config.exact_player_limit:
+                      raise ValueError(
+                          "sampled orders are required above exact_player_limit"
+                      )
+                  return all_orders, InteractionEstimationMode.EXACT
+
+              normalized = tuple(tuple(order) for order in orders)
+              if not normalized:
+                  raise ValueError("at least one sampled order is required")
+              if len(normalized) > self.config.max_sampled_orders:
+                  raise ValueError("orders exceed max_sampled_orders")
+              if len(set(normalized)) != len(normalized):
+                  raise ValueError("orders must not contain duplicates")
+              if any(not graph.is_valid_order(order) for order in normalized):
+                  raise ValueError("every order must be a valid topological order")
+              normalized = tuple(sorted(normalized, key=_order_sort_key))
+              mode = (
+                  InteractionEstimationMode.EXACT
+                  if len(graph.players) <= self.config.exact_player_limit
+                  and normalized == all_orders
+                  else InteractionEstimationMode.SAMPLED
+              )
+              return normalized, mode
+          '''
+          new = '''    def _resolve_orders(
+              self,
+              graph: MemoryDependencyGraph,
+              orders: Sequence[Sequence[UUID]] | None,
+          ) -> tuple[tuple[tuple[UUID, ...], ...], InteractionEstimationMode]:
+              player_count = len(graph.players)
+              if orders is None:
+                  if player_count > self.config.exact_player_limit:
+                      raise ValueError(
+                          "sampled orders are required above exact_player_limit"
+                      )
+                  return graph.topological_orders(), InteractionEstimationMode.EXACT
+
+              normalized = tuple(tuple(order) for order in orders)
+              if not normalized:
+                  raise ValueError("at least one sampled order is required")
+              if len(normalized) > self.config.max_sampled_orders:
+                  raise ValueError("orders exceed max_sampled_orders")
+              if len(set(normalized)) != len(normalized):
+                  raise ValueError("orders must not contain duplicates")
+              if any(not graph.is_valid_order(order) for order in normalized):
+                  raise ValueError("every order must be a valid topological order")
+              normalized = tuple(sorted(normalized, key=_order_sort_key))
+              if player_count > self.config.exact_player_limit:
+                  return normalized, InteractionEstimationMode.SAMPLED
+
+              all_orders = graph.topological_orders()
+              mode = (
+                  InteractionEstimationMode.EXACT
+                  if normalized == all_orders
+                  else InteractionEstimationMode.SAMPLED
+              )
+              return normalized, mode
+          '''
+          if source.count(old) != 1:
+              raise SystemExit('expected exactly one _resolve_orders block')
+          path.write_text(source.replace(old, new), encoding='utf-8')
+          PY
+          rm .github/workflows/shapley-patch-once.yml
+      - name: Install project and development tools
+        run: python -m pip install -e '.[dev]'
+      - name: Focused verification
+        run: python -m pytest -q tests/test_shapley_order_resolution_complexity.py tests/test_precedence_shapley.py
+      - name: Lint
+        run: ruff check .
+      - name: Full suite
+        run: python -m pytest -q
+      - name: Commit verified patch
+        run: |
+          test -z "$(git diff --check)"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/nextgen_memory/interaction_credit.py .github/workflows/shapley-patch-once.yml
+          git commit -m 'fix: avoid factorial Shapley order enumeration'
+          git push origin HEAD:fix/shapley-order-enumeration-guard-20260821
