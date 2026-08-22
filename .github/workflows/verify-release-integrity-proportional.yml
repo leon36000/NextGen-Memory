@@ -1,0 +1,254 @@
+name: Verify release integrity proportionally
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+jobs:
+  verify:
+    if: github.event.pull_request.head.ref == 'bootstrap/verify-release-wheel-integrity-proportional-20260822'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - name: Resolve immutable candidate
+        id: candidate
+        run: |
+          set -euo pipefail
+          expected="$(git ls-remote origin refs/heads/ci/release-wheel-integrity-v0-20260822 | awk '{print $1}')"
+          test -n "$expected"
+          git fetch --depth=1 origin "$expected"
+          git checkout --detach "$expected"
+          test "$(git rev-parse HEAD)" = "$expected"
+          test ! -e .github/workflows/release-integrity-patch-once.yml
+          printf 'sha=%s\n' "$expected" >> "$GITHUB_OUTPUT"
+      - name: Prove four-file scope and read-only workflow
+        run: |
+          git fetch --depth=1 origin feat/corrective-retrieval-preproduction-v0.9.3
+          git diff --name-only FETCH_HEAD...HEAD > /tmp/paths.txt
+          test "$(awk 'NF' /tmp/paths.txt | wc -l)" -eq 4
+          for path in \
+            scripts/verify_release_artifact.py \
+            tests/test_release_artifact.py \
+            tests/test_release_integrity_workflow.py \
+            .github/workflows/release-integrity.yml; do
+            grep -Fxq "$path" /tmp/paths.txt
+          done
+          grep -q 'paths:' .github/workflows/release-integrity.yml
+          grep -q 'contents: read' .github/workflows/release-integrity.yml
+          ! grep -Eqi 'twine upload|id-token:[[:space:]]*write|secrets\.|pypi' .github/workflows/release-integrity.yml
+          if git diff --unified=0 FETCH_HEAD...HEAD | grep -E '^\+.*(pytest\.mark\.(skip|xfail)|@unittest\.skip|# *noqa|NotImplementedError|TODO|FIXME|pass$)' ; then
+            exit 1
+          fi
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - name: Install development environment
+        run: python -m pip install -e '.[dev]'
+      - name: Focused tests
+        run: python -m pytest -q tests/test_release_artifact.py tests/test_release_integrity_workflow.py
+      - name: Build and inspect wheel
+        shell: bash
+        run: |
+          rm -rf dist
+          python -m pip wheel --no-deps --no-build-isolation . --wheel-dir dist
+          mapfile -t wheels < <(find dist -maxdepth 1 -type f -name '*.whl' -print)
+          test "${#wheels[@]}" -eq 1
+          version="$(python - <<'PY'
+          import tomllib
+          from pathlib import Path
+          print(tomllib.loads(Path('pyproject.toml').read_text(encoding='utf-8'))['project']['version'])
+          PY
+          )"
+          mapfile -t modules < <(
+            find src/nextgen_memory -maxdepth 1 -type f -name '*.py' -printf '%f\n' |
+            sed -E 's/\.py$//' |
+            awk '$0 == "__init__" {print "nextgen_memory"; next} {print "nextgen_memory." $0}' |
+            sort -u
+          )
+          args=()
+          for module in "${modules[@]}"; do args+=(--required-module "$module"); done
+          python scripts/verify_release_artifact.py "${wheels[0]}" \
+            --expected-name nextgen-memory \
+            --expected-version "$version" \
+            "${args[@]}" > dist/wheel-report.json
+          printf 'WHEEL_PATH=%s\n' "${wheels[0]}" >> "$GITHUB_ENV"
+      - name: Install and import outside checkout
+        shell: bash
+        run: |
+          smoke_root="$(mktemp -d)"
+          outside="$(mktemp -d)"
+          python -m venv "$smoke_root/venv"
+          "$smoke_root/venv/bin/python" -m pip install --no-deps "$WHEEL_PATH"
+          (
+            cd "$outside"
+            REPO_ROOT="$GITHUB_WORKSPACE" "$smoke_root/venv/bin/python" -I - <<'PY'
+          import os
+          import sys
+          from pathlib import Path
+          import nextgen_memory
+          module_path=Path(nextgen_memory.__file__).resolve()
+          prefix=Path(sys.prefix).resolve()
+          repository=Path(os.environ['REPO_ROOT']).resolve()
+          assert module_path.is_relative_to(prefix)
+          assert not module_path.is_relative_to(repository)
+          exports=nextgen_memory.__all__
+          assert isinstance(exports,tuple) and exports
+          assert len(exports)==len(set(exports))
+          for name in exports: getattr(nextgen_memory,name)
+          PY
+          )
+          "$smoke_root/venv/bin/python" -m pip check
+      - name: Complete verification
+        run: |
+          ruff check .
+          python -m compileall -q src scripts
+          python -m pytest -q
+          git diff --check
+      - name: Store environment-specific evidence
+        run: |
+          mkdir -p /tmp/evidence
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          report=json.loads(Path('dist/wheel-report.json').read_text(encoding='utf-8'))
+          Path('/tmp/evidence/record.json').write_text(
+              json.dumps({
+                  'candidate_sha':'${{ steps.candidate.outputs.sha }}',
+                  'python_version':'${{ matrix.python-version }}',
+                  'wheel_sha256':report['wheel_sha256'],
+                  'wheel_filename':report['wheel_filename'],
+                  'member_count':report['member_count'],
+                  'package_member_count':report['package_member_count'],
+                  'focused':'green','ruff':'clean','compileall':'clean',
+                  'full_suite':'green','diff_check':'clean',
+                  'isolated_import':'green','pip_check':'green',
+                  'run_id':'${{ github.run_id }}',
+              },sort_keys=True,indent=2)+'\n',encoding='utf-8')
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-proportional-${{ matrix.python-version }}
+          path: /tmp/evidence/record.json
+          if-no-files-found: error
+
+  report:
+    if: github.event.pull_request.head.ref == 'bootstrap/verify-release-wheel-integrity-proportional-20260822'
+    needs: verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: /tmp/records
+          pattern: release-proportional-*
+      - name: Reconcile same candidate without requiring cross-runtime byte identity
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          records=[json.loads(p.read_text(encoding='utf-8')) for p in Path('/tmp/records').glob('**/record.json')]
+          if len(records)!=2: raise SystemExit(f'expected two records, got {len(records)}')
+          if sorted(r['python_version'] for r in records)!=['3.12','3.13']: raise SystemExit('incomplete matrix')
+          shas={r['candidate_sha'] for r in records}
+          if len(shas)!=1: raise SystemExit(f'candidate moved: {shas}')
+          for r in records:
+              for key,value in {
+                  'focused':'green','ruff':'clean','compileall':'clean','full_suite':'green',
+                  'diff_check':'clean','isolated_import':'green','pip_check':'green',
+              }.items():
+                  if r[key]!=value: raise SystemExit(f'failed evidence {key}')
+          summary={
+              'candidate_sha':next(iter(shas)),
+              'run_id':records[0]['run_id'],
+              'wheels':{
+                  r['python_version']:{
+                      'filename':r['wheel_filename'],
+                      'sha256':r['wheel_sha256'],
+                      'member_count':r['member_count'],
+                      'package_member_count':r['package_member_count'],
+                  } for r in records
+              },
+          }
+          Path('/tmp/summary.json').write_text(json.dumps(summary,sort_keys=True,indent=2)+'\n',encoding='utf-8')
+          PY
+      - name: Publish proportional evidence and blind Sol packet
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          python - <<'PY'
+          import json, os, subprocess
+          repo=os.environ['REPO']; summary=json.load(open('/tmp/summary.json',encoding='utf-8'))
+          rows=json.loads(subprocess.run(
+              ['gh','pr','list','--repo',repo,'--state','open','--head','ci/release-wheel-integrity-v0-20260822','--json','number,headRefOid'],
+              check=True,text=True,capture_output=True).stdout)
+          if len(rows)!=1 or rows[0]['headRefOid']!=summary['candidate_sha']:
+              raise SystemExit('candidate PR missing or moved')
+          pr=rows[0]
+          wheel_lines='\n'.join(
+              f"- Python {version}: `{data['filename']}`, SHA-256 `{data['sha256']}`, {data['member_count']} members"
+              for version,data in sorted(summary['wheels'].items())
+          )
+          packet=f'''## Exact-SHA verification and blind GPT-5.6 Sol review request
+
+Return exactly one verdict: `APPROVE`, `CHANGES_REQUIRED`, or `BLOCKED_BY_EVIDENCE`.
+
+### Boundary
+
+- Candidate SHA: `{summary['candidate_sha']}`
+- Candidate movement invalidates this request.
+
+### Environment-specific wheel evidence
+
+{wheel_lines}
+
+Wheel byte identity across different Python runtimes is **not** claimed or required. Each artifact is independently inspected, installed and imported.
+
+### Proven contract
+
+- exact four-file scope and path-filtered read-only workflow;
+- dependency-free archive inspector with adversarial mutation tests;
+- safe normalized member paths, duplicate/collision rejection, forbidden payload rejection, one metadata identity, normalized name, exact version and required modules;
+- deterministic privacy-safe report without archive contents or parent path;
+- Python 3.12 and 3.13 verify the same immutable source SHA;
+- each builds exactly one wheel with no dependencies/build isolation, installs into a fresh external venv, imports outside the checkout, resolves every root `__all__` symbol, and passes `pip check`;
+- focused tests, Ruff, compileall, full suite and diff-check pass on both;
+- no publish credentials, secrets surface, runtime dependency, package API or production behavior change;
+- verification run: {os.environ['RUN_URL']}.
+
+### Review focus
+
+- ZIP path/case-collision handling and forbidden payload policy;
+- metadata parsing and distribution normalization;
+- report privacy;
+- isolated-import rigor;
+- whether path filtering is proportionate rather than ceremonial;
+- false positives that could block legitimate pure-Python wheels;
+- any hidden publication or credential surface.
+
+Inspect the exact candidate and artifacts; do not rely on this summary. No merge without genuine independent Sol `APPROVE` on the unchanged SHA.'''
+          subprocess.run(['gh','pr','comment',str(pr['number']),'--repo',repo,'--body',packet],check=True)
+          issue_rows=json.loads(subprocess.run(
+              ['gh','issue','list','--repo',repo,'--state','open','--search','verify release wheel structure and isolated import in:title','--json','number'],
+              check=True,text=True,capture_output=True).stdout)
+          if len(issue_rows)==1:
+              subprocess.run(['gh','issue','comment',str(issue_rows[0]['number']),'--repo',repo,'--body',f"Candidate `{summary['candidate_sha']}` passed proportional exact-SHA wheel verification on Python 3.12/3.13. Environment-specific hashes are recorded on PR #{pr['number']}; blind Sol review pending."],check=True)
+          subprocess.run(['gh','issue','comment','23','--repo',repo,'--body',f"Release-integrity candidate `{summary['candidate_sha']}` passed proportional cross-version artifact verification. Blind Sol packet posted on PR #{pr['number']}; no merge. Run: {os.environ['RUN_URL']}"],check=True)
+          PY
+      - name: Close proportional verifier without merge
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: gh pr close "$PR_NUMBER" --repo "$REPO" --comment 'Proportional exact-SHA wheel verification completed. Closed without merge.'
