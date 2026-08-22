@@ -1,0 +1,97 @@
+name: Harden canonical Neon manifest paths once
+
+on:
+  pull_request:
+
+permissions:
+  contents: write
+
+jobs:
+  harden-and-verify:
+    if: github.event.pull_request.head.ref == 'ci/neon-migration-manifest-v1-20260822'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ci/neon-migration-manifest-v1-20260822
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Add canonical-path adversarial cases and guard
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          parser = Path('scripts/neon_migration_manifest.py')
+          source = parser.read_text(encoding='utf-8')
+          old_guard = '''        and pure_path.suffix == ".sql"
+                  and bool(pure_path.name)
+          '''
+          new_guard = '''        and pure_path.suffix == ".sql"
+                  and bool(pure_path.name)
+                  and pure_path.as_posix() == path
+          '''
+          old_guard = '\n'.join(
+              line[8:] if line.startswith('        ') else line
+              for line in old_guard.splitlines()
+          )
+          new_guard = '\n'.join(
+              line[8:] if line.startswith('        ') else line
+              for line in new_guard.splitlines()
+          )
+          if source.count(old_guard) != 1:
+              raise SystemExit('unexpected path guard structure')
+          parser.write_text(source.replace(old_guard, new_guard, 1), encoding='utf-8')
+
+          tests = Path('tests/test_neon_migration_manifest.py')
+          test_source = tests.read_text(encoding='utf-8')
+          marker = '''        (
+                      lambda entries: entries[0].update({"path": "migrations\\\\neon\\\\0001_alpha.sql"}),
+                      "safe repository-relative",
+                  ),
+          '''
+          marker = '\n'.join(
+              line[8:] if line.startswith('        ') else line
+              for line in marker.splitlines()
+          )
+          additions = '''        (
+                      lambda entries: entries[0].update({"path": "migrations/neon/./0001_alpha.sql"}),
+                      "safe repository-relative",
+                  ),
+                  (
+                      lambda entries: entries[0].update({"path": "migrations//neon/0001_alpha.sql"}),
+                      "safe repository-relative",
+                  ),
+          '''
+          additions = '\n'.join(
+              line[8:] if line.startswith('        ') else line
+              for line in additions.splitlines()
+          )
+          if test_source.count(marker) != 1:
+              raise SystemExit('unexpected unsafe-path test structure')
+          tests.write_text(
+              test_source.replace(marker, additions + marker, 1),
+              encoding='utf-8',
+          )
+          PY
+          rm .github/workflows/harden-neon-manifest-paths-once.yml
+      - name: Install and verify
+        run: |
+          python -m pip install -e '.[dev]'
+          ruff check scripts/neon_migration_manifest.py tests/test_neon_migration_manifest.py
+          python -m pytest -q tests/test_neon_migration_manifest.py
+          python scripts/neon_migration_manifest.py
+          ruff check .
+          python -m compileall -q src scripts
+          python -m pytest -q
+          git diff --check eada91750b5d577ec452c7f8d1fb72126abb6a54...HEAD
+      - name: Commit verified canonical-path hardening
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add scripts/neon_migration_manifest.py tests/test_neon_migration_manifest.py
+          git add -u .github/workflows
+          git commit -m 'fix: require canonical POSIX migration paths'
+          git push origin HEAD:ci/neon-migration-manifest-v1-20260822
