@@ -41,6 +41,47 @@ INSERT INTO ngm.retrieval_events (
 ON CONFLICT (id) DO NOTHING
 """.strip()
 
+RETRIEVAL_EVENT_SELECT_SQL = """
+SELECT
+    id,
+    space_id,
+    router_decision_id,
+    expert_key,
+    node_id,
+    backend_ref,
+    rank,
+    raw_score,
+    final_score,
+    estimated_tokens,
+    selected_for_context,
+    used_in_action
+FROM ngm.retrieval_events
+WHERE space_id = %(space_id)s
+  AND id = ANY(%(ids)s::uuid[])
+ORDER BY id
+""".strip()
+
+_REQUIRED_COLUMNS = frozenset(
+    {
+        "id",
+        "space_id",
+        "router_decision_id",
+        "expert_key",
+        "node_id",
+        "backend_ref",
+        "rank",
+        "raw_score",
+        "final_score",
+        "estimated_tokens",
+        "selected_for_context",
+        "used_in_action",
+    }
+)
+
+
+class RetrievalEventConflictError(RuntimeError):
+    """Stored retrieval telemetry differs from its deterministic immutable payload."""
+
 
 @dataclass(frozen=True, slots=True)
 class RetrievalEvent:
@@ -148,17 +189,168 @@ class ExecutemanyCursor(Protocol):
         """Execute one parameterized statement for each mapping."""
         ...
 
+    def execute(self, sql: str, params: Mapping[str, Any]) -> Any:
+        """Execute one parameterized verification query."""
+        ...
+
+    def fetchall(self) -> Iterable[Mapping[str, Any]]:
+        """Return mapping-shaped stored retrieval rows."""
+        ...
+
 
 class RetrievalEventWriter:
-    """Write retrieval events without owning the surrounding transaction."""
+    """Insert retrieval events and verify their exact immutable payload."""
 
     def write(
         self,
         cursor: ExecutemanyCursor,
         events: Iterable[RetrievalEvent],
     ) -> int:
-        rows = [event.to_db_params() for event in events]
-        if not rows:
+        events = tuple(events)
+        if not events:
             return 0
-        cursor.executemany(RETRIEVAL_EVENT_INSERT_SQL, rows)
-        return len(rows)
+        if any(not isinstance(event, RetrievalEvent) for event in events):
+            raise ValueError("events must contain RetrievalEvent instances")
+
+        spaces = {event.space_id for event in events}
+        if len(spaces) != 1:
+            raise ValueError("retrieval event batch must use one space_id")
+        expected = {event.id: event.to_db_params() for event in events}
+        if len(expected) != len(events):
+            raise ValueError("retrieval event batch contains duplicate IDs")
+
+        cursor.executemany(
+            RETRIEVAL_EVENT_INSERT_SQL,
+            [event.to_db_params() for event in events],
+        )
+        space_id = next(iter(spaces))
+        ids = sorted(expected, key=str)
+        cursor.execute(
+            RETRIEVAL_EVENT_SELECT_SQL,
+            {
+                "space_id": space_id,
+                "ids": ids,
+            },
+        )
+
+        stored_by_id: dict[UUID, dict[str, Any]] = {}
+        for raw_row in cursor.fetchall():
+            if not isinstance(raw_row, Mapping):
+                raise RetrievalEventConflictError(
+                    "stored retrieval event row is not a mapping"
+                )
+            missing = _REQUIRED_COLUMNS.difference(raw_row)
+            if missing:
+                raise RetrievalEventConflictError(
+                    "stored retrieval event row is missing immutable fields"
+                )
+            stored = _normalize_stored_row(raw_row)
+            stored_id = stored["id"]
+            if stored_id not in expected:
+                raise RetrievalEventConflictError(
+                    "stored retrieval event returned an unexpected ID"
+                )
+            if stored_id in stored_by_id:
+                raise RetrievalEventConflictError(
+                    "stored retrieval event returned a duplicate ID"
+                )
+            stored_by_id[stored_id] = stored
+
+        missing_ids = set(expected).difference(stored_by_id)
+        if missing_ids:
+            raise RetrievalEventConflictError(
+                "stored retrieval event is missing deterministic rows"
+            )
+        for event_id, expected_payload in expected.items():
+            if stored_by_id[event_id] != expected_payload:
+                raise RetrievalEventConflictError(
+                    "stored retrieval event immutable payload differs"
+                )
+        return len(events)
+
+
+def _normalize_stored_row(row: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "id": _parse_uuid("id", row["id"]),
+        "space_id": _parse_uuid("space_id", row["space_id"]),
+        "router_decision_id": _parse_uuid(
+            "router_decision_id",
+            row["router_decision_id"],
+        ),
+        "expert_key": _parse_text("expert_key", row["expert_key"]),
+        "node_id": _parse_optional_uuid("node_id", row["node_id"]),
+        "backend_ref": _parse_optional_text("backend_ref", row["backend_ref"]),
+        "rank": _parse_int("rank", row["rank"]),
+        "raw_score": _parse_optional_float("raw_score", row["raw_score"]),
+        "final_score": _parse_optional_float("final_score", row["final_score"]),
+        "estimated_tokens": _parse_optional_int(
+            "estimated_tokens",
+            row["estimated_tokens"],
+        ),
+        "selected_for_context": _parse_bool(
+            "selected_for_context",
+            row["selected_for_context"],
+        ),
+        "used_in_action": _parse_bool("used_in_action", row["used_in_action"]),
+    }
+
+
+def _parse_uuid(name: str, value: object) -> UUID:
+    try:
+        return value if isinstance(value, UUID) else UUID(str(value))
+    except (TypeError, ValueError, AttributeError) as exc:
+        raise RetrievalEventConflictError(
+            f"stored retrieval event {name} must be a UUID"
+        ) from exc
+
+
+def _parse_optional_uuid(name: str, value: object) -> UUID | None:
+    return None if value is None else _parse_uuid(name, value)
+
+
+def _parse_text(name: str, value: object) -> str:
+    if not isinstance(value, str):
+        raise RetrievalEventConflictError(
+            f"stored retrieval event {name} must be text"
+        )
+    return value
+
+
+def _parse_optional_text(name: str, value: object) -> str | None:
+    return None if value is None else _parse_text(name, value)
+
+
+def _parse_int(name: str, value: object) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise RetrievalEventConflictError(
+            f"stored retrieval event {name} must be an integer"
+        )
+    return value
+
+
+def _parse_optional_int(name: str, value: object) -> int | None:
+    return None if value is None else _parse_int(name, value)
+
+
+def _parse_optional_float(name: str, value: object) -> float | None:
+    if value is None:
+        return None
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise RetrievalEventConflictError(
+            f"stored retrieval event {name} must be numeric"
+        ) from exc
+    if not isfinite(parsed):
+        raise RetrievalEventConflictError(
+            f"stored retrieval event {name} must be finite"
+        )
+    return parsed
+
+
+def _parse_bool(name: str, value: object) -> bool:
+    if not isinstance(value, bool):
+        raise RetrievalEventConflictError(
+            f"stored retrieval event {name} must be a boolean"
+        )
+    return value
