@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from collections import defaultdict
 from dataclasses import dataclass
-from uuid import NAMESPACE_URL, uuid5
+from uuid import NAMESPACE_URL, UUID, uuid5
 
 from .domain import (
     EvidenceNeed,
@@ -20,7 +22,7 @@ from .domain import (
 )
 from .telemetry import RoutingDecisionSink, RoutingTelemetryRecord
 
-POLICY_VERSION = "deterministic-v0"
+POLICY_VERSION = "deterministic-v1"
 MIN_EXPERT_TOKENS = 300
 
 
@@ -226,9 +228,12 @@ class DeterministicMemoryRouter:
         )
         escalation = self._escalation_experts(request, eligible, selected, scores)
         confidence = self._confidence(request, selected, scores)
-        decision_id = uuid5(
-            NAMESPACE_URL,
-            f"nextgen-memory:{POLICY_VERSION}:{request.request_id}",
+        decision_id = _routing_decision_id(
+            request=request,
+            eligible=eligible,
+            allocations=allocations,
+            escalation=escalation,
+            confidence=confidence,
         )
         decision = RoutingDecision(
             decision_id=decision_id,
@@ -459,3 +464,65 @@ class DeterministicMemoryRouter:
         return next(
             index for index, profile in enumerate(EXPERT_PROFILES) if profile.expert is expert
         )
+
+def _routing_decision_id(
+    *,
+    request: RoutingRequest,
+    eligible: tuple[ExpertKey, ...],
+    allocations: tuple[ExpertAllocation, ...],
+    escalation: tuple[ExpertKey, ...],
+    confidence: float,
+) -> UUID:
+    """Bind one UUID to the complete privacy-safe routing policy and outcome."""
+
+    payload: dict[str, object] = {
+        "request": {
+            "request_id": str(request.request_id),
+            "query_hash": hashlib.sha256(
+                request.query.encode("utf-8")
+            ).hexdigest(),
+            "scope_fingerprint": _canonical_json_sha256(
+                request.scope.to_dict()
+            ),
+            "task_kind": request.task_kind.value,
+            "plan_phase": request.plan_phase.value,
+            "needs": sorted(need.value for need in request.needs),
+            "temporal_intent": request.temporal_intent.value,
+            "exactness": request.exactness.value,
+            "risk": request.risk.value,
+            "uncertainty": request.uncertainty,
+            "token_budget": request.token_budget,
+            "latency_budget_ms": request.latency_budget_ms,
+            "max_experts": request.max_experts,
+            "minimum_authority": request.minimum_authority,
+        },
+        "outcome": {
+            "eligible_experts": [expert.value for expert in eligible],
+            "allocations": [
+                allocation.to_dict() for allocation in allocations
+            ],
+            "escalation_experts": [
+                expert.value for expert in escalation
+            ],
+            "confidence": confidence,
+            "policy_version": POLICY_VERSION,
+        },
+    }
+    digest = _canonical_json_sha256(payload)
+    return uuid5(
+        NAMESPACE_URL,
+        f"nextgen-memory:routing-decision:{POLICY_VERSION}:{digest}",
+    )
+
+
+def _canonical_json_sha256(value: object) -> str:
+    """Hash an explicitly built JSON value without arbitrary string fallback."""
+
+    encoded = json.dumps(
+        value,
+        ensure_ascii=False,
+        allow_nan=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
