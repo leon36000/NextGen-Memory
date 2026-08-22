@@ -28,22 +28,22 @@ jobs:
           path = Path('src/nextgen_memory/router.py')
           source = path.read_text(encoding='utf-8')
 
-          old_imports = '''from __future__ import annotations
+          old_imports = dedent('''\
+          from __future__ import annotations
 
           from collections import defaultdict
           from dataclasses import dataclass
           from uuid import NAMESPACE_URL, uuid5
-          '''
-          new_imports = '''from __future__ import annotations
+          ''')
+          new_imports = dedent('''\
+          from __future__ import annotations
 
           import hashlib
           import json
           from collections import defaultdict
           from dataclasses import dataclass
-          from uuid import NAMESPACE_URL, uuid5
-          '''
-          old_imports = dedent(old_imports)
-          new_imports = dedent(new_imports)
+          from uuid import NAMESPACE_URL, UUID, uuid5
+          ''')
           if source.count(old_imports) != 1:
               raise SystemExit('unexpected router import block')
           source = source.replace(old_imports, new_imports, 1)
@@ -57,21 +57,20 @@ jobs:
           )
 
           old_identity = dedent('''\
-                  decision_id = uuid5(
-                      NAMESPACE_URL,
-                      f"nextgen-memory:{POLICY_VERSION}:{request.request_id}",
-                  )
+          decision_id = uuid5(
+              NAMESPACE_URL,
+              f"nextgen-memory:{POLICY_VERSION}:{request.request_id}",
+          )
           ''')
           new_identity = dedent('''\
-                  decision_id = _routing_decision_id(
-                      request=request,
-                      eligible=eligible,
-                      allocations=allocations,
-                      escalation=escalation,
-                      confidence=confidence,
-                  )
+          decision_id = _routing_decision_id(
+              request=request,
+              eligible=eligible,
+              allocations=allocations,
+              escalation=escalation,
+              confidence=confidence,
+          )
           ''')
-          # Reapply method indentation after dedenting the source snippets.
           old_identity = ''.join(
               f'        {line}\n' if line else '\n'
               for line in old_identity.rstrip('\n').split('\n')
@@ -94,7 +93,7 @@ jobs:
               allocations: tuple[ExpertAllocation, ...],
               escalation: tuple[ExpertKey, ...],
               confidence: float,
-          ):
+          ) -> UUID:
               """Bind one decision UUID to the complete privacy-safe route policy."""
 
               query_hash = hashlib.sha256(request.query.encode("utf-8")).hexdigest()
@@ -143,7 +142,7 @@ jobs:
               ).encode("utf-8")
               return hashlib.sha256(encoded).hexdigest()
           ''')
-          if '_routing_decision_id(' in source:
+          if 'def _routing_decision_id(' in source:
               raise SystemExit('routing identity helper already exists unexpectedly')
           source = source.rstrip() + helpers + '\n'
           path.write_text(source, encoding='utf-8')
