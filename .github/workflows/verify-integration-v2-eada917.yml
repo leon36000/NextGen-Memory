@@ -1,0 +1,84 @@
+name: Verify integration rehearsal v2 exact SHA
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    if: github.event.pull_request.head.ref == 'bootstrap/verify-integration-v2-eada917-20260822'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: eada91750b5d577ec452c7f8d1fb72126abb6a54
+          fetch-depth: 0
+      - name: Prove exact integration SHA and candidate ancestry
+        run: |
+          test "$(git rev-parse HEAD)" = "eada91750b5d577ec452c7f8d1fb72126abb6a54"
+          candidates=(
+            4e49920b84f393836e4ed4a19f744aa2b3c402e2
+            5f842f8bbb5b6e662a20b1a7860f2dc3c0642f1a
+            d2bf3c75f7cf23e059677234342c10f4be304799
+            6c60f2cc68e9b177f680d4464d42d089e4ed49db
+            b336a73d49da4c7589ab2e63704ef3a26b07ee89
+            49db636a8ca9b548862ba61b4fcdc86cb01f32cd
+            0de2763ad7809f37261690c706bb37856f20a70d
+            5833d5c89286804e28108ca7f4ab9a4a8bf5c3f4
+          )
+          for sha in "${candidates[@]}"; do
+            git cat-file -e "${sha}^{commit}"
+            git merge-base --is-ancestor "$sha" HEAD
+          done
+          test "$(git rev-list --count --merges 93cce924debb9ae2ff46d71b2e8fa043f4cefa0b..HEAD)" -eq 8
+      - name: Prove integrated scope and diff integrity
+        run: |
+          git diff --check 93cce924debb9ae2ff46d71b2e8fa043f4cefa0b...HEAD
+          test -n "$(git diff --name-only 93cce924debb9ae2ff46d71b2e8fa043f4cefa0b...HEAD)"
+          if git diff --name-only 93cce924debb9ae2ff46d71b2e8fa043f4cefa0b...HEAD | grep -Eq '^src/nextgen_memory/corrective_retrieval_'; then
+            echo 'integration rehearsal modifies active Codex corrective-retrieval files' >&2
+            exit 1
+          fi
+          test -z "$(git status --porcelain)"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - name: Install, lint and compile exact integration SHA
+        run: |
+          python -m pip install -e '.[dev]'
+          ruff check .
+          python -m compileall -q src
+      - name: Complete integrated suite
+        run: python -m pytest -q
+      - name: Build and reinstall wheel
+        run: |
+          rm -rf wheelhouse /tmp/integration-wheel-venv
+          python -m pip wheel --no-deps . -w wheelhouse
+          test "$(find wheelhouse -maxdepth 1 -name '*.whl' | wc -l)" -eq 1
+          python -m venv /tmp/integration-wheel-venv
+          /tmp/integration-wheel-venv/bin/python -m pip install --no-deps wheelhouse/*.whl
+          /tmp/integration-wheel-venv/bin/python - <<'PY'
+          import nextgen_memory
+          required = (
+              'ActionMemoryUsageEvent',
+              'ActionMemoryUsageWriter',
+              'CausalFeedbackWriter',
+              'CreditTargetReader',
+              'DeterministicMemoryRouter',
+              'IntegratedContextCompiler',
+              'MongoResearchRetriever',
+              'PrecedenceShapleyEstimator',
+              'RetrievalEventWriter',
+          )
+          missing = [name for name in required if not hasattr(nextgen_memory, name)]
+          if missing:
+              raise SystemExit(f'missing wheel exports: {missing}')
+          PY
+          sha256sum wheelhouse/*.whl
