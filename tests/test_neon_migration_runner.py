@@ -97,7 +97,10 @@ def _stable_responder() -> Callable[[Invocation, int], CommandResult]:
     schema_meta_outputs = iter(
         (
             b'[{"schema_key":"alpha","schema_version":"1","metadata":{"b":2,"a":1}}]\n',
-            b'[ { "metadata": { "a": 1, "b": 2 }, "schema_version": "1", "schema_key": "alpha" } ]\n',
+            (
+                b'[ { "metadata": { "a": 1, "b": 2 }, '
+                b'"schema_version": "1", "schema_key": "alpha" } ]\n'
+            ),
         )
     )
 
