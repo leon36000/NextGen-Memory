@@ -1,0 +1,51 @@
+name: Verify router identity v1 exact head
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/router-decision-identity-v1-20260822
+          fetch-depth: 1
+      - name: Capture exact candidate
+        id: candidate
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - name: Install
+        run: python -m pip install -e '.[dev]'
+      - name: Ruff
+        run: ruff check .
+      - name: Focused router tests
+        run: python -m pytest -q tests/test_router.py tests/test_router_identity.py
+      - name: Full suite
+        run: python -m pytest -q
+      - name: Compile
+        run: python -m compileall -q src
+      - name: Diff integrity
+        run: git diff --check
+      - name: Publish exact candidate SHA
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ steps.candidate.outputs.sha }}
+          PYTHON: ${{ matrix.python-version }}
+          STATUS: ${{ job.status }}
+        run: |
+          body=$(printf 'Router identity v1 raw-branch verification: exact SHA `%s`, Python `%s`, job status `%s`.' "$SHA" "$PYTHON" "$STATUS")
+          gh api repos/${{ github.repository }}/issues/32/comments -f body="$body"
