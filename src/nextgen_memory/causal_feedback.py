@@ -93,6 +93,29 @@ _REQUIRED_COLUMNS = frozenset(
     }
 )
 _ALLOWED_VERDICTS = frozenset(verdict.value for verdict in CreditVerdict)
+_CAUSAL_METADATA_KEYS = frozenset(
+    {
+        "credit_version",
+        "trial_count",
+        "mean_full_score",
+        "mean_no_memory_score",
+        "mean_without_memory_score",
+        "mean_bundle_uplift",
+        "mean_effect",
+        "standard_error",
+        "context_set_hash",
+        "continuation_set_hash",
+    }
+)
+_CAUSAL_NUMERIC_KEYS = (
+    "mean_full_score",
+    "mean_no_memory_score",
+    "mean_without_memory_score",
+    "mean_bundle_uplift",
+    "mean_effect",
+    "standard_error",
+)
+_CAUSAL_HASH_KEYS = ("context_set_hash", "continuation_set_hash")
 
 
 class CausalFeedbackConflictError(RuntimeError):
@@ -357,7 +380,7 @@ def _normalize_stored_row(row: Mapping[str, Any]) -> dict[str, Any]:
         "token_delta": row["token_delta"],
         "latency_delta_ms": float(row["latency_delta_ms"]),
         "notes": row["notes"],
-        "metadata": _thaw_json(_freeze_metadata(row["metadata"])),
+        "metadata": _normalize_stored_metadata(row["metadata"]),
         "credit_evaluation_id": _parse_uuid(
             "credit_evaluation_id",
             row["credit_evaluation_id"],
@@ -367,19 +390,57 @@ def _normalize_stored_row(row: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-def _freeze_metadata(metadata: Mapping[str, Any]) -> Mapping[str, Any]:
+def _freeze_metadata(metadata: object) -> Mapping[str, Any]:
     if not isinstance(metadata, Mapping):
         raise ValueError("metadata must be a mapping")
-    frozen: dict[str, Any] = {}
-    for key, value in metadata.items():
-        if not isinstance(key, str):
-            raise ValueError("metadata keys must be strings")
-        if isinstance(value, float) and not isfinite(value):
-            raise ValueError("metadata numbers must be finite")
-        if value is not None and not isinstance(value, (str, bool, int, float)):
-            raise ValueError("causal feedback metadata values must be scalar JSON")
-        frozen[key] = value
-    return MappingProxyType(frozen)
+    if any(not isinstance(key, str) for key in metadata):
+        raise ValueError("metadata keys must be strings")
+    if set(metadata) != _CAUSAL_METADATA_KEYS:
+        raise ValueError("metadata must use the exact causal aggregate schema")
+
+    normalized = dict(metadata)
+    if normalized["credit_version"] != EVIDENCE_KEY:
+        raise ValueError(f"credit_version must be {EVIDENCE_KEY}")
+
+    trial_count = normalized["trial_count"]
+    if (
+        isinstance(trial_count, bool)
+        or not isinstance(trial_count, int)
+        or trial_count <= 0
+    ):
+        raise ValueError("trial_count must be a positive integer")
+
+    for name in _CAUSAL_NUMERIC_KEYS:
+        value = normalized[name]
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError(f"{name} must be a finite number")
+        try:
+            finite = isfinite(value)
+        except OverflowError:
+            finite = False
+        if not finite:
+            raise ValueError(f"{name} must be a finite number")
+    if normalized["standard_error"] < 0:
+        raise ValueError("standard_error must be non-negative")
+
+    for name in _CAUSAL_HASH_KEYS:
+        value = normalized[name]
+        if (
+            not isinstance(value, str)
+            or len(value) != 64
+            or any(character not in "0123456789abcdef" for character in value)
+        ):
+            raise ValueError(f"{name} must be lowercase SHA-256 hex")
+    return MappingProxyType(normalized)
+
+
+def _normalize_stored_metadata(metadata: object) -> dict[str, Any]:
+    try:
+        return _thaw_json(_freeze_metadata(metadata))
+    except (OverflowError, TypeError, ValueError) as exc:
+        raise CausalFeedbackConflictError(
+            "stored causal feedback metadata violates the causal aggregate schema"
+        ) from exc
 
 
 def _thaw_json(value: Mapping[str, Any]) -> dict[str, Any]:
