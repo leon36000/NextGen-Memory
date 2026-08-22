@@ -23,12 +23,13 @@ jobs:
         run: |
           python - <<'PY'
           from pathlib import Path
+          from textwrap import dedent
 
           path = Path('src/nextgen_memory/causal_feedback.py')
           source = path.read_text(encoding='utf-8')
 
           marker = '_ALLOWED_VERDICTS = frozenset(verdict.value for verdict in CreditVerdict)\n'
-          constants = '''
+          constants = dedent('''\
           _CAUSAL_METADATA_KEYS = frozenset(
               {
                   "credit_version",
@@ -52,16 +53,16 @@ jobs:
               "standard_error",
           )
           _CAUSAL_HASH_KEYS = ("context_set_hash", "continuation_set_hash")
-          '''
+          ''')
           if source.count(marker) != 1:
               raise SystemExit('unexpected verdict marker count')
           source = source.replace(marker, marker + constants, 1)
 
-          old_metadata_line = '        "metadata": _thaw_json(_freeze_metadata(row["metadata"])),\n'
-          new_metadata_line = '        "metadata": _normalize_stored_metadata(row["metadata"]),\n'
-          if source.count(old_metadata_line) != 1:
+          old_line = '        "metadata": _thaw_json(_freeze_metadata(row["metadata"])),\n'
+          new_line = '        "metadata": _normalize_stored_metadata(row["metadata"]),\n'
+          if source.count(old_line) != 1:
               raise SystemExit('unexpected stored metadata normalization line')
-          source = source.replace(old_metadata_line, new_metadata_line, 1)
+          source = source.replace(old_line, new_line, 1)
 
           start_marker = 'def _freeze_metadata('
           end_marker = '\ndef _thaw_json('
@@ -69,7 +70,8 @@ jobs:
               raise SystemExit('unexpected metadata helper structure')
           start = source.index(start_marker)
           end = source.index(end_marker, start)
-          replacement = '''def _freeze_metadata(metadata: object) -> Mapping[str, Any]:
+          replacement = dedent('''\
+          def _freeze_metadata(metadata: object) -> Mapping[str, Any]:
               if not isinstance(metadata, Mapping):
                   raise ValueError("metadata must be a mapping")
               if any(not isinstance(key, str) for key in metadata):
@@ -91,13 +93,15 @@ jobs:
 
               for name in _CAUSAL_NUMERIC_KEYS:
                   value = normalized[name]
-                  if (
-                      isinstance(value, bool)
-                      or not isinstance(value, (int, float))
-                      or not isfinite(float(value))
-                  ):
+                  if isinstance(value, bool) or not isinstance(value, (int, float)):
                       raise ValueError(f"{name} must be a finite number")
-              if float(normalized["standard_error"]) < 0:
+                  try:
+                      finite = isfinite(value)
+                  except OverflowError:
+                      finite = False
+                  if not finite:
+                      raise ValueError(f"{name} must be a finite number")
+              if normalized["standard_error"] < 0:
                   raise ValueError("standard_error must be non-negative")
 
               for name in _CAUSAL_HASH_KEYS:
@@ -114,17 +118,12 @@ jobs:
           def _normalize_stored_metadata(metadata: object) -> dict[str, Any]:
               try:
                   return _thaw_json(_freeze_metadata(metadata))
-              except (TypeError, ValueError) as exc:
+              except (OverflowError, TypeError, ValueError) as exc:
                   raise CausalFeedbackConflictError(
                       "stored causal feedback metadata violates the causal aggregate schema"
                   ) from exc
 
-          '''
-          # Strip the indentation introduced by this workflow's Python literal.
-          replacement = '\n'.join(
-              line[10:] if line.startswith('          ') else line
-              for line in replacement.splitlines()
-          )
+          ''')
           source = source[:start] + replacement + source[end:]
           path.write_text(source, encoding='utf-8')
           PY
@@ -132,6 +131,7 @@ jobs:
         run: |
           python - <<'PY'
           from pathlib import Path
+          from textwrap import dedent
 
           path = Path('migrations/neon/0005_causal_credit_feedback.sql')
           source = path.read_text(encoding='utf-8')
@@ -142,7 +142,8 @@ jobs:
               raise SystemExit('unexpected metadata SQL function structure')
           start = source.index(function_start)
           end = source.index(function_end, start)
-          function = '''CREATE OR REPLACE FUNCTION ngm.credit_metadata_is_safe(p_metadata jsonb)
+          function = dedent('''\
+          CREATE OR REPLACE FUNCTION ngm.credit_metadata_is_safe(p_metadata jsonb)
           RETURNS boolean
           LANGUAGE plpgsql
           IMMUTABLE
@@ -154,7 +155,7 @@ jobs:
               RETURN false;
             END IF;
 
-            IF jsonb_object_length(p_metadata) <> 10 THEN
+            IF NOT (jsonb_object_length(p_metadata) = 10) THEN
               RETURN false;
             END IF;
             IF NOT (p_metadata ?& ARRAY[
@@ -173,7 +174,7 @@ jobs:
             END IF;
             IF EXISTS (
               SELECT 1
-              FROM jsonb_object_keys(p_metadata) AS metadata_key
+              FROM jsonb_object_keys(p_metadata) AS keys(metadata_key)
               WHERE NOT (metadata_key = ANY (ARRAY[
                 'credit_version',
                 'trial_count',
@@ -229,23 +230,14 @@ jobs:
             RETURN true;
           END;
           $$;
-          '''
-          function = '\n'.join(
-              line[10:] if line.startswith('          ') else line
-              for line in function.splitlines()
-          )
+          ''')
           source = source[:start] + function + source[end:]
 
-          constraint_marker = '''
-          CREATE UNIQUE INDEX IF NOT EXISTS memory_feedback_causal_identity_uidx
-          '''
-          constraint_marker = '\n'.join(
-              line[10:] if line.startswith('          ') else line
-              for line in constraint_marker.splitlines()
-          )
-          if source.count(constraint_marker) != 1:
+          marker = '\nCREATE UNIQUE INDEX IF NOT EXISTS memory_feedback_causal_identity_uidx\n'
+          if source.count(marker) != 1:
               raise SystemExit('unexpected causal identity index marker')
-          new_constraint = '''
+          constraint = dedent('''\
+
           DO $$
           BEGIN
             IF NOT EXISTS (
@@ -266,15 +258,10 @@ jobs:
 
           ALTER TABLE ngm.memory_feedback
             VALIDATE CONSTRAINT memory_feedback_causal_metadata_v0_1_1_check;
-
-          '''
-          new_constraint = '\n'.join(
-              line[10:] if line.startswith('          ') else line
-              for line in new_constraint.splitlines()
-          )
+          ''')
           source = source.replace(
-              constraint_marker,
-              '\n' + new_constraint + 'CREATE UNIQUE INDEX IF NOT EXISTS memory_feedback_causal_identity_uidx\n',
+              marker,
+              constraint + marker,
               1,
           )
 
