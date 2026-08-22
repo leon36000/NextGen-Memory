@@ -1,0 +1,198 @@
+name: Verify and report AST no-stubs candidate
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+jobs:
+  verify:
+    if: github.event.pull_request.head.ref == 'bootstrap/verify-ast-no-stubs-contract-20260822'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - name: Resolve stable exact candidate
+        id: candidate
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 60); do
+            expected="$(git ls-remote origin refs/heads/ci/ast-no-stubs-contract-v0-20260822 | awk '{print $1}')"
+            test -n "$expected"
+            git fetch --depth=1 origin "$expected"
+            if ! git cat-file -e "$expected:.github/workflows/no-stubs-patch-once.yml" 2>/dev/null; then
+              git checkout --detach "$expected"
+              test "$(git rev-parse HEAD)" = "$expected"
+              printf 'sha=%s\n' "$expected" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            sleep 10
+          done
+          echo 'no-stubs transport workflow did not disappear' >&2
+          exit 1
+      - name: Prove final scope and workflow surface
+        run: |
+          git fetch --depth=1 origin feat/corrective-retrieval-preproduction-v0.9.3
+          git diff --name-only FETCH_HEAD...HEAD > /tmp/paths.txt
+          test "$(awk 'NF' /tmp/paths.txt | wc -l)" -eq 4
+          for path in \
+            scripts/verify_no_stubs.py \
+            tests/test_no_stubs.py \
+            tests/test_no_stubs_workflow.py \
+            .github/workflows/no-stubs.yml; do
+            grep -Fxq "$path" /tmp/paths.txt
+          done
+          grep -q 'paths:' .github/workflows/no-stubs.yml
+          grep -q 'contents: read' .github/workflows/no-stubs.yml
+          ! grep -Eq 'contents:[[:space:]]*write|secrets\.|git push' .github/workflows/no-stubs.yml
+          test ! -e .github/workflows/no-stubs-patch-once.yml
+          if git diff --unified=0 FETCH_HEAD...HEAD -- scripts/verify_no_stubs.py .github/workflows/no-stubs.yml | grep -E '^\+.*(pytest\.mark\.(skip|xfail)|@unittest\.skip|# *noqa|NotImplementedError|TODO|FIXME|pass$)' ; then
+            exit 1
+          fi
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - name: Install exact candidate
+        run: python -m pip install -e '.[dev]'
+      - name: Focused tests and production self-scan
+        run: |
+          python -m pytest -q tests/test_no_stubs.py tests/test_no_stubs_workflow.py
+          python scripts/verify_no_stubs.py src > /tmp/no-stubs-report.json
+          python - <<'PY'
+          import json
+          report=json.load(open('/tmp/no-stubs-report.json',encoding='utf-8'))
+          assert report == {'finding_count':0,'findings':[]}, report
+          PY
+      - name: Complete exact-candidate verification
+        run: |
+          ruff check .
+          python -m compileall -q src scripts
+          python -m pytest -q
+          git diff --check
+      - name: Store immutable evidence
+        run: |
+          mkdir -p /tmp/evidence
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          Path('/tmp/evidence/record.json').write_text(
+              json.dumps({
+                  'candidate_sha':'${{ steps.candidate.outputs.sha }}',
+                  'python_version':'${{ matrix.python-version }}',
+                  'focused':'green','production_findings':0,
+                  'ruff':'clean','compileall':'clean','full_suite':'green',
+                  'diff_check':'clean','workflow_surface':'read_only_path_filtered',
+                  'run_id':'${{ github.run_id }}',
+              },sort_keys=True,indent=2)+'\n',encoding='utf-8')
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: no-stubs-${{ matrix.python-version }}
+          path: /tmp/evidence/record.json
+          if-no-files-found: error
+
+  report:
+    if: github.event.pull_request.head.ref == 'bootstrap/verify-ast-no-stubs-contract-20260822'
+    needs: verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: /tmp/records
+          pattern: no-stubs-*
+      - name: Reconcile matrix evidence
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          records=[json.loads(p.read_text(encoding='utf-8')) for p in Path('/tmp/records').glob('**/record.json')]
+          if len(records)!=2: raise SystemExit(f'expected two records, got {len(records)}')
+          if sorted(r['python_version'] for r in records)!=['3.12','3.13']: raise SystemExit('incomplete matrix')
+          shas={r['candidate_sha'] for r in records}
+          if len(shas)!=1: raise SystemExit(f'candidate moved: {shas}')
+          for r in records:
+              expected={
+                  'focused':'green','production_findings':0,'ruff':'clean','compileall':'clean',
+                  'full_suite':'green','diff_check':'clean','workflow_surface':'read_only_path_filtered',
+              }
+              for key,value in expected.items():
+                  if r[key]!=value: raise SystemExit(f'failed evidence {key}')
+          Path('/tmp/summary.json').write_text(json.dumps({'candidate_sha':next(iter(shas)),'run_id':records[0]['run_id']},sort_keys=True,indent=2)+'\n',encoding='utf-8')
+          PY
+      - name: Publish exact evidence and blind Sol packet
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          python - <<'PY'
+          import json, os, subprocess
+          repo=os.environ['REPO']; summary=json.load(open('/tmp/summary.json',encoding='utf-8'))
+          rows=json.loads(subprocess.run(
+              ['gh','pr','list','--repo',repo,'--state','open','--head','ci/ast-no-stubs-contract-v0-20260822','--json','number,headRefOid'],
+              check=True,text=True,capture_output=True).stdout)
+          if len(rows)!=1 or rows[0]['headRefOid']!=summary['candidate_sha']:
+              raise SystemExit('candidate PR missing or moved')
+          pr=rows[0]
+          packet=f'''## Exact-SHA verification and blind GPT-5.6 Sol review request
+
+Return exactly one verdict: `APPROVE`, `CHANGES_REQUIRED`, or `BLOCKED_BY_EVIDENCE`.
+
+### Boundary
+
+- Candidate SHA: `{summary['candidate_sha']}`
+- Candidate movement invalidates this request.
+
+### Exact scope
+
+- `scripts/verify_no_stubs.py`
+- `tests/test_no_stubs.py`
+- `tests/test_no_stubs_workflow.py`
+- `.github/workflows/no-stubs.yml`
+
+### Proven contract
+
+- AST/token scanner rejects concrete pass/ellipsis bodies, `raise NotImplementedError`, TODO and FIXME production comments;
+- narrowly permits Protocol methods, abstract methods, overload signatures and exception-type declarations;
+- recognizes direct and aliased typing/abc imports without executing analyzed code;
+- scans nested concrete scopes, fails closed on syntax/read errors, and emits deterministic privacy-safe file/line/kind/symbol JSON without source text;
+- Python 3.12 and 3.13 verify the same immutable SHA;
+- focused adversarial tests, production self-scan with zero findings, Ruff, compileall, full pytest and diff-check pass on both;
+- workflow is path-filtered and read-only, with no secrets or write/push surface;
+- no source annotation, blanket allowlist, runtime dependency, production rewrite or package API change;
+- verification run: {os.environ['RUN_URL']}.
+
+### Review focus
+
+- import alias resolution and local Protocol/exception inheritance;
+- nested-scope duplicate/missed findings;
+- distinction between legitimate abstraction and concrete stub;
+- TODO/FIXME tokenization without string false positives;
+- privacy and determinism of report paths/symbols;
+- whether the narrow exclusions can be abused to hide a concrete stub;
+- proportional workflow triggers and current production-tree coverage.
+
+Inspect the exact candidate and tests; do not rely on this summary. No merge without genuine independent Sol `APPROVE` on the unchanged SHA.'''
+          subprocess.run(['gh','pr','comment',str(pr['number']),'--repo',repo,'--body',packet],check=True)
+          issue_rows=json.loads(subprocess.run(
+              ['gh','issue','list','--repo',repo,'--state','open','--search','AST-aware no-stub contract in:title','--json','number'],
+              check=True,text=True,capture_output=True).stdout)
+          if len(issue_rows)==1:
+              subprocess.run(['gh','issue','comment',str(issue_rows[0]['number']),'--repo',repo,'--body',f"Candidate `{summary['candidate_sha']}` passed exact Python 3.12/3.13 verification and production self-scan with zero findings. Blind Sol packet is on PR #{pr['number']}; unmerged."],check=True)
+          subprocess.run(['gh','issue','comment','23','--repo',repo,'--body',f"AST no-stubs candidate `{summary['candidate_sha']}` passed exact cross-version verification with zero production findings. Blind Sol packet posted on PR #{pr['number']}; no merge. Run: {os.environ['RUN_URL']}"],check=True)
+          PY
+      - name: Close verifier without merge
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: gh pr close "$PR_NUMBER" --repo "$REPO" --comment 'Exact no-stubs verification completed. Evidence copied to candidate PR; closed without merge.'
