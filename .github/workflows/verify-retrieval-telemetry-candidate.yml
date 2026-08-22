@@ -1,0 +1,36 @@
+name: Verify retrieval telemetry candidate SHA
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: d2bf3c75f7cf23e059677234342c10f4be304799
+          fetch-depth: 1
+      - name: Prove exact checkout
+        run: test "$(git rev-parse HEAD)" = "d2bf3c75f7cf23e059677234342c10f4be304799"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - name: Install project and development tools
+        run: python -m pip install -e '.[dev]'
+      - name: Lint exact candidate
+        run: ruff check .
+      - name: Focused exact candidate tests
+        run: python -m pytest -q tests/test_retrieval_telemetry.py
+      - name: Full exact candidate suite
+        run: python -m pytest -q
+      - name: Diff integrity
+        run: git diff --check
