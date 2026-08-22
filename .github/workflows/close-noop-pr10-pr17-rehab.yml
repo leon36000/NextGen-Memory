@@ -1,0 +1,164 @@
+name: Close no-op PR10 and PR17 rehabilitation PRs
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+jobs:
+  prove-and-close:
+    if: github.event.pull_request.head.ref == 'bootstrap/close-noop-pr10-pr17-rehab-20260822'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Prove exact evidence and byte-identical product trees
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import re
+          import subprocess
+          from pathlib import Path
+
+          repo = os.environ['REPO']
+          tasks = {
+              10: 'fix/pr10-exact-ci-rehabilitation-20260822',
+              17: 'fix/pr17-exact-ci-rehabilitation-20260822',
+          }
+
+          def run(args):
+              return subprocess.run(args, check=True, text=True, capture_output=True).stdout
+
+          def gh_json(args):
+              return json.loads(run(args))
+
+          marker = '## Exact-SHA rehabilitation verification'
+          sha_pattern = re.compile(r'Candidate SHA: `([0-9a-f]{40})`')
+          results = {}
+
+          for original_number, branch in tasks.items():
+              original = gh_json([
+                  'gh', 'pr', 'view', str(original_number), '--repo', repo,
+                  '--json', 'headRefOid,headRefName,state,title,url',
+              ])
+              rows = gh_json([
+                  'gh', 'pr', 'list', '--repo', repo, '--state', 'open',
+                  '--head', branch, '--json', 'number,headRefOid,state,url',
+              ])
+              if len(rows) != 1:
+                  raise SystemExit(
+                      f'expected one open rehabilitation PR for original #{original_number}, got {rows}'
+                  )
+              rehab = rows[0]
+              comments = gh_json([
+                  'gh', 'api', '--paginate',
+                  f'repos/{repo}/issues/{rehab["number"]}/comments?per_page=100',
+              ])
+              evidence = [
+                  comment['body']
+                  for comment in comments
+                  if marker in comment.get('body', '')
+              ]
+              if len(evidence) != 1:
+                  raise SystemExit(
+                      f'missing or ambiguous exact evidence on rehabilitation PR #{rehab["number"]}'
+                  )
+              match = sha_pattern.search(evidence[0])
+              if not match:
+                  raise SystemExit('candidate SHA is missing from exact evidence')
+              verified_sha = match.group(1)
+              if verified_sha != rehab['headRefOid']:
+                  raise SystemExit(
+                      f'rehabilitation ref moved after verification: {rehab["headRefOid"]} != {verified_sha}'
+                  )
+
+              original_commit = gh_json([
+                  'gh', 'api', f'repos/{repo}/git/commits/{original["headRefOid"]}'
+              ])
+              rehab_commit = gh_json([
+                  'gh', 'api', f'repos/{repo}/git/commits/{verified_sha}'
+              ])
+              original_tree = original_commit['tree']['sha']
+              rehab_tree = rehab_commit['tree']['sha']
+              if original_tree != rehab_tree:
+                  raise SystemExit(
+                      f'rehabilitation PR #{rehab["number"]} contains a product-tree change'
+                  )
+
+              files = gh_json([
+                  'gh', 'api', '--paginate',
+                  f'repos/{repo}/pulls/{rehab["number"]}/files?per_page=100',
+              ])
+              if files:
+                  raise SystemExit(
+                      f'rehabilitation PR #{rehab["number"]} still exposes changed files'
+                  )
+
+              results[str(original_number)] = {
+                  'original_head_sha': original['headRefOid'],
+                  'rehabilitation_sha': verified_sha,
+                  'tree_sha': original_tree,
+                  'rehabilitation_pr': rehab['number'],
+                  'rehabilitation_branch': branch,
+              }
+
+          Path('/tmp/noop_rehab.json').write_text(
+              json.dumps(results, sort_keys=True, indent=2) + '\n',
+              encoding='utf-8',
+          )
+          PY
+      - name: Publish classification and close rehabilitation PRs without merge
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import subprocess
+
+          repo = os.environ['REPO']
+          data = json.load(open('/tmp/noop_rehab.json', encoding='utf-8'))
+          for original_number_text, record in data.items():
+              original_number = int(original_number_text)
+              rehab_number = record['rehabilitation_pr']
+              body = f'''## Rehabilitation classification: no product repair required
+
+The isolated rehabilitation branch was exact-SHA verified, and its Git tree is byte-identical to the current original PR head.
+
+- Original head: `{record['original_head_sha']}`
+- Rehabilitation SHA: `{record['rehabilitation_sha']}`
+- Shared tree: `{record['tree_sha']}`
+- Exact Python 3.12/3.13 evidence is preserved on rehabilitation PR #{rehab_number}
+- Classification run: {os.environ['RUN_URL']}
+
+Conclusion: the historical red/action-required state was an evidence/CI-history problem, not a current product-code defect. No product commit is required. The rehabilitation PR is being closed **without merge**. The original PR remains unmerged and still requires its own exact-SHA blind GPT-5.6 Sol review before any integration.'''
+              subprocess.run(
+                  ['gh', 'pr', 'comment', str(original_number), '--repo', repo, '--body', body],
+                  check=True,
+              )
+              subprocess.run(
+                  ['gh', 'pr', 'close', str(rehab_number), '--repo', repo,
+                   '--comment', 'Exact verification proved this rehabilitation branch has the same product tree as the original PR head. Closed without merge; evidence retained.'],
+                  check=True,
+              )
+          PY
+      - name: Record orchestrator checkpoint
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: gh issue comment 23 --repo "$REPO" --body "## No-op rehabilitation cleanup\n\nPR #10 and PR #17 rehabilitation branches were proven byte-identical to the original product trees and their rehabilitation PRs were closed without merge. Original PRs remain unmerged and Sol-pending. Run: $RUN_URL."
+      - name: Close this control PR without merge
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: gh pr close "$PR_NUMBER" --repo "$REPO" --comment 'No-op rehabilitation classification completed; control PR closed without merge.'
