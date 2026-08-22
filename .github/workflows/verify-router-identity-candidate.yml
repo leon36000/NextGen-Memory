@@ -1,0 +1,36 @@
+name: Verify router identity exact candidate SHA
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: b336a73d49da4c7589ab2e63704ef3a26b07ee89
+          fetch-depth: 1
+      - name: Prove exact checkout
+        run: test "$(git rev-parse HEAD)" = "b336a73d49da4c7589ab2e63704ef3a26b07ee89"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - name: Install project and development tools
+        run: python -m pip install -e '.[dev]'
+      - name: Lint exact candidate
+        run: ruff check .
+      - name: Focused exact candidate tests
+        run: python -m pytest -q tests/test_router.py tests/test_router_identity.py
+      - name: Full exact candidate suite
+        run: python -m pytest -q
+      - name: Diff integrity
+        run: git diff --check
