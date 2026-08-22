@@ -1,0 +1,90 @@
+name: PR 10 exact-stack rehabilitation
+
+on:
+  pull_request:
+
+permissions:
+  contents: write
+
+jobs:
+  diagnose-and-repair:
+    if: github.event.pull_request.head.ref == 'fix/pr10-ci-rehabilitation-20260822'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/pr10-ci-rehabilitation-20260822
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Prove exact stack
+        run: |
+          test "$(git merge-base HEAD 4dde625a2c8af82f5f36dc3923bf86debbb4dd5b)" = "4dde625a2c8af82f5f36dc3923bf86debbb4dd5b"
+          test "$(git rev-parse HEAD^)" = "22284e3b0928f270f4e862f563dfe79fee42d434" || true
+      - name: Install project and development tools
+        run: python -m pip install -e '.[dev]'
+      - name: Capture baseline
+        id: baseline
+        shell: bash
+        run: |
+          set +e
+          ruff check . > /tmp/ruff-before.txt 2>&1
+          ruff_rc=$?
+          python -m pytest -q > /tmp/pytest-before.txt 2>&1
+          pytest_rc=$?
+          set -e
+          echo "ruff_rc=$ruff_rc" >> "$GITHUB_OUTPUT"
+          echo "pytest_rc=$pytest_rc" >> "$GITHUB_OUTPUT"
+          printf 'baseline ruff=%s pytest=%s\n' "$ruff_rc" "$pytest_rc"
+          tail -n 160 /tmp/ruff-before.txt || true
+          tail -n 160 /tmp/pytest-before.txt || true
+      - name: Apply only Ruff-safe fixes to PR-owned Python files
+        if: steps.baseline.outputs.ruff_rc != '0'
+        shell: bash
+        run: |
+          mapfile -t files < <(git diff --name-only 4dde625a2c8af82f5f36dc3923bf86debbb4dd5b...HEAD -- '*.py')
+          test "${#files[@]}" -gt 0
+          printf '%s\n' "${files[@]}"
+          ruff check --fix -- "${files[@]}"
+          git diff --check
+      - name: Reject semantic or scope-expanding automatic edits
+        shell: bash
+        run: |
+          changed=$(git diff --name-only)
+          if [ -n "$changed" ]; then
+            printf '%s\n' "$changed"
+            while IFS= read -r path; do
+              case "$path" in
+                *.py) ;;
+                *) echo "automatic repair touched non-Python path: $path" >&2; exit 1 ;;
+              esac
+              git diff -- "$path" | grep -E '^[-+].*(pass$|NotImplementedError|pytest\.skip|pytest\.mark\.xfail|# noqa)' && {
+                echo "forbidden weakening detected in $path" >&2
+                exit 1
+              } || true
+            done <<< "$changed"
+          fi
+      - name: Verify candidate after mechanical repair
+        shell: bash
+        run: |
+          ruff check .
+          python -m pytest -q
+          python -m compileall -q src
+          git diff --check
+      - name: Remove transport workflow
+        run: rm .github/workflows/pr10-rehabilitation-once.yml
+      - name: Commit only a fully verified mechanical repair
+        shell: bash
+        run: |
+          git add -u .github/workflows
+          git add -u
+          if git diff --cached --quiet; then
+            echo 'PR 10 exact head is already green; no repair commit required.'
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'fix: rehabilitate Neon ledger adapter CI mechanically'
+          git push origin HEAD:fix/pr10-ci-rehabilitation-20260822
