@@ -225,6 +225,18 @@ def test_malformed_top_level_schema_fails_closed(
             "safe repository-relative",
         ),
         (
+            lambda entries: entries[0].update(
+                {"path": "migrations/neon/./0001_alpha.sql"}
+            ),
+            "safe repository-relative",
+        ),
+        (
+            lambda entries: entries[0].update(
+                {"path": "migrations//neon/0001_alpha.sql"}
+            ),
+            "safe repository-relative",
+        ),
+        (
             lambda entries: entries[0].update({"path": "migrations\\neon\\0001_alpha.sql"}),
             "safe repository-relative",
         ),

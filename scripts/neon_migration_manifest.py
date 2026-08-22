@@ -176,6 +176,7 @@ def _is_safe_migration_path(path: str) -> bool:
         and "." not in pure_path.parts
         and pure_path.suffix == ".sql"
         and bool(pure_path.name)
+        and pure_path.as_posix() == path
     )
 
 
