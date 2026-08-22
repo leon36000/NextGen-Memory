@@ -1,0 +1,77 @@
+name: Publish PR 10 rehabilitation evidence
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/pr10-ci-rehabilitation-20260822
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Install
+        run: python -m pip install -e '.[dev]'
+      - name: Diagnose exact branch
+        id: diagnose
+        shell: bash
+        run: |
+          set +e
+          ruff check . >/tmp/ruff.txt 2>&1
+          ruff_rc=$?
+          python -m pytest -q >/tmp/pytest.txt 2>&1
+          pytest_rc=$?
+          python -m compileall -q src >/tmp/compileall.txt 2>&1
+          compile_rc=$?
+          git diff --check >/tmp/diffcheck.txt 2>&1
+          diff_rc=$?
+          set -e
+          head_sha=$(git rev-parse HEAD)
+          workflow_state=removed
+          test -e .github/workflows/pr10-rehabilitation-once.yml && workflow_state=present
+          {
+            echo 'body<<EOF'
+            echo '## Automated exact-stack diagnostic'
+            echo
+            echo "- head: \`$head_sha\`"
+            echo '- expected base: `4dde625a2c8af82f5f36dc3923bf86debbb4dd5b`'
+            echo "- Ruff exit: \`$ruff_rc\`"
+            echo "- pytest exit: \`$pytest_rc\`"
+            echo "- compileall exit: \`$compile_rc\`"
+            echo "- diff-check exit: \`$diff_rc\`"
+            echo "- one-shot transport workflow: \`$workflow_state\`"
+            echo
+            echo '### Ruff tail'
+            echo '```text'
+            tail -n 80 /tmp/ruff.txt
+            echo '```'
+            echo
+            echo '### Pytest tail'
+            echo '```text'
+            tail -n 120 /tmp/pytest.txt
+            echo '```'
+            echo
+            if [ "$ruff_rc" -eq 0 ] && [ "$pytest_rc" -eq 0 ] && [ "$compile_rc" -eq 0 ] && [ "$diff_rc" -eq 0 ]; then
+              echo '**Classification: GREEN exact branch.** No semantic repair is required.'
+            elif [ "$ruff_rc" -ne 0 ] && [ "$pytest_rc" -eq 0 ]; then
+              echo '**Classification: lint-only candidate.** Only a mechanical, full-suite-verified repair is admissible.'
+            else
+              echo '**Classification: semantic or integration failure.** No automatic semantic commit is authorized; root-cause debugging is required.'
+            fi
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
+      - name: Publish diagnostic to PR 10
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BODY: ${{ steps.diagnose.outputs.body }}
+        run: gh api repos/${{ github.repository }}/issues/10/comments -f body="$BODY"
