@@ -1,0 +1,38 @@
+name: Verify PR 10 exact head
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 22284e3b0928f270f4e862f563dfe79fee42d434
+          fetch-depth: 1
+      - name: Prove exact checkout
+        run: test "$(git rev-parse HEAD)" = "22284e3b0928f270f4e862f563dfe79fee42d434"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - name: Install
+        run: python -m pip install -e '.[dev]'
+      - name: Ruff
+        run: ruff check .
+      - name: Full suite
+        run: python -m pytest -q
+      - name: Compile
+        run: python -m compileall -q src
+      - name: Diff integrity
+        run: git diff --check
