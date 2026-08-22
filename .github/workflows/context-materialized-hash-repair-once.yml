@@ -35,6 +35,8 @@ jobs:
                   '            "content_hash": hashlib.sha256(b"first").hexdigest(),\n',
               '            "content_hash": content_hash(20_001, 1),\n':
                   '            "content_hash": hashlib.sha256(b"second").hexdigest(),\n',
+              '        f"property evidence {case_index}:{item_index}".encode("utf-8")\n':
+                  '        f"property evidence {case_index}:{item_index}".encode()\n',
           }
           for old, new in replacements.items():
               if old in source:
