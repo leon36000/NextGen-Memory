@@ -1,0 +1,85 @@
+name: Verify PR 17 and PR 19 exact heads
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - pr: 17
+            sha: 67e7c0bc05165c1676541bd3ce7e648e3df54dc7
+            base: d00992d20f970717268a8a7355f19ab487def4e9
+            python-version: '3.12'
+          - pr: 17
+            sha: 67e7c0bc05165c1676541bd3ce7e648e3df54dc7
+            base: d00992d20f970717268a8a7355f19ab487def4e9
+            python-version: '3.13'
+          - pr: 19
+            sha: bdc7c43b3ed85821b025e2e9b25d35199ddd30fd
+            base: 67e7c0bc05165c1676541bd3ce7e648e3df54dc7
+            python-version: '3.12'
+          - pr: 19
+            sha: bdc7c43b3ed85821b025e2e9b25d35199ddd30fd
+            base: 67e7c0bc05165c1676541bd3ce7e648e3df54dc7
+            python-version: '3.13'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ matrix.sha }}
+          fetch-depth: 0
+      - name: Prove exact checkout and stack
+        run: |
+          test "$(git rev-parse HEAD)" = "${{ matrix.sha }}"
+          test "$(git merge-base HEAD ${{ matrix.base }})" = "${{ matrix.base }}"
+      - name: Inventory exact diff
+        id: inventory
+        shell: bash
+        run: |
+          files=$(git diff --name-only ${{ matrix.base }}...HEAD)
+          count=$(printf '%s\n' "$files" | sed '/^$/d' | wc -l)
+          production=$(printf '%s\n' "$files" | grep -Ec '^(src/|migrations/)' || true)
+          tests=$(printf '%s\n' "$files" | grep -Ec '^tests/' || true)
+          docs=$(printf '%s\n' "$files" | grep -Ec '^(docs/|README\.md$)' || true)
+          echo "count=$count" >> "$GITHUB_OUTPUT"
+          echo "production=$production" >> "$GITHUB_OUTPUT"
+          echo "tests=$tests" >> "$GITHUB_OUTPUT"
+          echo "docs=$docs" >> "$GITHUB_OUTPUT"
+          printf '%s\n' "$files"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - name: Install
+        run: python -m pip install -e '.[dev]'
+      - name: Ruff
+        run: ruff check .
+      - name: Full suite
+        run: python -m pytest -q
+      - name: Compile
+        run: python -m compileall -q src
+      - name: Diff integrity
+        run: git diff --check
+      - name: Publish exact-head result
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ matrix.pr }}
+          SHA: ${{ matrix.sha }}
+          PYTHON: ${{ matrix.python-version }}
+          STATUS: ${{ job.status }}
+          COUNT: ${{ steps.inventory.outputs.count }}
+          PRODUCTION: ${{ steps.inventory.outputs.production }}
+          TESTS: ${{ steps.inventory.outputs.tests }}
+          DOCS: ${{ steps.inventory.outputs.docs }}
+        run: |
+          body=$(printf 'Exact-head verification: SHA `%s`, Python `%s`, status `%s`; changed files `%s` (production/migrations `%s`, tests `%s`, docs `%s`).' "$SHA" "$PYTHON" "$STATUS" "$COUNT" "$PRODUCTION" "$TESTS" "$DOCS")
+          gh api repos/${{ github.repository }}/issues/$PR/comments -f body="$body"
