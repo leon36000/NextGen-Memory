@@ -1,0 +1,607 @@
+name: One-shot AST no-stubs implementation
+
+on:
+  pull_request:
+
+permissions:
+  contents: write
+
+jobs:
+  implement-and-verify:
+    if: github.event.pull_request.head.ref == 'ci/ast-no-stubs-contract-v0-20260822'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ci/ast-no-stubs-contract-v0-20260822
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Record RED evidence
+        shell: bash
+        run: |
+          set +e
+          python -m pytest -q tests/test_no_stubs.py tests/test_no_stubs_workflow.py > /tmp/no_stubs_red.log 2>&1
+          printf '%s' "$?" > /tmp/no_stubs_red_status
+          set -e
+      - name: Implement dependency-free AST scanner
+        run: |
+          mkdir -p scripts
+          cat > scripts/verify_no_stubs.py <<'PYCODE'
+          """Detect concrete implementation stubs in production Python source."""
+
+          from __future__ import annotations
+
+          import argparse
+          import ast
+          import io
+          import json
+          import re
+          import tokenize
+          from dataclasses import asdict, dataclass
+          from pathlib import Path
+          from typing import Iterable, Sequence
+
+          _COMMENT_MARKERS = {
+              "todo": "todo_comment",
+              "fixme": "fixme_comment",
+          }
+          _BUILTIN_EXCEPTION_NAMES = frozenset(
+              {
+                  "BaseException",
+                  "Exception",
+                  "ArithmeticError",
+                  "AssertionError",
+                  "AttributeError",
+                  "BufferError",
+                  "EOFError",
+                  "ImportError",
+                  "LookupError",
+                  "MemoryError",
+                  "NameError",
+                  "OSError",
+                  "ReferenceError",
+                  "RuntimeError",
+                  "StopAsyncIteration",
+                  "StopIteration",
+                  "SyntaxError",
+                  "SystemError",
+                  "TypeError",
+                  "ValueError",
+                  "Warning",
+              }
+          )
+
+
+          @dataclass(frozen=True, slots=True, order=True)
+          class Finding:
+              path: str
+              line: int
+              column: int
+              kind: str
+              symbol: str
+
+              def to_dict(self) -> dict[str, object]:
+                  return asdict(self)
+
+              def to_json(self) -> str:
+                  return json.dumps(
+                      self.to_dict(),
+                      ensure_ascii=False,
+                      sort_keys=True,
+                      separators=(",", ":"),
+                  )
+
+
+          @dataclass(frozen=True, slots=True)
+          class _Aliases:
+              protocol_names: frozenset[str]
+              protocol_modules: frozenset[str]
+              abstract_names: frozenset[str]
+              abstract_modules: frozenset[str]
+              overload_names: frozenset[str]
+              overload_modules: frozenset[str]
+
+
+          def _qualified_name(node: ast.expr) -> str | None:
+              parts: list[str] = []
+              current: ast.expr = node
+              while isinstance(current, ast.Attribute):
+                  parts.append(current.attr)
+                  current = current.value
+              if isinstance(current, ast.Name):
+                  parts.append(current.id)
+                  return ".".join(reversed(parts))
+              return None
+
+
+          def _aliases(tree: ast.Module) -> _Aliases:
+              protocol_names = {"Protocol"}
+              protocol_modules = {"typing", "typing_extensions"}
+              abstract_names = {"abstractmethod"}
+              abstract_modules = {"abc"}
+              overload_names = {"overload"}
+              overload_modules = {"typing", "typing_extensions"}
+
+              for node in tree.body:
+                  if isinstance(node, ast.Import):
+                      for alias in node.names:
+                          bound = alias.asname or alias.name.split(".")[0]
+                          if alias.name in {"typing", "typing_extensions"}:
+                              protocol_modules.add(bound)
+                              overload_modules.add(bound)
+                          if alias.name == "abc":
+                              abstract_modules.add(bound)
+                  elif isinstance(node, ast.ImportFrom):
+                      module = node.module or ""
+                      for alias in node.names:
+                          bound = alias.asname or alias.name
+                          if module in {"typing", "typing_extensions"}:
+                              if alias.name == "Protocol":
+                                  protocol_names.add(bound)
+                              elif alias.name == "overload":
+                                  overload_names.add(bound)
+                          elif module == "abc" and alias.name == "abstractmethod":
+                              abstract_names.add(bound)
+              return _Aliases(
+                  protocol_names=frozenset(protocol_names),
+                  protocol_modules=frozenset(protocol_modules),
+                  abstract_names=frozenset(abstract_names),
+                  abstract_modules=frozenset(abstract_modules),
+                  overload_names=frozenset(overload_names),
+                  overload_modules=frozenset(overload_modules),
+              )
+
+
+          def _matches_reference(
+              node: ast.expr,
+              *,
+              direct_names: frozenset[str],
+              module_aliases: frozenset[str],
+              attribute: str,
+          ) -> bool:
+              name = _qualified_name(node)
+              if name is None:
+                  return False
+              if name in direct_names:
+                  return True
+              if "." not in name:
+                  return False
+              module, tail = name.rsplit(".", 1)
+              return module in module_aliases and tail == attribute
+
+
+          def _body_without_docstring(body: Sequence[ast.stmt]) -> list[ast.stmt]:
+              remaining = list(body)
+              if (
+                  remaining
+                  and isinstance(remaining[0], ast.Expr)
+                  and isinstance(remaining[0].value, ast.Constant)
+                  and isinstance(remaining[0].value.value, str)
+              ):
+                  remaining.pop(0)
+              return remaining
+
+
+          def _is_stub_body(body: Sequence[ast.stmt]) -> bool:
+              remaining = _body_without_docstring(body)
+              if not remaining:
+                  return True
+              if len(remaining) != 1:
+                  return False
+              statement = remaining[0]
+              if isinstance(statement, ast.Pass):
+                  return True
+              return (
+                  isinstance(statement, ast.Expr)
+                  and isinstance(statement.value, ast.Constant)
+                  and statement.value.value is Ellipsis
+              )
+
+
+          def _class_sets(
+              tree: ast.Module,
+              aliases: _Aliases,
+          ) -> tuple[frozenset[str], frozenset[str]]:
+              classes = [node for node in ast.walk(tree) if isinstance(node, ast.ClassDef)]
+              protocols: set[str] = set()
+              exceptions: set[str] = set(_BUILTIN_EXCEPTION_NAMES)
+              changed = True
+              while changed:
+                  changed = False
+                  for node in classes:
+                      base_names = {
+                          name
+                          for base in node.bases
+                          if (name := _qualified_name(base)) is not None
+                      }
+                      is_protocol = any(
+                          name in protocols
+                          or name.rsplit(".", 1)[-1] in protocols
+                          or _matches_reference(
+                              base,
+                              direct_names=aliases.protocol_names,
+                              module_aliases=aliases.protocol_modules,
+                              attribute="Protocol",
+                          )
+                          for name, base in (
+                              (name, base)
+                              for base in node.bases
+                              if (name := _qualified_name(base)) is not None
+                          )
+                      )
+                      if is_protocol and node.name not in protocols:
+                          protocols.add(node.name)
+                          changed = True
+                      if any(
+                          name in exceptions or name.rsplit(".", 1)[-1] in exceptions
+                          for name in base_names
+                      ) and node.name not in exceptions:
+                          exceptions.add(node.name)
+                          changed = True
+              return frozenset(protocols), frozenset(exceptions)
+
+
+          def _decorator_matches(
+              decorators: Sequence[ast.expr],
+              *,
+              direct_names: frozenset[str],
+              module_aliases: frozenset[str],
+              attribute: str,
+          ) -> bool:
+              return any(
+                  _matches_reference(
+                      decorator.func if isinstance(decorator, ast.Call) else decorator,
+                      direct_names=direct_names,
+                      module_aliases=module_aliases,
+                      attribute=attribute,
+                  )
+                  for decorator in decorators
+              )
+
+
+          class _ConcreteRaiseVisitor(ast.NodeVisitor):
+              def __init__(self) -> None:
+                  self.raises: list[ast.Raise] = []
+
+              def visit_Raise(self, node: ast.Raise) -> None:
+                  target = node.exc
+                  if isinstance(target, ast.Call):
+                      target = target.func
+                  if _qualified_name(target) == "NotImplementedError":
+                      self.raises.append(node)
+
+              def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+                  return None
+
+              def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+                  return None
+
+              def visit_ClassDef(self, node: ast.ClassDef) -> None:
+                  return None
+
+              def visit_Lambda(self, node: ast.Lambda) -> None:
+                  return None
+
+
+          class _Scanner(ast.NodeVisitor):
+              def __init__(
+                  self,
+                  *,
+                  path: str,
+                  aliases: _Aliases,
+                  protocol_classes: frozenset[str],
+                  exception_classes: frozenset[str],
+              ) -> None:
+                  self.path = path
+                  self.aliases = aliases
+                  self.protocol_classes = protocol_classes
+                  self.exception_classes = exception_classes
+                  self.scope: list[str] = []
+                  self.class_stack: list[str] = []
+                  self.findings: list[Finding] = []
+
+              def _symbol(self, name: str) -> str:
+                  return ".".join((*self.scope, name)) if self.scope else name
+
+              def visit_ClassDef(self, node: ast.ClassDef) -> None:
+                  symbol = self._symbol(node.name)
+                  base_tails = {
+                      name.rsplit(".", 1)[-1]
+                      for base in node.bases
+                      if (name := _qualified_name(base)) is not None
+                  }
+                  is_protocol = node.name in self.protocol_classes or bool(
+                      base_tails & self.protocol_classes
+                  )
+                  is_exception = node.name in self.exception_classes or bool(
+                      base_tails & self.exception_classes
+                  )
+                  if _is_stub_body(node.body) and not is_protocol and not is_exception:
+                      self.findings.append(
+                          Finding(
+                              path=self.path,
+                              line=node.lineno,
+                              column=node.col_offset,
+                              kind="class_stub",
+                              symbol=symbol,
+                          )
+                      )
+                  self.scope.append(node.name)
+                  self.class_stack.append(node.name)
+                  self.generic_visit(node)
+                  self.class_stack.pop()
+                  self.scope.pop()
+
+              def _visit_function(
+                  self,
+                  node: ast.FunctionDef | ast.AsyncFunctionDef,
+              ) -> None:
+                  symbol = self._symbol(node.name)
+                  parent_protocol = bool(
+                      self.class_stack
+                      and self.class_stack[-1] in self.protocol_classes
+                  )
+                  abstract = _decorator_matches(
+                      node.decorator_list,
+                      direct_names=self.aliases.abstract_names,
+                      module_aliases=self.aliases.abstract_modules,
+                      attribute="abstractmethod",
+                  )
+                  overload = _decorator_matches(
+                      node.decorator_list,
+                      direct_names=self.aliases.overload_names,
+                      module_aliases=self.aliases.overload_modules,
+                      attribute="overload",
+                  )
+                  allowed_stub = parent_protocol or abstract or overload
+                  if _is_stub_body(node.body) and not allowed_stub:
+                      self.findings.append(
+                          Finding(
+                              path=self.path,
+                              line=node.lineno,
+                              column=node.col_offset,
+                              kind="function_stub",
+                              symbol=symbol,
+                          )
+                      )
+                  if not allowed_stub:
+                      visitor = _ConcreteRaiseVisitor()
+                      for statement in node.body:
+                          visitor.visit(statement)
+                      for raised in visitor.raises:
+                          self.findings.append(
+                              Finding(
+                                  path=self.path,
+                                  line=raised.lineno,
+                                  column=raised.col_offset,
+                                  kind="not_implemented_error",
+                                  symbol=symbol,
+                              )
+                          )
+                  self.scope.append(node.name)
+                  self.generic_visit(node)
+                  self.scope.pop()
+
+              def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+                  self._visit_function(node)
+
+              def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+                  self._visit_function(node)
+
+
+          def _comment_findings(source: str, *, path: str) -> Iterable[Finding]:
+              try:
+                  tokens = tokenize.generate_tokens(io.StringIO(source).readline)
+                  for token in tokens:
+                      if token.type != tokenize.COMMENT:
+                          continue
+                      lowered = token.string.lower()
+                      for marker, kind in _COMMENT_MARKERS.items():
+                          if re.search(rf"\b{marker}\b", lowered):
+                              yield Finding(
+                                  path=path,
+                                  line=token.start[0],
+                                  column=token.start[1],
+                                  kind=kind,
+                                  symbol="<comment>",
+                              )
+              except (IndentationError, tokenize.TokenError):
+                  return
+
+
+          def scan_source(source: str, *, path: str) -> tuple[Finding, ...]:
+              try:
+                  tree = ast.parse(source, filename=path)
+              except SyntaxError as exc:
+                  return (
+                      Finding(
+                          path=path,
+                          line=max(exc.lineno or 1, 1),
+                          column=max((exc.offset or 1) - 1, 0),
+                          kind="syntax_error",
+                          symbol="<module>",
+                      ),
+                  )
+              aliases = _aliases(tree)
+              protocols, exceptions = _class_sets(tree, aliases)
+              scanner = _Scanner(
+                  path=path,
+                  aliases=aliases,
+                  protocol_classes=protocols,
+                  exception_classes=exceptions,
+              )
+              scanner.visit(tree)
+              findings = [*scanner.findings, *_comment_findings(source, path=path)]
+              return tuple(sorted(set(findings)))
+
+
+          def _python_files(roots: Sequence[Path]) -> tuple[tuple[Path, str], ...]:
+              selected: dict[Path, str] = {}
+              for root in sorted(roots, key=lambda item: item.as_posix()):
+                  if not root.exists():
+                      raise ValueError(f"scan root does not exist: {root.name}")
+                  if root.is_file():
+                      candidates = (root,) if root.suffix == ".py" else ()
+                      anchor = root.parent
+                  else:
+                      candidates = tuple(sorted(root.rglob("*.py")))
+                      anchor = root.parent
+                  for candidate in candidates:
+                      resolved = candidate.resolve()
+                      display = candidate.relative_to(anchor).as_posix()
+                      existing = selected.get(resolved)
+                      if existing is None or display < existing:
+                          selected[resolved] = display
+              return tuple(
+                  (path, display)
+                  for path, display in sorted(
+                      selected.items(),
+                      key=lambda item: item[1],
+                  )
+              )
+
+
+          def scan_paths(roots: Sequence[str | Path]) -> tuple[Finding, ...]:
+              findings: list[Finding] = []
+              paths = tuple(Path(root) for root in roots)
+              for file_path, display_path in _python_files(paths):
+                  try:
+                      source = file_path.read_text(encoding="utf-8")
+                  except (OSError, UnicodeError):
+                      findings.append(
+                          Finding(
+                              path=display_path,
+                              line=1,
+                              column=0,
+                              kind="source_read_error",
+                              symbol="<module>",
+                          )
+                      )
+                      continue
+                  findings.extend(scan_source(source, path=display_path))
+              return tuple(sorted(set(findings)))
+
+
+          def _parser() -> argparse.ArgumentParser:
+              parser = argparse.ArgumentParser(
+                  description="Reject concrete implementation stubs in Python source."
+              )
+              parser.add_argument("roots", nargs="+")
+              return parser
+
+
+          def main(argv: Sequence[str] | None = None) -> int:
+              args = _parser().parse_args(argv)
+              findings = scan_paths(args.roots)
+              payload = {
+                  "finding_count": len(findings),
+                  "findings": [finding.to_dict() for finding in findings],
+              }
+              print(
+                  json.dumps(
+                      payload,
+                      ensure_ascii=False,
+                      sort_keys=True,
+                      separators=(",", ":"),
+                  )
+              )
+              return 1 if findings else 0
+
+
+          if __name__ == "__main__":
+              raise SystemExit(main())
+          PYCODE
+      - name: Install final path-filtered no-stubs workflow
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          workflow = '''name: No production stubs
+
+          on:
+            workflow_dispatch:
+            pull_request:
+              paths:
+                - "src/**"
+                - "scripts/verify_no_stubs.py"
+                - "tests/test_no_stubs.py"
+                - "tests/test_no_stubs_workflow.py"
+                - ".github/workflows/no-stubs.yml"
+
+          permissions:
+            contents: read
+
+          jobs:
+            scan:
+              runs-on: ubuntu-latest
+              strategy:
+                fail-fast: false
+                matrix:
+                  python-version: ["3.12", "3.13"]
+              steps:
+                - uses: actions/checkout@v4
+                - uses: actions/setup-python@v5
+                  with:
+                    python-version: __MATRIX__
+                    cache: pip
+                - name: Install development tools
+                  run: python -m pip install -e '.[dev]'
+                - name: Focused scanner tests
+                  run: python -m pytest -q tests/test_no_stubs.py tests/test_no_stubs_workflow.py
+                - name: Scan production source
+                  run: python scripts/verify_no_stubs.py src
+          '''
+          workflow = workflow.replace('__MATRIX__', '$' + '{{ matrix.python-version }}')
+          lines = [line[10:] if line.startswith('          ') else line for line in workflow.splitlines()]
+          Path('.github/workflows/no-stubs.yml').write_text('\n'.join(lines) + '\n', encoding='utf-8')
+          PY
+      - name: Remove transport and normalize scoped files
+        run: |
+          rm .github/workflows/no-stubs-patch-once.yml
+          ruff check --fix scripts/verify_no_stubs.py tests/test_no_stubs.py tests/test_no_stubs_workflow.py
+          python - <<'PY'
+          from pathlib import Path
+          for name in (
+              'scripts/verify_no_stubs.py',
+              'tests/test_no_stubs.py',
+              'tests/test_no_stubs_workflow.py',
+              '.github/workflows/no-stubs.yml',
+          ):
+              path = Path(name)
+              lines = path.read_text(encoding='utf-8').splitlines()
+              path.write_text('\n'.join(line.rstrip() for line in lines) + '\n', encoding='utf-8')
+          PY
+      - name: Focused contract verification
+        run: python -m pytest -q tests/test_no_stubs.py tests/test_no_stubs_workflow.py
+      - name: Self-apply scanner to production source
+        run: python scripts/verify_no_stubs.py src > /tmp/no_stubs_report.json
+      - name: Complete repository verification
+        run: |
+          ruff check .
+          python -m compileall -q src scripts
+          python -m pytest -q
+          git diff --check
+      - name: Reject scope expansion and weakening
+        run: |
+          while IFS= read -r path; do
+            case "$path" in
+              scripts/verify_no_stubs.py|tests/test_no_stubs.py|tests/test_no_stubs_workflow.py|.github/workflows/no-stubs.yml|.github/workflows/no-stubs-patch-once.yml) ;;
+              *) echo "unexpected changed path: $path" >&2; exit 1 ;;
+            esac
+          done < <(git diff --name-only HEAD)
+          if git diff --unified=0 | grep -E '^\+.*(pytest\.mark\.(skip|xfail)|@unittest\.skip|# *noqa|NotImplementedError|TODO|FIXME|pass$)' ; then
+            # The scanner tests deliberately contain these fixtures; only production/script additions are forbidden.
+            if git diff --unified=0 -- scripts/verify_no_stubs.py .github/workflows/no-stubs.yml | grep -E '^\+.*(pytest\.mark\.(skip|xfail)|@unittest\.skip|# *noqa|NotImplementedError|TODO|FIXME|pass$)' ; then
+              exit 1
+            fi
+          fi
+      - name: Commit verified scanner and workflow
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add scripts/verify_no_stubs.py tests/test_no_stubs.py tests/test_no_stubs_workflow.py .github/workflows/no-stubs.yml
+          git add -u .github/workflows
+          git commit -m 'ci: enforce AST-aware no-stub contract'
+          git push origin HEAD:ci/ast-no-stubs-contract-v0-20260822
