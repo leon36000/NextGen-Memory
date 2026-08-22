@@ -1,0 +1,195 @@
+name: Verify action-memory usage repair exact SHA
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+jobs:
+  verify:
+    if: github.event.pull_request.head.ref == 'bootstrap/verify-action-memory-usage-repair-20260822'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - name: Resolve stable candidate after transport removal
+        id: candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 60); do
+            expected="$(git ls-remote origin refs/heads/fix/action-memory-usage-schema-and-reader-20260822 | awk '{print $1}')"
+            test -n "$expected"
+            git fetch --depth=1 origin "$expected"
+            if ! git cat-file -e "$expected:.github/workflows/action-memory-usage-schema-reader-patch-once.yml" 2>/dev/null; then
+              git checkout --detach "$expected"
+              test "$(git rev-parse HEAD)" = "$expected"
+              printf 'sha=%s\n' "$expected" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            sleep 10
+          done
+          echo 'candidate transport workflow did not disappear' >&2
+          exit 1
+      - name: Prove final scope and audit ancestry
+        run: |
+          git fetch --depth=1 origin audit/action-memory-usage-schema-compatibility-20260822
+          git merge-base --is-ancestor FETCH_HEAD HEAD
+          git diff --name-only FETCH_HEAD...HEAD > /tmp/repair_paths.txt
+          test -s /tmp/repair_paths.txt
+          while IFS= read -r path; do
+            case "$path" in
+              migrations/neon/*action*usage*.sql|src/nextgen_memory/*action*usage*.py|src/nextgen_memory/credit_targets.py|tests/test_action_memory_usage_schema_compatibility.py) ;;
+              *)
+                if [[ "$path" == tests/*.py ]] && grep -q 'action_memory_usage_events' "$path"; then
+                  :
+                else
+                  echo "unexpected repair path: $path" >&2
+                  exit 1
+                fi
+                ;;
+            esac
+          done < /tmp/repair_paths.txt
+          if git diff --unified=0 FETCH_HEAD...HEAD | grep -E '^\+.*(pytest\.mark\.(skip|xfail)|@unittest\.skip|# *noqa|NotImplementedError|TODO|FIXME|pass$)' ; then
+            echo 'weakening, suppression, stub or deferred implementation detected' >&2
+            exit 1
+          fi
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - name: Install exact candidate
+        run: python -m pip install -e '.[dev]'
+      - name: Discover and run focused usage tests
+        run: |
+          mapfile -t usage_tests < <(grep -rl 'action_memory_usage_events' tests --include='*.py' | sort -u)
+          tests=(tests/test_action_memory_usage_schema_compatibility.py)
+          if [[ -e tests/test_credit_targets.py ]]; then tests+=(tests/test_credit_targets.py); fi
+          tests+=("${usage_tests[@]}")
+          mapfile -t unique_tests < <(printf '%s\n' "${tests[@]}" | awk 'NF && !seen[$0]++')
+          python -m pytest -q "${unique_tests[@]}"
+      - name: Complete exact-candidate verification
+        run: |
+          ruff check .
+          python -m compileall -q src
+          python -m pytest -q
+          git diff --check
+      - name: Write immutable evidence
+        run: |
+          mkdir -p /tmp/evidence
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          record = {
+              "candidate_sha": "${{ steps.candidate.outputs.sha }}",
+              "python_version": "${{ matrix.python-version }}",
+              "focused": "green",
+              "ruff": "clean",
+              "compileall": "clean",
+              "full_suite": "green",
+              "diff_check": "clean",
+              "transport_absent": True,
+              "run_id": "${{ github.run_id }}",
+          }
+          Path('/tmp/evidence/record.json').write_text(
+              json.dumps(record, sort_keys=True, indent=2) + '\n',
+              encoding='utf-8',
+          )
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: action-usage-${{ matrix.python-version }}
+          path: /tmp/evidence/record.json
+          if-no-files-found: error
+
+  report:
+    if: github.event.pull_request.head.ref == 'bootstrap/verify-action-memory-usage-repair-20260822'
+    needs: verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: /tmp/records
+          pattern: action-usage-*
+      - name: Reconcile immutable evidence
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          records = [json.loads(path.read_text(encoding='utf-8')) for path in Path('/tmp/records').glob('**/record.json')]
+          if len(records) != 2:
+              raise SystemExit(f'expected two records, got {len(records)}')
+          if sorted(record['python_version'] for record in records) != ['3.12', '3.13']:
+              raise SystemExit('incomplete Python matrix')
+          shas = {record['candidate_sha'] for record in records}
+          if len(shas) != 1:
+              raise SystemExit(f'candidate moved during verification: {shas}')
+          for record in records:
+              for key, expected in {
+                  'focused': 'green',
+                  'ruff': 'clean',
+                  'compileall': 'clean',
+                  'full_suite': 'green',
+                  'diff_check': 'clean',
+                  'transport_absent': True,
+              }.items():
+                  if record[key] != expected:
+                      raise SystemExit(f'failed evidence {key}')
+          Path('/tmp/summary.json').write_text(
+              json.dumps({
+                  'candidate_sha': next(iter(shas)),
+                  'run_id': records[0]['run_id'],
+              }, sort_keys=True, indent=2) + '\n',
+              encoding='utf-8',
+          )
+          PY
+      - name: Publish GREEN but Neon-pending evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import subprocess
+          summary = json.load(open('/tmp/summary.json', encoding='utf-8'))
+          repo = os.environ['REPO']
+          rows = json.loads(subprocess.run(
+              ['gh','pr','list','--repo',repo,'--state','open','--head','fix/action-memory-usage-schema-and-reader-20260822','--json','number,headRefOid,baseRefName'],
+              check=True,text=True,capture_output=True,
+          ).stdout)
+          if len(rows) != 1:
+              raise SystemExit(f'expected one repair PR, got {rows}')
+          pr = rows[0]
+          if pr['headRefOid'] != summary['candidate_sha']:
+              raise SystemExit('repair ref moved after exact verification')
+          body = f'''## Exact-SHA code verification
+
+Status: **GREEN code candidate / unmerged / Neon smoke pending / Sol review pending**.
+
+- Candidate SHA: `{summary['candidate_sha']}`
+- Python 3.12: focused usage/reader tests, Ruff, compileall, full pytest and diff-check passed
+- Python 3.13: the same checks passed
+- Both jobs locked the same SHA after the transport workflow disappeared
+- Repair scope and audit ancestry were reconciled
+- Verification run: {os.environ['RUN_URL']}
+
+This is not merge approval. A temporary-Neon execution of the migration and reader query must still pass before the blind GPT-5.6 Sol packet is published.'''
+          subprocess.run(['gh','pr','comment',str(pr['number']),'--repo',repo,'--body',body],check=True)
+          subprocess.run(['gh','issue','comment','23','--repo',repo,'--body',f"Action-memory usage schema/reader candidate `{summary['candidate_sha']}` passed exact Python 3.12/3.13 code verification. Neon smoke and Sol review remain pending. Run: {os.environ['RUN_URL']}"],check=True)
+          PY
+      - name: Close this verifier PR without merge
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: gh pr close "$PR_NUMBER" --repo "$REPO" --comment 'Exact code verification completed. Neon smoke remains required; closed without merge.'
