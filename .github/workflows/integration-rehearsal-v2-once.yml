@@ -1,0 +1,124 @@
+name: Integration rehearsal v2 from exact GREEN SHAs
+
+on:
+  pull_request:
+
+permissions:
+  contents: write
+
+jobs:
+  rehearse:
+    if: github.event.pull_request.head.ref == 'bootstrap/run-integration-rehearsal-v2-20260822'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 93cce924debb9ae2ff46d71b2e8fa043f4cefa0b
+          fetch-depth: 0
+      - name: Configure isolated rehearsal
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          if git ls-remote --exit-code --heads origin integration/rehearse-green-candidates-v2-20260822; then
+            echo 'stable rehearsal branch already exists; refusing to overwrite' >&2
+            exit 1
+          fi
+          test "$(git rev-parse HEAD)" = "93cce924debb9ae2ff46d71b2e8fa043f4cefa0b"
+      - name: Fetch and prove immutable candidate commits
+        run: |
+          git fetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*'
+          candidates=(
+            4e49920b84f393836e4ed4a19f744aa2b3c402e2
+            5f842f8bbb5b6e662a20b1a7860f2dc3c0642f1a
+            d2bf3c75f7cf23e059677234342c10f4be304799
+            6c60f2cc68e9b177f680d4464d42d089e4ed49db
+            b336a73d49da4c7589ab2e63704ef3a26b07ee89
+            49db636a8ca9b548862ba61b4fcdc86cb01f32cd
+            0de2763ad7809f37261690c706bb37856f20a70d
+            3b67c692e4833ce70920ae5766c071a8fa171157
+          )
+          for sha in "${candidates[@]}"; do
+            git cat-file -e "${sha}^{commit}"
+          done
+      - name: Merge candidates in explicit dependency-safe order
+        run: |
+          candidates=(
+            4e49920b84f393836e4ed4a19f744aa2b3c402e2
+            5f842f8bbb5b6e662a20b1a7860f2dc3c0642f1a
+            d2bf3c75f7cf23e059677234342c10f4be304799
+            6c60f2cc68e9b177f680d4464d42d089e4ed49db
+            b336a73d49da4c7589ab2e63704ef3a26b07ee89
+            49db636a8ca9b548862ba61b4fcdc86cb01f32cd
+            0de2763ad7809f37261690c706bb37856f20a70d
+            3b67c692e4833ce70920ae5766c071a8fa171157
+          )
+          for sha in "${candidates[@]}"; do
+            git merge --no-ff --no-edit "$sha"
+          done
+          for sha in "${candidates[@]}"; do
+            git merge-base --is-ancestor "$sha" HEAD
+          done
+          test -z "$(git status --porcelain)"
+      - name: Prove final scope and manifest
+        run: |
+          candidates=(
+            4e49920b84f393836e4ed4a19f744aa2b3c402e2
+            5f842f8bbb5b6e662a20b1a7860f2dc3c0642f1a
+            d2bf3c75f7cf23e059677234342c10f4be304799
+            6c60f2cc68e9b177f680d4464d42d089e4ed49db
+            b336a73d49da4c7589ab2e63704ef3a26b07ee89
+            49db636a8ca9b548862ba61b4fcdc86cb01f32cd
+            0de2763ad7809f37261690c706bb37856f20a70d
+            3b67c692e4833ce70920ae5766c071a8fa171157
+          )
+          printf '%s\n' "${candidates[@]}" > /tmp/candidate-shas.txt
+          printf 'base=%s\n' 93cce924debb9ae2ff46d71b2e8fa043f4cefa0b
+          printf 'candidate_count=%s\n' "${#candidates[@]}"
+          printf 'head=%s\n' "$(git rev-parse HEAD)"
+          cat /tmp/candidate-shas.txt
+          git diff --check 93cce924debb9ae2ff46d71b2e8fa043f4cefa0b...HEAD
+          if git diff --name-only 93cce924debb9ae2ff46d71b2e8fa043f4cefa0b...HEAD | grep -Eq '^src/nextgen_memory/corrective_retrieval_'; then
+            echo 'rehearsal modifies active Codex corrective-retrieval files' >&2
+            exit 1
+          fi
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Install and static verification
+        run: |
+          python -m pip install -e '.[dev]'
+          ruff check .
+          python -m compileall -q src
+      - name: Complete integrated test suite
+        run: python -m pytest -q
+      - name: Build and reinstall wheel in a clean environment
+        run: |
+          rm -rf wheelhouse /tmp/nextgen-wheel-venv
+          python -m pip wheel --no-deps . -w wheelhouse
+          test "$(find wheelhouse -maxdepth 1 -name '*.whl' | wc -l)" -eq 1
+          python -m venv /tmp/nextgen-wheel-venv
+          /tmp/nextgen-wheel-venv/bin/python -m pip install --no-deps wheelhouse/*.whl
+          /tmp/nextgen-wheel-venv/bin/python - <<'PY'
+          import nextgen_memory
+          required = (
+              'ActionMemoryUsageEvent',
+              'ActionMemoryUsageWriter',
+              'CausalFeedbackWriter',
+              'CreditTargetReader',
+              'DeterministicMemoryRouter',
+              'IntegratedContextCompiler',
+              'MongoResearchRetriever',
+              'PrecedenceShapleyEstimator',
+              'RetrievalEventWriter',
+          )
+          missing = [name for name in required if not hasattr(nextgen_memory, name)]
+          if missing:
+              raise SystemExit(f'missing wheel exports: {missing}')
+          PY
+          sha256sum wheelhouse/*.whl
+      - name: Publish immutable rehearsal branch after all checks
+        run: |
+          final_sha="$(git rev-parse HEAD)"
+          git push origin HEAD:refs/heads/integration/rehearse-green-candidates-v2-20260822
+          echo "published_rehearsal_sha=${final_sha}"
