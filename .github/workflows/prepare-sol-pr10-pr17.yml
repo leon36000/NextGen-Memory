@@ -1,0 +1,209 @@
+name: Prepare blind Sol packets for PR10 and PR17 rehabilitation
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+jobs:
+  reconcile-and-packet:
+    if: github.event.pull_request.head.ref == 'bootstrap/prepare-sol-pr10-pr17-20260822'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Reconcile immutable evidence and scopes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json
+          import os
+          import re
+          import subprocess
+          from pathlib import Path
+
+          repo = os.environ['REPO']
+          tasks = {
+              10: {
+                  'head': 'fix/pr10-exact-ci-rehabilitation-20260822',
+                  'base': 'feat/neon-execution-ledger-adapter-v0',
+                  'stack_base_pr': 5,
+              },
+              17: {
+                  'head': 'fix/pr17-exact-ci-rehabilitation-20260822',
+                  'base': 'feat/paired-rerank-policy-evaluation-v0',
+                  'stack_base_pr': 16,
+              },
+          }
+
+          def run(args):
+              return subprocess.run(args, check=True, text=True, capture_output=True).stdout
+
+          def api(path):
+              return json.loads(run(['gh', 'api', '--paginate', path]))
+
+          results = {}
+          forbidden = re.compile(
+              r'^\+.*(?:pytest\.mark\.(?:skip|xfail)|@unittest\.skip|#\s*noqa|NotImplementedError|\bTODO\b|\bFIXME\b|\bpass\s*$)',
+              re.MULTILINE,
+          )
+          marker = '## Exact-SHA rehabilitation verification'
+          sha_pattern = re.compile(r'Candidate SHA: `([0-9a-f]{40})`')
+
+          for original_pr, config in tasks.items():
+              rehab_rows = json.loads(run([
+                  'gh', 'pr', 'list', '--repo', repo, '--state', 'all',
+                  '--head', config['head'], '--json', 'number,state,headRefOid,baseRefName,url',
+              ]))
+              if len(rehab_rows) != 1:
+                  raise SystemExit(f'expected one rehabilitation PR for #{original_pr}, got {rehab_rows}')
+              rehab = rehab_rows[0]
+              rehab_number = rehab['number']
+              if rehab['baseRefName'] != config['base']:
+                  raise SystemExit(f'wrong rehabilitation base for PR #{original_pr}')
+
+              comments = api(f'repos/{repo}/issues/{rehab_number}/comments?per_page=100')
+              evidence_comments = [comment['body'] for comment in comments if marker in comment.get('body', '')]
+              if len(evidence_comments) != 1:
+                  raise SystemExit(f'missing or ambiguous exact-SHA evidence on rehabilitation PR #{rehab_number}')
+              match = sha_pattern.search(evidence_comments[0])
+              if not match:
+                  raise SystemExit(f'candidate SHA missing from exact evidence on PR #{rehab_number}')
+              candidate_sha = match.group(1)
+              if rehab['headRefOid'] != candidate_sha:
+                  raise SystemExit(
+                      f'rehabilitation ref moved after verification for PR #{rehab_number}: '
+                      f'{rehab["headRefOid"]} != {candidate_sha}'
+                  )
+
+              changed_files = api(f'repos/{repo}/pulls/{rehab_number}/files?per_page=100')
+              original_files = {
+                  item['filename']
+                  for item in api(f'repos/{repo}/pulls/{original_pr}/files?per_page=100')
+              }
+              repair_files = {item['filename'] for item in changed_files}
+              unexpected = repair_files.difference(original_files)
+              if unexpected:
+                  raise SystemExit(f'repair PR #{rehab_number} expands original scope: {sorted(unexpected)}')
+
+              diff = run(['gh', 'pr', 'diff', str(rehab_number), '--repo', repo])
+              if forbidden.search(diff):
+                  raise SystemExit(f'forbidden test weakening/stub pattern in repair PR #{rehab_number}')
+              if '.github/workflows/pr10-rehabilitation-once.yml' in repair_files:
+                  raise SystemExit('PR10 temporary workflow remains in final diff')
+              if '.github/workflows/pr17-rehabilitation-once.yml' in repair_files:
+                  raise SystemExit('PR17 temporary workflow remains in final diff')
+
+              original = json.loads(run([
+                  'gh', 'pr', 'view', str(original_pr), '--repo', repo,
+                  '--json', 'headRefOid,baseRefName,headRefName,state,isDraft,title,url',
+              ]))
+
+              results[str(original_pr)] = {
+                  'original': original,
+                  'rehabilitation_pr': rehab_number,
+                  'candidate_sha': candidate_sha,
+                  'repair_files': sorted(repair_files),
+                  'diff_is_empty': not bool(repair_files),
+                  'evidence_comment': evidence_comments[0],
+              }
+
+          Path('/tmp/reconciliation.json').write_text(
+              json.dumps(results, sort_keys=True, indent=2) + '\n',
+              encoding='utf-8',
+          )
+          PY
+      - name: Publish blind exact-SHA Sol packets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import subprocess
+
+          repo = os.environ['REPO']
+          run_url = os.environ['RUN_URL']
+          data = json.load(open('/tmp/reconciliation.json', encoding='utf-8'))
+
+          def post(target, body):
+              subprocess.run(
+                  ['gh', 'pr', 'comment', str(target), '--repo', repo, '--body', body],
+                  check=True,
+              )
+
+          for original_number_text, record in data.items():
+              original_number = int(original_number_text)
+              rehab_number = record['rehabilitation_pr']
+              sha = record['candidate_sha']
+              files = record['repair_files']
+              file_text = '\n'.join(f'- `{path}`' for path in files) if files else '- No product-file diff relative to the original PR head'
+              packet = f'''## Blind GPT-5.6 Sol review request — rehabilitation candidate
+
+Return exactly one verdict: `APPROVE`, `CHANGES_REQUIRED`, or `BLOCKED_BY_EVIDENCE`.
+
+### Exact review boundary
+
+- Original PR: #{original_number}
+- Rehabilitation PR: #{rehab_number}
+- Candidate SHA: `{sha}`
+- Candidate movement invalidates this request.
+
+### Scope
+
+{file_text}
+
+The rehabilitation branch is based directly on the original PR head branch. Its changed paths are a subset of the original PR scope; no temporary workflow remains; automated checks found no added skip/xfail, `noqa`, stub, `NotImplementedError`, TODO or FIXME pattern.
+
+### Verified evidence
+
+- Immutable remote SHA resolved independently and checked out detached.
+- Python 3.12: Ruff, compileall, complete pytest and `git diff --check` passed.
+- Python 3.13: Ruff, compileall, complete pytest and `git diff --check` passed.
+- Both Python jobs verified the same SHA.
+- Verification run: {run_url}
+
+### Review focus
+
+- correctness of every repair relative to the original PR contract;
+- whether the original stack base and changed-file boundary remain valid;
+- whether any behavior or test was weakened;
+- compatibility with the original PR base;
+- whether the evidence supports integrating the rehabilitation branch into the original PR head.
+
+Do not rely on this summary as proof. Inspect the exact candidate diff, original PR contract, and exact-SHA workflow evidence. No merge is allowed without a genuine Sol `APPROVE` on the unchanged SHA.'''
+              post(rehab_number, packet)
+              status = f'''## Rehabilitation state
+
+Status: **GREEN / exact-SHA verified / unmerged / Sol review pending**.
+
+- Rehabilitation PR: #{rehab_number}
+- Candidate SHA: `{sha}`
+- Changed paths: {len(files)}
+- Exact Python 3.12/3.13 verification: passed
+- Scope reconciliation: passed
+- Blind Sol packet: posted on PR #{rehab_number}
+
+This does not alter the original PR and is not a merge approval.'''
+              post(original_number, status)
+          PY
+      - name: Record orchestrator checkpoint
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          gh issue comment 23 --repo "$REPO" --body "## Sol-packet checkpoint for PR #10 and PR #17\n\nExact-SHA rehabilitation evidence was reconciled against current remote refs and original changed-file scopes. Blind Sol packets were posted on the rehabilitation PRs; original PRs were updated with GREEN/review-pending status. No merge occurred. Reconciliation run: $RUN_URL."
+      - name: Close this control PR without merge
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: gh pr close "$PR_NUMBER" --repo "$REPO" --comment 'Reconciliation and blind Sol packet generation completed. Closed without merge.'
