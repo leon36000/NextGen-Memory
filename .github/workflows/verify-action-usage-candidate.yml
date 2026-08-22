@@ -1,0 +1,82 @@
+name: Verify action-memory usage exact candidate SHA
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 60e3ba1b3d7db69067e0583800a9941f01b17f18
+          fetch-depth: 0
+      - name: Prove exact checkout
+        run: test "$(git rev-parse HEAD)" = "60e3ba1b3d7db69067e0583800a9941f01b17f18"
+      - name: Prove exact changed-path surface
+        run: |
+          python - <<'PY'
+          import subprocess
+
+          expected = {
+              "docs/action-memory-usage-v0.md",
+              "docs/superpowers/specs/2026-08-22-action-memory-usage-events-v0-design.md",
+              "migrations/neon/0006_action_memory_usage_events.sql",
+              "src/nextgen_memory/__init__.py",
+              "src/nextgen_memory/action_usage.py",
+              "src/nextgen_memory/credit_targets.py",
+              "tests/test_action_credit_targets.py",
+              "tests/test_action_usage.py",
+              "tests/test_action_usage_migration.py",
+              "tests/test_action_usage_properties.py",
+              "tests/test_action_usage_public_api.py",
+              "tests/test_action_usage_writer.py",
+          }
+          actual = set(
+              subprocess.check_output(
+                  [
+                      "git",
+                      "diff",
+                      "--name-only",
+                      "93cce924debb9ae2ff46d71b2e8fa043f4cefa0b",
+                      "HEAD",
+                  ],
+                  text=True,
+              ).splitlines()
+          )
+          if actual != expected:
+              raise SystemExit(
+                  f"unexpected changed paths: missing={sorted(expected - actual)} "
+                  f"extra={sorted(actual - expected)}"
+              )
+          PY
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - name: Install project and development tools
+        run: python -m pip install -e '.[dev]'
+      - name: Lint exact candidate
+        run: ruff check .
+      - name: Compile exact candidate
+        run: python -m compileall -q src tests
+      - name: Focused exact candidate tests
+        run: >-
+          python -m pytest -q
+          tests/test_action_usage.py
+          tests/test_action_usage_writer.py
+          tests/test_action_credit_targets.py
+          tests/test_action_usage_migration.py
+          tests/test_action_usage_public_api.py
+          tests/test_action_usage_properties.py
+      - name: Full exact candidate suite
+        run: python -m pytest -q
+      - name: Diff integrity against base
+        run: git diff --check 93cce924debb9ae2ff46d71b2e8fa043f4cefa0b HEAD
