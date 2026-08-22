@@ -58,10 +58,16 @@ class FakeCollection:
 
 
 def test_config_declares_and_normalizes_required_research_source_type() -> None:
-    config = MongoResearchIndexConfig()
+    default = MongoResearchIndexConfig()
+    normalized = MongoResearchIndexConfig(
+        active_status="  active  ",
+        source_type="  paper  ",
+    )
 
-    assert getattr(config, "source_type", None) == "paper"
-    assert config.active_status == "active"
+    assert default.source_type == "paper"
+    assert default.active_status == "active"
+    assert normalized.source_type == "paper"
+    assert normalized.active_status == "active"
 
 
 @pytest.mark.parametrize("active_status", ["", "   "])
@@ -152,6 +158,14 @@ def test_non_mapping_backend_row_fails_closed() -> None:
     collection = FakeCollection([object()])
 
     with pytest.raises(ValueError, match="mapping"):
+        MongoResearchRetriever(collection).search(query())
+
+
+@pytest.mark.parametrize("backend_ref", [None, "", "   "])
+def test_blank_or_missing_backend_reference_fails_closed(backend_ref: object) -> None:
+    collection = FakeCollection([document(_id=backend_ref)])
+
+    with pytest.raises(ValueError, match="canonical backend_ref"):
         MongoResearchRetriever(collection).search(query())
 
 
