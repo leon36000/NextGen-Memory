@@ -1,0 +1,44 @@
+{
+  "manifest_version": 1,
+  "migrations": [
+    {
+      "depends_on": [],
+      "id": "0001_memory_moe_kernel",
+      "path": "migrations/neon/0001_memory_moe_kernel.sql",
+      "sha256": "47221003c2d2829d74e57b7fa37b67e0f23da672454bdcbd388531d396b26815"
+    },
+    {
+      "depends_on": [
+        "0001_memory_moe_kernel"
+      ],
+      "id": "0002_core_idempotency",
+      "path": "migrations/neon/0002_core_idempotency.sql",
+      "sha256": "20849e294043d5b800c097bd84e568b2eb287c0f9968ce2336a44b201c17b46f"
+    },
+    {
+      "depends_on": [
+        "0002_core_idempotency"
+      ],
+      "id": "0003_research_sources_seed",
+      "path": "migrations/neon/0003_research_sources_seed.sql",
+      "sha256": "992a0511a870cb7371d7dacdc9ace60b854e9df0ee6b557da62f1932bb9401ca"
+    },
+    {
+      "depends_on": [
+        "0003_research_sources_seed"
+      ],
+      "id": "0005_causal_credit_feedback",
+      "path": "migrations/neon/0005_causal_credit_feedback.sql",
+      "sha256": "71ba6d7eda1c464cb39e1e1f0cebf59602bfc57d4d792222037ed978a4dae73d"
+    },
+    {
+      "depends_on": [
+        "0005_causal_credit_feedback"
+      ],
+      "id": "0006_action_memory_usage_events",
+      "path": "migrations/neon/0006_action_memory_usage_events.sql",
+      "sha256": "00a0e2f79cddbfb71eb46c6a4a0cb247b151b8993393de3e9a0745664cfdfd02"
+    }
+  ],
+  "schema": "nextgen-memory-neon-migrations"
+}
