@@ -1,0 +1,50 @@
+name: Publish autonomous project status
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: read
+  actions: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Collect branch heads and workflow conclusions
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          branches=(
+            fix/pr10-ci-rehabilitation-20260822
+            bootstrap/pr10-diagnostic-report-20260822
+            bootstrap/verify-pr10-exact-head-20260822
+            fix/router-decision-identity-v1-20260822
+            bootstrap/verify-router-v1-current-head-20260822
+            bootstrap/verify-pr17-pr19-exact-heads-20260822
+          )
+          {
+            echo '## Autonomous engineering status snapshot'
+            echo
+            echo '| Branch | Head | Latest pull-request workflows |'
+            echo '|---|---|---|'
+            for branch in "${branches[@]}"; do
+              encoded=${branch//\//%2F}
+              head=$(gh api "repos/$REPO/branches/$encoded" --jq '.commit.sha' 2>/dev/null || echo missing)
+              runs=$(gh api "repos/$REPO/actions/runs?branch=$encoded&event=pull_request&per_page=10" --jq '[.workflow_runs[] | (.name + ":" + .status + ":" + (.conclusion // "pending"))] | join("<br>")' 2>/dev/null || echo unavailable)
+              printf '| `%s` | `%s` | %s |\n' "$branch" "$head" "${runs:-none}"
+            done
+            echo
+            echo '### Interpretation rule'
+            echo
+            echo '- `completed:success` is evidence only for the exact head shown in the same row.'
+            echo '- A red or pending workflow blocks any GREEN/READY claim.'
+            echo '- Product branches remain unmerged until a genuine GPT-5.6 Sol review approves their unchanged exact SHA.'
+            echo '- Bootstrap verifier/report branches are evidence only and must close without merge.'
+          } >/tmp/status.md
+          gh api "repos/$REPO/issues/23/comments" -f body="$(cat /tmp/status.md)"
