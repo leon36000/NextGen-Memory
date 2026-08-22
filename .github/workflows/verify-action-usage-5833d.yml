@@ -1,0 +1,65 @@
+name: Verify durable action-memory usage candidate 5833d
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    if: github.event.pull_request.head.ref == 'bootstrap/verify-action-usage-5833d-20260822'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 5833d5c89286804e28108ca7f4ab9a4a8bf5c3f4
+          fetch-depth: 0
+      - name: Prove exact checkout
+        run: test "$(git rev-parse HEAD)" = "5833d5c89286804e28108ca7f4ab9a4a8bf5c3f4"
+      - name: Prove exact changed-path surface
+        run: |
+          git fetch --depth=1 origin 0e762d9102ce59aecc50d5546eebeb4f0acf7dc1
+          mapfile -t changed < <(git diff --name-only 0e762d9102ce59aecc50d5546eebeb4f0acf7dc1...HEAD | sort)
+          expected=(
+            docs/action-memory-usage-v0.md
+            docs/superpowers/specs/2026-08-22-action-memory-usage-events-v0-design.md
+            migrations/neon/0006_action_memory_usage_events.sql
+            src/nextgen_memory/__init__.py
+            src/nextgen_memory/action_usage.py
+            src/nextgen_memory/credit_targets.py
+            tests/test_action_credit_targets.py
+          )
+          test "${#changed[@]}" -eq "${#expected[@]}"
+          diff -u <(printf '%s\n' "${expected[@]}" | sort) <(printf '%s\n' "${changed[@]}")
+          if printf '%s\n' "${changed[@]}" | grep -Eq '^src/nextgen_memory/corrective_retrieval_'; then
+            echo 'candidate modifies active Codex corrective-retrieval files' >&2
+            exit 1
+          fi
+          git diff --check 0e762d9102ce59aecc50d5546eebeb4f0acf7dc1...HEAD
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - name: Install project and development tools
+        run: python -m pip install -e '.[dev]'
+      - name: Lint and compile exact candidate
+        run: |
+          ruff check .
+          python -m compileall -q src
+      - name: Focused exact candidate tests
+        run: |
+          python -m pytest -q \
+            tests/test_action_usage.py \
+            tests/test_action_usage_writer.py \
+            tests/test_action_usage_migration.py \
+            tests/test_action_usage_properties.py \
+            tests/test_action_usage_public_api.py \
+            tests/test_action_credit_targets.py \
+            tests/test_credit_targets.py
+      - name: Full exact candidate suite
+        run: python -m pytest -q
