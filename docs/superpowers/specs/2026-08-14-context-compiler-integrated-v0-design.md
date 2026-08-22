@@ -110,7 +110,7 @@ One immutable exact evidence item:
 
 - canonical `memory_id` and `space_id`;
 - normalized `expert`, `subject_key`, and `source_cluster_key`;
-- exact `content`, canonical `content_hash`, and `backend_ref`;
+- exact `content`, materialized `content_hash` equal to SHA-256 of the normalized UTF-8 content, and `backend_ref`;
 - optional `source_uri`;
 - fidelity class: `exact` or `derived`;
 - positive externally supplied `estimated_tokens`;
@@ -127,6 +127,8 @@ One immutable exact evidence item:
   - `authority` and `confidence` in `[0, 1]`.
 
 `direct_credit` and `inherited_credit` remain distinct fields in every objective and audit artifact. The compiler never adds them upstream or rewrites their provenance.
+
+At the compiler boundary, `content_hash` is the SHA-256 hash of the exact normalized materialized content admitted to the packet. The upstream Neon canonical content hash remains a separate cross-store identity signal and must not be substituted for this materialized-content hash. A mismatch fails before canonicalization or optimization.
 
 ### 6.3 `ContextPairInteraction`
 
@@ -229,7 +231,7 @@ Compilation fails for the entire call when:
 - prerequisite relationships contain a cycle;
 - a mandatory memory or any of its prerequisites is below authority/confidence thresholds;
 - mandatory dependency closure exceeds the budget or item limit;
-- content hashes, UUIDs, token estimates, ranks, signals, weights, or interaction statistics are invalid;
+- content hashes are malformed or do not match normalized materialized content, or UUIDs, token estimates, ranks, signals, weights, or interaction statistics are invalid;
 - active pair interactions conflict for the same pair and evidence group.
 
 Non-mandatory memories below authority or confidence thresholds are omitted explicitly. If one of their prerequisites is removed by those local thresholds, every dependent optional candidate is omitted with `dependency_unavailable` rather than compiled with a broken closure.

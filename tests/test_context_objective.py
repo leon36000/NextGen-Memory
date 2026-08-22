@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import importlib
 from uuid import UUID
 
@@ -61,7 +62,6 @@ def evidence(memory_id: UUID, **overrides: object) -> IntegratedContextEvidence:
         "subject_key": f"subject-{suffix}",
         "source_cluster_key": f"source-{suffix}",
         "content": f"evidence-{memory_id}",
-        "content_hash": suffix * 64,
         "backend_ref": f"memory:{memory_id}",
         "source_uri": f"https://example.invalid/{memory_id}",
         "fidelity": EvidenceFidelity.EXACT,
@@ -79,6 +79,14 @@ def evidence(memory_id: UUID, **overrides: object) -> IntegratedContextEvidence:
         "confidence": 1.0,
     }
     values.update(overrides)
+    if "content_hash" not in overrides:
+        content = values.get("content")
+        normalized_content = (
+            content.strip() if isinstance(content, str) else ""
+        )
+        values["content_hash"] = hashlib.sha256(
+            normalized_content.encode("utf-8")
+        ).hexdigest()
     return IntegratedContextEvidence(**values)
 
 
@@ -113,7 +121,7 @@ def test_canonicalization_rejects_scope_identity_unknown_prerequisite_and_cycle(
             request(),
             (
                 evidence(MEMORY_A),
-                evidence(MEMORY_A, content="conflict", content_hash="f" * 64),
+                evidence(MEMORY_A, content="conflict"),
             ),
             (),
         )
@@ -147,17 +155,15 @@ def test_duplicate_candidates_choose_best_dynamic_representative() -> None:
     ]
 
 
-def test_content_dedup_preserves_structural_anchor_and_rejects_hash_collision() -> None:
+def test_content_dedup_preserves_structural_anchor() -> None:
     prerequisite = evidence(
         MEMORY_A,
         content="same",
-        content_hash="f" * 64,
         relevance=0.1,
     )
     stronger_duplicate = evidence(
         MEMORY_B,
         content="same",
-        content_hash="f" * 64,
         relevance=0.9,
     )
     dependent = evidence(
@@ -176,16 +182,6 @@ def test_content_dedup_preserves_structural_anchor_and_rejects_hash_collision() 
     assert problem.mandatory_closure == frozenset({MEMORY_A, MEMORY_C})
     assert problem.initial_omissions[0].reason is ContextOmissionReason.DUPLICATE_CONTENT
 
-    with pytest.raises(ContextCompilerValidationError, match="content_hash"):
-        canonicalize_context_problem(
-            request(),
-            (
-                evidence(MEMORY_A, content="first", content_hash="e" * 64),
-                evidence(MEMORY_B, content="second", content_hash="e" * 64),
-            ),
-            (),
-        )
-
 
 def test_ambiguous_mandatory_same_content_fails() -> None:
     with pytest.raises(ContextCompilerValidationError, match="mandatory duplicate"):
@@ -196,15 +192,13 @@ def test_ambiguous_mandatory_same_content_fails() -> None:
                     MEMORY_A,
                     mandatory=True,
                     content="same",
-                    content_hash="f" * 64,
-                    coverage_keys=("cause",),
+                                coverage_keys=("cause",),
                 ),
                 evidence(
                     MEMORY_B,
                     mandatory=True,
                     content="same",
-                    content_hash="f" * 64,
-                    coverage_keys=("cause",),
+                                coverage_keys=("cause",),
                 ),
             ),
             (),

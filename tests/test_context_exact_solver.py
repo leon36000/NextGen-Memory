@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import importlib
 import random
 from uuid import UUID
@@ -40,7 +41,6 @@ def memory_id(index: int) -> UUID:
 
 def evidence(index: int, **overrides: object) -> IntegratedContextEvidence:
     item_id = memory_id(index)
-    character = "0123456789abcdef"[index % 16]
     values: dict[str, object] = {
         "memory_id": item_id,
         "space_id": SPACE_ID,
@@ -48,7 +48,6 @@ def evidence(index: int, **overrides: object) -> IntegratedContextEvidence:
         "subject_key": f"subject-{index % 4}",
         "source_cluster_key": f"source-{index % 5}",
         "content": f"evidence-{index}",
-        "content_hash": character * 64,
         "backend_ref": f"memory:{index}",
         "source_uri": None,
         "fidelity": EvidenceFidelity.EXACT,
@@ -66,6 +65,14 @@ def evidence(index: int, **overrides: object) -> IntegratedContextEvidence:
         "confidence": 1.0,
     }
     values.update(overrides)
+    if "content_hash" not in overrides:
+        content = values.get("content")
+        normalized_content = (
+            content.strip() if isinstance(content, str) else ""
+        )
+        values["content_hash"] = hashlib.sha256(
+            normalized_content.encode("utf-8")
+        ).hexdigest()
     return IntegratedContextEvidence(**values)
 
 
@@ -372,7 +379,7 @@ def test_exact_solver_matches_oracle_on_500_generated_problems() -> None:
             prerequisites = ()
             if index and rng.random() < 0.25:
                 prerequisites = (ids[rng.randrange(index)],)
-            character = "0123456789abcdef"[(case_index + index) % 16]
+            content = f"case-{case_index}-item-{index}"
             generated.append(
                 IntegratedContextEvidence(
                     memory_id=item_id,
@@ -380,8 +387,10 @@ def test_exact_solver_matches_oracle_on_500_generated_problems() -> None:
                     expert=f"expert-{rng.randrange(3)}",
                     subject_key=f"subject-{rng.randrange(4)}",
                     source_cluster_key=f"source-{rng.randrange(5)}",
-                    content=f"case-{case_index}-item-{index}",
-                    content_hash=character * 63 + f"{index % 16:x}",
+                    content=content,
+                    content_hash=hashlib.sha256(
+                        content.encode("utf-8")
+                    ).hexdigest(),
                     backend_ref=f"case:{case_index}:{index}",
                     source_uri=None,
                     fidelity=EvidenceFidelity.EXACT,
