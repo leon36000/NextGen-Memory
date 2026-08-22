@@ -91,3 +91,127 @@ jobs:
           print(json.dumps(findings, indent=2, sort_keys=True))
           print(f'finding_count={len(findings)}')
           PY
+      - name: Prove every marker is an exact Protocol signature
+        run: |
+          python - <<'PY'
+          from __future__ import annotations
+
+          import ast
+          import io
+          import tokenize
+          from pathlib import Path
+
+          allowed: list[tuple[str, int, str, str]] = []
+          violations: list[str] = []
+
+          for path in sorted(Path('src/nextgen_memory').rglob('*.py')):
+              source = path.read_text(encoding='utf-8')
+              tree = ast.parse(source, filename=str(path))
+              parents: dict[ast.AST, ast.AST] = {}
+              for parent in ast.walk(tree):
+                  for child in ast.iter_child_nodes(parent):
+                      parents[child] = parent
+
+              protocol_names: set[str] = set()
+              typing_module_names: set[str] = set()
+              for statement in tree.body:
+                  if isinstance(statement, ast.ImportFrom) and statement.module == 'typing':
+                      for alias in statement.names:
+                          if alias.name == 'Protocol':
+                              protocol_names.add(alias.asname or alias.name)
+                  elif isinstance(statement, ast.Import):
+                      for alias in statement.names:
+                          if alias.name == 'typing':
+                              typing_module_names.add(alias.asname or alias.name)
+
+              for statement in tree.body:
+                  rebound: set[str] = set()
+                  if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                      rebound.add(statement.name)
+                  elif isinstance(statement, (ast.Assign, ast.AnnAssign, ast.NamedExpr)):
+                      targets = statement.targets if isinstance(statement, ast.Assign) else [statement.target]
+                      for target in targets:
+                          if isinstance(target, ast.Name):
+                              rebound.add(target.id)
+                  for name in rebound:
+                      if name in protocol_names or name in typing_module_names:
+                          violations.append(f'{path}: top-level binding shadows typing Protocol import: {name}')
+
+              protocol_classes: set[ast.ClassDef] = set()
+              for node in ast.walk(tree):
+                  if not isinstance(node, ast.ClassDef):
+                      continue
+                  for base in node.bases:
+                      if isinstance(base, ast.Name) and base.id in protocol_names:
+                          protocol_classes.add(node)
+                      elif (
+                          isinstance(base, ast.Attribute)
+                          and base.attr == 'Protocol'
+                          and isinstance(base.value, ast.Name)
+                          and base.value.id in typing_module_names
+                      ):
+                          protocol_classes.add(node)
+
+              for node in ast.walk(tree):
+                  if isinstance(node, ast.Pass):
+                      violations.append(f'{path}:{node.lineno}: pass is forbidden in production')
+                  elif isinstance(node, ast.Raise):
+                      exc = node.exc
+                      if isinstance(exc, ast.Call):
+                          exc = exc.func
+                      if (
+                          isinstance(exc, ast.Name)
+                          and exc.id == 'NotImplementedError'
+                      ) or (
+                          isinstance(exc, ast.Attribute)
+                          and exc.attr == 'NotImplementedError'
+                      ):
+                          violations.append(f'{path}:{node.lineno}: NotImplementedError is forbidden')
+                  elif isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant) and node.value.value is Ellipsis:
+                      function: ast.AST | None = parents.get(node)
+                      while function is not None and not isinstance(
+                          function,
+                          (ast.FunctionDef, ast.AsyncFunctionDef),
+                      ):
+                          function = parents.get(function)
+                      owner: ast.AST | None = parents.get(function) if function is not None else None
+                      while owner is not None and not isinstance(owner, ast.ClassDef):
+                          owner = parents.get(owner)
+                      if not isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                          violations.append(f'{path}:{node.lineno}: ellipsis has no function owner')
+                          continue
+                      if owner not in protocol_classes:
+                          violations.append(
+                              f'{path}:{node.lineno}: ellipsis owner {getattr(owner, "name", None)!r} is not an exact Protocol class'
+                          )
+                          continue
+                      body = list(function.body)
+                      if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant) and isinstance(body[0].value.value, str):
+                          body = body[1:]
+                      if body != [node]:
+                          violations.append(
+                              f'{path}:{node.lineno}: Protocol method {function.name} has executable body around ellipsis'
+                          )
+                          continue
+                      allowed.append((str(path), node.lineno, owner.name, function.name))
+
+              stream = io.StringIO(source)
+              for token in tokenize.generate_tokens(stream.readline):
+                  if token.type == tokenize.COMMENT and (
+                      'TODO' in token.string.upper() or 'FIXME' in token.string.upper()
+                  ):
+                      violations.append(
+                          f'{path}:{token.start[0]}: TODO/FIXME production comment is forbidden'
+                      )
+
+          if violations:
+              print('\n'.join(sorted(violations)))
+              raise SystemExit(f'concrete stub violations: {len(violations)}')
+          allowed.sort()
+          for path, line, owner, function in allowed:
+              print(f'allowed_protocol_signature={path}:{line}:{owner}.{function}')
+          if len(allowed) != 18:
+              raise SystemExit(f'expected 18 exact Protocol signatures, got {len(allowed)}')
+          print('concrete_stub_findings=0')
+          print('protocol_signature_ellipses=18')
+          PY
