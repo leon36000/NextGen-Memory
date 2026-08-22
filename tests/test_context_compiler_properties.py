@@ -42,7 +42,7 @@ def memory_id(case_index: int, item_index: int) -> UUID:
 
 def content_hash(case_index: int, item_index: int) -> str:
     return hashlib.sha256(
-        f"context-property:{case_index}:{item_index}".encode()
+        f"property evidence {case_index}:{item_index}".encode()
     ).hexdigest()
 
 
@@ -369,7 +369,7 @@ def test_generated_fail_closed_cases_raise_stable_error_classes() -> None:
         subject_key="subject",
         source_cluster_key="source",
         content="base",
-        content_hash=content_hash(20_000, 0),
+        content_hash=hashlib.sha256(b"base").hexdigest(),
         backend_ref="base",
         source_uri=None,
         fidelity=EvidenceFidelity.EXACT,
@@ -399,7 +399,7 @@ def test_generated_fail_closed_cases_raise_stable_error_classes() -> None:
                         "memory_id": memory_id(20_000, 1),
                         "space_id": OTHER_SPACE_ID,
                         "content": "other",
-                        "content_hash": content_hash(20_000, 1),
+                        "content_hash": hashlib.sha256(b"other").hexdigest(),
                     }
                 ),
             ),
@@ -432,7 +432,7 @@ def test_generated_fail_closed_cases_raise_stable_error_classes() -> None:
             },
             "memory_id": first_id,
             "content": "first",
-            "content_hash": content_hash(20_001, 0),
+            "content_hash": hashlib.sha256(b"first").hexdigest(),
             "prerequisite_memory_ids": (second_id,),
         }
     )
@@ -444,7 +444,7 @@ def test_generated_fail_closed_cases_raise_stable_error_classes() -> None:
             },
             "memory_id": second_id,
             "content": "second",
-            "content_hash": content_hash(20_001, 1),
+            "content_hash": hashlib.sha256(b"second").hexdigest(),
             "prerequisite_memory_ids": (first_id,),
         }
     )

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from collections.abc import Iterable, Mapping
@@ -217,12 +218,19 @@ class IntegratedContextEvidence:
                 self.source_cluster_key,
             ),
         )
-        object.__setattr__(
-            self,
+        normalized_content = _normalize_required_text(
             "content",
-            _normalize_required_text("content", self.content),
+            self.content,
         )
+        object.__setattr__(self, "content", normalized_content)
         _validate_hash("content_hash", self.content_hash)
+        expected_content_hash = hashlib.sha256(
+            normalized_content.encode("utf-8")
+        ).hexdigest()
+        if self.content_hash != expected_content_hash:
+            raise ContextCompilerValidationError(
+                "content_hash must match normalized materialized content"
+            )
         object.__setattr__(
             self,
             "backend_ref",
