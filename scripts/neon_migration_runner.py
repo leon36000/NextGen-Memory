@@ -9,7 +9,7 @@ import subprocess
 import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from enum import Enum
+from enum import StrEnum
 from pathlib import Path
 from typing import Protocol
 
@@ -95,7 +95,7 @@ class SubprocessCommandExecutor:
         )
 
 
-class ExitClass(str, Enum):
+class ExitClass(StrEnum):
     """Bounded failure classes safe for logs and CI artifacts."""
 
     NONZERO_EXIT = "nonzero_exit"
