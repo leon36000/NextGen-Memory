@@ -1,0 +1,449 @@
+name: One-shot release integrity implementation
+
+on:
+  pull_request:
+
+permissions:
+  contents: write
+
+jobs:
+  implement-and-verify:
+    if: github.event.pull_request.head.ref == 'ci/release-wheel-integrity-v0-20260822'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ci/release-wheel-integrity-v0-20260822
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Record RED evidence
+        shell: bash
+        run: |
+          set +e
+          python -m pytest -q tests/test_release_artifact.py tests/test_release_integrity_workflow.py > /tmp/release_red.log 2>&1
+          printf '%s' "$?" > /tmp/release_red_status
+          set -e
+      - name: Implement dependency-free wheel inspector
+        run: |
+          mkdir -p scripts
+          cat > scripts/verify_release_artifact.py <<'PYCODE'
+          """Validate a NextGen Memory wheel without extracting or importing it."""
+
+          from __future__ import annotations
+
+          import argparse
+          import hashlib
+          import json
+          import re
+          import zipfile
+          from dataclasses import asdict, dataclass
+          from email.parser import BytesParser
+          from email.policy import compat32
+          from pathlib import Path, PurePosixPath
+          from typing import Sequence
+
+          _DIST_NORMALIZER = re.compile(r"[-_.]+")
+          _MODULE_PATTERN = re.compile(
+              r"^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*$"
+          )
+          _FORBIDDEN_PARTS = frozenset(
+              {".git", ".hg", ".svn", "__pycache__", "test", "tests"}
+          )
+          _FORBIDDEN_SUFFIXES = frozenset(
+              {".pyc", ".pyo", ".pem", ".key", ".p12", ".pfx"}
+          )
+          _FORBIDDEN_FILENAMES = frozenset(
+              {".env", "id_rsa", "id_dsa", "id_ed25519"}
+          )
+
+
+          class WheelValidationError(ValueError):
+              """The wheel violates the release artifact contract."""
+
+
+          @dataclass(frozen=True, slots=True)
+          class WheelReport:
+              wheel_filename: str
+              wheel_sha256: str
+              distribution: str
+              version: str
+              metadata_path: str
+              member_count: int
+              package_member_count: int
+              required_modules: tuple[str, ...]
+
+              def to_dict(self) -> dict[str, object]:
+                  payload = asdict(self)
+                  payload["required_modules"] = list(self.required_modules)
+                  return payload
+
+              def to_json(self) -> str:
+                  return json.dumps(
+                      self.to_dict(),
+                      ensure_ascii=False,
+                      sort_keys=True,
+                      separators=(",", ":"),
+                  )
+
+
+          def _normalize_distribution_name(value: str) -> str:
+              normalized = _DIST_NORMALIZER.sub("-", value).strip("-").lower()
+              if not normalized:
+                  raise WheelValidationError("distribution name is empty")
+              return normalized
+
+
+          def _validate_archive_name(name: str) -> PurePosixPath:
+              if not name or "\x00" in name or "\\" in name:
+                  raise WheelValidationError("unsafe archive path")
+              if name.startswith("/") or re.match(r"^[A-Za-z]:", name):
+                  raise WheelValidationError("unsafe archive path")
+              raw = name[:-1] if name.endswith("/") else name
+              if not raw or "//" in raw:
+                  raise WheelValidationError("unsafe archive path")
+              path = PurePosixPath(raw)
+              if any(part in {"", ".", ".."} for part in path.parts):
+                  raise WheelValidationError("unsafe archive path")
+              if str(path) != raw:
+                  raise WheelValidationError("unsafe archive path")
+              return path
+
+
+          def _reject_forbidden_payload(path: PurePosixPath) -> None:
+              lowered_parts = tuple(part.lower() for part in path.parts)
+              if any(part in _FORBIDDEN_PARTS for part in lowered_parts):
+                  raise WheelValidationError("forbidden release payload")
+              filename = lowered_parts[-1]
+              if filename in _FORBIDDEN_FILENAMES:
+                  raise WheelValidationError("forbidden release payload")
+              if Path(filename).suffix in _FORBIDDEN_SUFFIXES:
+                  raise WheelValidationError("forbidden release payload")
+
+
+          def _module_members(module: str) -> tuple[str, str]:
+              if not _MODULE_PATTERN.fullmatch(module):
+                  raise WheelValidationError("required module name is invalid")
+              stem = module.replace(".", "/")
+              return f"{stem}.py", f"{stem}/__init__.py"
+
+
+          def inspect_wheel(
+              wheel_path: str | Path,
+              *,
+              expected_name: str,
+              expected_version: str,
+              required_modules: Sequence[str] = (),
+          ) -> WheelReport:
+              path = Path(wheel_path)
+              if not path.is_file() or path.suffix != ".whl":
+                  raise WheelValidationError("wheel path must identify one .whl file")
+              expected_distribution = _normalize_distribution_name(expected_name)
+              if not expected_version or expected_version.strip() != expected_version:
+                  raise WheelValidationError("expected version must be exact and non-empty")
+              normalized_modules = tuple(sorted(set(required_modules)))
+
+              try:
+                  archive = zipfile.ZipFile(path, "r")
+              except (OSError, zipfile.BadZipFile) as exc:
+                  raise WheelValidationError("wheel archive is unreadable") from exc
+
+              with archive:
+                  infos = archive.infolist()
+                  names = [info.filename for info in infos]
+                  if len(names) != len(set(names)):
+                      raise WheelValidationError("duplicate archive member")
+                  casefolded = [name.casefold() for name in names]
+                  if len(casefolded) != len(set(casefolded)):
+                      raise WheelValidationError("duplicate archive member")
+
+                  validated: dict[str, PurePosixPath] = {}
+                  file_names: set[str] = set()
+                  for info in infos:
+                      member_path = _validate_archive_name(info.filename)
+                      _reject_forbidden_payload(member_path)
+                      validated[info.filename] = member_path
+                      if not info.is_dir():
+                          file_names.add(info.filename)
+
+                  metadata_paths = [
+                      name
+                      for name, member_path in validated.items()
+                      if len(member_path.parts) >= 2
+                      and member_path.parts[-2].endswith(".dist-info")
+                      and member_path.parts[-1] == "METADATA"
+                  ]
+                  if len(metadata_paths) != 1:
+                      raise WheelValidationError(
+                          "wheel metadata must contain exactly one METADATA record"
+                      )
+                  metadata_path = metadata_paths[0]
+                  try:
+                      metadata = BytesParser(policy=compat32).parsebytes(
+                          archive.read(metadata_path)
+                      )
+                  except (KeyError, OSError, ValueError) as exc:
+                      raise WheelValidationError("wheel metadata is unreadable") from exc
+                  raw_name = metadata.get("Name")
+                  raw_version = metadata.get("Version")
+                  if not isinstance(raw_name, str) or not isinstance(raw_version, str):
+                      raise WheelValidationError("wheel metadata identity is missing")
+                  distribution = _normalize_distribution_name(raw_name)
+                  if distribution != expected_distribution:
+                      raise WheelValidationError("wheel distribution does not match")
+                  if raw_version != expected_version:
+                      raise WheelValidationError("wheel version does not match")
+
+                  if "nextgen_memory/__init__.py" not in file_names:
+                      raise WheelValidationError("wheel package root is missing")
+                  for module in normalized_modules:
+                      module_file, package_init = _module_members(module)
+                      if module_file not in file_names and package_init not in file_names:
+                          raise WheelValidationError(
+                              f"required module is missing: {module}"
+                          )
+
+                  package_member_count = sum(
+                      name.startswith("nextgen_memory/")
+                      for name in file_names
+                  )
+
+              return WheelReport(
+                  wheel_filename=path.name,
+                  wheel_sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
+                  distribution=distribution,
+                  version=raw_version,
+                  metadata_path=metadata_path,
+                  member_count=len(infos),
+                  package_member_count=package_member_count,
+                  required_modules=normalized_modules,
+              )
+
+
+          def _parser() -> argparse.ArgumentParser:
+              parser = argparse.ArgumentParser(
+                  description="Validate one NextGen Memory wheel artifact."
+              )
+              parser.add_argument("wheel")
+              parser.add_argument("--expected-name", required=True)
+              parser.add_argument("--expected-version", required=True)
+              parser.add_argument(
+                  "--required-module",
+                  action="append",
+                  default=[],
+                  dest="required_modules",
+              )
+              return parser
+
+
+          def main(argv: Sequence[str] | None = None) -> int:
+              args = _parser().parse_args(argv)
+              report = inspect_wheel(
+                  args.wheel,
+                  expected_name=args.expected_name,
+                  expected_version=args.expected_version,
+                  required_modules=args.required_modules,
+              )
+              print(report.to_json())
+              return 0
+
+
+          if __name__ == "__main__":
+              raise SystemExit(main())
+          PYCODE
+      - name: Install final path-filtered release workflow
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          workflow = '''name: Release integrity
+
+          on:
+            workflow_dispatch:
+            pull_request:
+              paths:
+                - "src/**"
+                - "pyproject.toml"
+                - "scripts/verify_release_artifact.py"
+                - "tests/test_release_artifact.py"
+                - "tests/test_release_integrity_workflow.py"
+                - ".github/workflows/release-integrity.yml"
+
+          permissions:
+            contents: read
+
+          jobs:
+            wheel-smoke:
+              runs-on: ubuntu-latest
+              strategy:
+                fail-fast: false
+                matrix:
+                  python-version: ["3.12", "3.13"]
+              steps:
+                - uses: actions/checkout@v4
+                - uses: actions/setup-python@v5
+                  with:
+                    python-version: __EXPR__ matrix.python-version __END__
+                    cache: pip
+                - name: Install development tools
+                  run: python -m pip install -e '.[dev]'
+                - name: Focused inspector tests
+                  run: python -m pytest -q tests/test_release_artifact.py tests/test_release_integrity_workflow.py
+                - name: Build exactly one wheel
+                  shell: bash
+                  run: |
+                    rm -rf dist
+                    python -m pip wheel --no-deps --no-build-isolation . --wheel-dir dist
+                    mapfile -t wheels < <(find dist -maxdepth 1 -type f -name '*.whl' -print)
+                    test "${#wheels[@]}" -eq 1
+                    printf 'WHEEL_PATH=%s\n' "${wheels[0]}" >> "$GITHUB_ENV"
+                - name: Inspect wheel archive
+                  shell: bash
+                  run: |
+                    version="$(python - <<'PYVERSION'
+                    import tomllib
+                    from pathlib import Path
+                    print(tomllib.loads(Path('pyproject.toml').read_text(encoding='utf-8'))['project']['version'])
+                    PYVERSION
+                    )"
+                    mapfile -t modules < <(
+                      find src/nextgen_memory -maxdepth 1 -type f -name '*.py' -printf '%f\n' |
+                      sed -E 's/\.py$//' |
+                      awk '$0 == "__init__" {print "nextgen_memory"; next} {print "nextgen_memory." $0}' |
+                      sort -u
+                    )
+                    args=()
+                    for module in "${modules[@]}"; do args+=(--required-module "$module"); done
+                    python scripts/verify_release_artifact.py "$WHEEL_PATH" \
+                      --expected-name nextgen-memory \
+                      --expected-version "$version" \
+                      "${args[@]}" > dist/wheel-report.json
+                - name: Install and import outside checkout
+                  shell: bash
+                  run: |
+                    smoke_root="$(mktemp -d)"
+                    outside="$(mktemp -d)"
+                    python -m venv "$smoke_root/venv"
+                    "$smoke_root/venv/bin/python" -m pip install --no-deps "$WHEEL_PATH"
+                    (
+                      cd "$outside"
+                      REPO_ROOT="$GITHUB_WORKSPACE" "$smoke_root/venv/bin/python" -I - <<'PYSMOKE'
+                    import os
+                    import sys
+                    from pathlib import Path
+
+                    import nextgen_memory
+
+                    module_path = Path(nextgen_memory.__file__).resolve()
+                    prefix = Path(sys.prefix).resolve()
+                    repository = Path(os.environ['REPO_ROOT']).resolve()
+                    assert module_path.is_relative_to(prefix)
+                    assert not module_path.is_relative_to(repository)
+                    exports = nextgen_memory.__all__
+                    assert isinstance(exports, tuple)
+                    assert exports
+                    assert len(exports) == len(set(exports))
+                    for name in exports:
+                        getattr(nextgen_memory, name)
+                    PYSMOKE
+                    )
+                    "$smoke_root/venv/bin/python" -m pip check
+          '''
+          dollar = '$'
+          workflow = workflow.replace('__EXPR__ matrix.python-version __END__', dollar + '{{ matrix.python-version }}')
+          lines = [line[10:] if line.startswith('          ') else line for line in workflow.splitlines()]
+          Path('.github/workflows/release-integrity.yml').write_text('\n'.join(lines) + '\n', encoding='utf-8')
+          PY
+      - name: Remove transport and normalize scoped files
+        run: |
+          rm .github/workflows/release-integrity-patch-once.yml
+          ruff check --fix scripts/verify_release_artifact.py tests/test_release_artifact.py tests/test_release_integrity_workflow.py
+          python - <<'PY'
+          from pathlib import Path
+          for name in (
+              'scripts/verify_release_artifact.py',
+              'tests/test_release_artifact.py',
+              'tests/test_release_integrity_workflow.py',
+              '.github/workflows/release-integrity.yml',
+          ):
+              path = Path(name)
+              lines = path.read_text(encoding='utf-8').splitlines()
+              path.write_text('\n'.join(line.rstrip() for line in lines) + '\n', encoding='utf-8')
+          PY
+      - name: Focused contract verification
+        run: python -m pytest -q tests/test_release_artifact.py tests/test_release_integrity_workflow.py
+      - name: Build and inspect real wheel
+        shell: bash
+        run: |
+          rm -rf dist
+          python -m pip wheel --no-deps --no-build-isolation . --wheel-dir dist
+          mapfile -t wheels < <(find dist -maxdepth 1 -type f -name '*.whl' -print)
+          test "${#wheels[@]}" -eq 1
+          version="$(python - <<'PY'
+          import tomllib
+          from pathlib import Path
+          print(tomllib.loads(Path('pyproject.toml').read_text(encoding='utf-8'))['project']['version'])
+          PY
+          )"
+          mapfile -t modules < <(
+            find src/nextgen_memory -maxdepth 1 -type f -name '*.py' -printf '%f\n' |
+            sed -E 's/\.py$//' |
+            awk '$0 == "__init__" {print "nextgen_memory"; next} {print "nextgen_memory." $0}' |
+            sort -u
+          )
+          args=()
+          for module in "${modules[@]}"; do args+=(--required-module "$module"); done
+          python scripts/verify_release_artifact.py "${wheels[0]}" \
+            --expected-name nextgen-memory \
+            --expected-version "$version" \
+            "${args[@]}" > dist/wheel-report.json
+      - name: Install real wheel outside checkout
+        shell: bash
+        run: |
+          mapfile -t wheels < <(find dist -maxdepth 1 -type f -name '*.whl' -print)
+          test "${#wheels[@]}" -eq 1
+          smoke_root="$(mktemp -d)"
+          outside="$(mktemp -d)"
+          python -m venv "$smoke_root/venv"
+          "$smoke_root/venv/bin/python" -m pip install --no-deps "${wheels[0]}"
+          (
+            cd "$outside"
+            REPO_ROOT="$GITHUB_WORKSPACE" "$smoke_root/venv/bin/python" -I - <<'PY'
+          import os
+          import sys
+          from pathlib import Path
+          import nextgen_memory
+          module_path=Path(nextgen_memory.__file__).resolve()
+          assert module_path.is_relative_to(Path(sys.prefix).resolve())
+          assert not module_path.is_relative_to(Path(os.environ['REPO_ROOT']).resolve())
+          assert nextgen_memory.__all__
+          for name in nextgen_memory.__all__: getattr(nextgen_memory,name)
+          PY
+          )
+          "$smoke_root/venv/bin/python" -m pip check
+      - name: Complete repository verification
+        run: |
+          ruff check .
+          python -m compileall -q src scripts
+          python -m pytest -q
+          git diff --check
+      - name: Reject scope expansion and weakening
+        run: |
+          while IFS= read -r path; do
+            case "$path" in
+              scripts/verify_release_artifact.py|tests/test_release_artifact.py|tests/test_release_integrity_workflow.py|.github/workflows/release-integrity.yml|.github/workflows/release-integrity-patch-once.yml) ;;
+              *) echo "unexpected changed path: $path" >&2; exit 1 ;;
+            esac
+          done < <(git diff --name-only HEAD)
+          if git diff --unified=0 | grep -E '^\+.*(pytest\.mark\.(skip|xfail)|@unittest\.skip|# *noqa|NotImplementedError|TODO|FIXME|pass$)' ; then
+            exit 1
+          fi
+      - name: Commit verified release integrity implementation
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add scripts/verify_release_artifact.py tests/test_release_artifact.py tests/test_release_integrity_workflow.py .github/workflows/release-integrity.yml
+          git add -u .github/workflows
+          git commit -m 'ci: verify release wheel structure and isolated import'
+          git push origin HEAD:ci/release-wheel-integrity-v0-20260822
