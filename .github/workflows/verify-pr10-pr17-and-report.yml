@@ -1,0 +1,194 @@
+name: Verify and report PR10 and PR17 rehabilitation
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+jobs:
+  verify:
+    if: github.event.pull_request.head.ref == 'bootstrap/verify-pr10-pr17-rehabilitation-20260822'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - branch: fix/pr10-exact-ci-rehabilitation-20260822
+            original_pr: 10
+            python-version: '3.12'
+          - branch: fix/pr10-exact-ci-rehabilitation-20260822
+            original_pr: 10
+            python-version: '3.13'
+          - branch: fix/pr17-exact-ci-rehabilitation-20260822
+            original_pr: 17
+            python-version: '3.12'
+          - branch: fix/pr17-exact-ci-rehabilitation-20260822
+            original_pr: 17
+            python-version: '3.13'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - name: Resolve and checkout immutable remote SHA
+        id: candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected="$(git ls-remote origin "refs/heads/${{ matrix.branch }}" | awk '{print $1}')"
+          test -n "$expected"
+          git fetch --depth=1 origin "$expected"
+          git checkout --detach "$expected"
+          test "$(git rev-parse HEAD)" = "$expected"
+          printf 'sha=%s\n' "$expected" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - name: Install exact candidate
+        run: python -m pip install -e '.[dev]'
+      - name: Lint exact candidate
+        run: ruff check .
+      - name: Compile exact candidate
+        run: python -m compileall -q src
+      - name: Test exact candidate
+        run: python -m pytest -q
+      - name: Diff integrity
+        run: git diff --check
+      - name: Prove temporary workflows are absent
+        run: |
+          test ! -e .github/workflows/pr10-rehabilitation-once.yml
+          test ! -e .github/workflows/pr17-rehabilitation-once.yml
+      - name: Write immutable verification record
+        run: |
+          mkdir -p /tmp/verification
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          record = {
+              "branch": "${{ matrix.branch }}",
+              "original_pr": ${{ matrix.original_pr }},
+              "python_version": "${{ matrix.python-version }}",
+              "candidate_sha": "${{ steps.candidate.outputs.sha }}",
+              "ruff": "clean",
+              "compileall": "clean",
+              "pytest": "green",
+              "diff_check": "clean",
+              "temporary_workflows_absent": True,
+              "run_id": "${{ github.run_id }}",
+          }
+          Path('/tmp/verification/record.json').write_text(
+              json.dumps(record, sort_keys=True, indent=2) + '\n',
+              encoding='utf-8',
+          )
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: verification-${{ matrix.original_pr }}-${{ matrix.python-version }}
+          path: /tmp/verification/record.json
+          if-no-files-found: error
+
+  report:
+    if: github.event.pull_request.head.ref == 'bootstrap/verify-pr10-pr17-rehabilitation-20260822'
+    needs: verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: /tmp/records
+          pattern: verification-*
+          merge-multiple: false
+      - name: Aggregate exact-SHA evidence
+        run: |
+          python - <<'PY'
+          import json
+          from collections import defaultdict
+          from pathlib import Path
+
+          records = [json.loads(path.read_text(encoding='utf-8')) for path in Path('/tmp/records').glob('**/record.json')]
+          if len(records) != 4:
+              raise SystemExit(f'expected four records, got {len(records)}')
+          grouped = defaultdict(list)
+          for record in records:
+              grouped[record['original_pr']].append(record)
+          summary = {}
+          for pr_number in (10, 17):
+              group = grouped[pr_number]
+              if sorted(record['python_version'] for record in group) != ['3.12', '3.13']:
+                  raise SystemExit(f'incomplete Python matrix for PR #{pr_number}')
+              shas = {record['candidate_sha'] for record in group}
+              if len(shas) != 1:
+                  raise SystemExit(f'candidate SHA moved during verification for PR #{pr_number}: {shas}')
+              for record in group:
+                  expected = {
+                      'ruff': 'clean',
+                      'compileall': 'clean',
+                      'pytest': 'green',
+                      'diff_check': 'clean',
+                      'temporary_workflows_absent': True,
+                  }
+                  for key, value in expected.items():
+                      if record[key] != value:
+                          raise SystemExit(f'failed evidence {key} for PR #{pr_number}')
+              summary[str(pr_number)] = {
+                  'candidate_sha': next(iter(shas)),
+                  'python_versions': ['3.12', '3.13'],
+                  'run_id': group[0]['run_id'],
+              }
+          Path('/tmp/summary.json').write_text(
+              json.dumps(summary, sort_keys=True, indent=2) + '\n',
+              encoding='utf-8',
+          )
+          PY
+      - name: Comment exact evidence on original and rehabilitation PRs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import subprocess
+
+          summary = json.load(open('/tmp/summary.json', encoding='utf-8'))
+          branch_by_pr = {
+              10: 'fix/pr10-exact-ci-rehabilitation-20260822',
+              17: 'fix/pr17-exact-ci-rehabilitation-20260822',
+          }
+          for original_pr in (10, 17):
+              data = summary[str(original_pr)]
+              sha = data['candidate_sha']
+              body = f'''## Exact-SHA rehabilitation verification\n\nStatus: **GREEN / unmerged / Sol review pending**.\n\n- Candidate SHA: `{sha}`\n- Python 3.12: Ruff, compileall, full pytest and diff-check passed\n- Python 3.13: Ruff, compileall, full pytest and diff-check passed\n- Both jobs resolved the same immutable remote SHA and checked it out detached\n- Temporary rehabilitation workflow is absent from the candidate tree\n- Verification run: {os.environ['RUN_URL']}\n\nThis is verification evidence, not merge approval. No autonomous merge is permitted without an actual independent GPT-5.6 Sol `APPROVE` verdict on the unchanged exact SHA.'''
+              targets = [original_pr]
+              result = subprocess.run(
+                  ['gh', 'pr', 'list', '--repo', os.environ['REPO'], '--state', 'open', '--head', branch_by_pr[original_pr], '--json', 'number', '--jq', '.[0].number'],
+                  check=True,
+                  text=True,
+                  capture_output=True,
+              )
+              rehab = result.stdout.strip()
+              if rehab:
+                  targets.append(int(rehab))
+              for target in targets:
+                  subprocess.run(
+                      ['gh', 'pr', 'comment', str(target), '--repo', os.environ['REPO'], '--body', body],
+                      check=True,
+                  )
+          PY
+      - name: Record checkpoint on orchestrator issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          gh issue comment 23 --repo "$REPO" --body "## Rehabilitation checkpoint\n\nPR #10 and PR #17 rehabilitation candidates passed immutable-ref verification on Python 3.12 and 3.13: Ruff, compileall, complete pytest, diff-check, and temporary-workflow absence. Exact SHAs are recorded on their original and rehabilitation PRs. Verification run: $RUN_URL. Both remain unmerged and require genuine GPT-5.6 Sol approval on their unchanged SHA."
+      - name: Close this ephemeral verification PR without merge
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: gh pr close "$PR_NUMBER" --repo "$REPO" --comment 'Exact-SHA verification completed successfully. Closed without merge; evidence was copied to the target PRs and issue #23.'
