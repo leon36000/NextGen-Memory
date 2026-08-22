@@ -1,0 +1,213 @@
+name: Verify no-stubs lexical shadowing repair
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+jobs:
+  verify:
+    if: github.event.pull_request.head.ref == 'bootstrap/verify-no-stubs-shadowing-fix-20260822'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - name: Resolve stable exact repair SHA
+        id: candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 60); do
+            expected="$(git ls-remote origin refs/heads/fix/no-stubs-exception-shadowing-20260822 | awk '{print $1}')"
+            test -n "$expected"
+            git fetch --depth=1 origin "$expected"
+            if ! git cat-file -e "$expected:.github/workflows/no-stubs-shadowing-patch-once.yml" 2>/dev/null; then
+              git checkout --detach "$expected"
+              test "$(git rev-parse HEAD)" = "$expected"
+              printf 'sha=%s\n' "$expected" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            sleep 10
+          done
+          echo 'lexical repair transport workflow did not disappear' >&2
+          exit 1
+      - name: Prove stack ancestry, exact scope and no weakening
+        run: |
+          git fetch --depth=1 origin ci/ast-no-stubs-contract-v0-20260822
+          git merge-base --is-ancestor FETCH_HEAD HEAD
+          git diff --name-only FETCH_HEAD...HEAD > /tmp/paths.txt
+          test "$(awk 'NF' /tmp/paths.txt | wc -l)" -eq 3
+          for path in \
+            scripts/verify_no_stubs.py \
+            tests/test_no_stubs_exception_shadowing.py \
+            tests/test_no_stubs_protocol_shadowing.py; do
+            grep -Fxq "$path" /tmp/paths.txt
+          done
+          test ! -e .github/workflows/no-stubs-shadowing-patch-once.yml
+          if git diff --unified=0 FETCH_HEAD...HEAD -- scripts/verify_no_stubs.py | grep -E '^\+.*(pytest\.mark\.(skip|xfail)|@unittest\.skip|# *noqa|NotImplementedError|TODO|FIXME|pass$)' ; then
+            exit 1
+          fi
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - name: Install exact repair candidate
+        run: python -m pip install -e '.[dev]'
+      - name: Focused base and adversarial tests
+        run: |
+          python -m pytest -q \
+            tests/test_no_stubs.py \
+            tests/test_no_stubs_workflow.py \
+            tests/test_no_stubs_exception_shadowing.py \
+            tests/test_no_stubs_protocol_shadowing.py
+          python scripts/verify_no_stubs.py src > /tmp/no-stubs-report.json
+          python - <<'PY'
+          import json
+          report=json.load(open('/tmp/no-stubs-report.json',encoding='utf-8'))
+          assert report == {'finding_count':0,'findings':[]}, report
+          PY
+      - name: Complete exact-candidate verification
+        run: |
+          ruff check .
+          python -m compileall -q src scripts
+          python -m pytest -q
+          git diff --check
+      - name: Store immutable evidence
+        run: |
+          mkdir -p /tmp/evidence
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          Path('/tmp/evidence/record.json').write_text(
+              json.dumps({
+                  'candidate_sha':'${{ steps.candidate.outputs.sha }}',
+                  'python_version':'${{ matrix.python-version }}',
+                  'focused':'green','production_findings':0,
+                  'ruff':'clean','compileall':'clean','full_suite':'green',
+                  'diff_check':'clean','scope':'three_file_stacked_repair',
+                  'transport_absent':True,'run_id':'${{ github.run_id }}',
+              },sort_keys=True,indent=2)+'\n',encoding='utf-8')
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: no-stubs-shadow-${{ matrix.python-version }}
+          path: /tmp/evidence/record.json
+          if-no-files-found: error
+
+  report:
+    if: github.event.pull_request.head.ref == 'bootstrap/verify-no-stubs-shadowing-fix-20260822'
+    needs: verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: /tmp/records
+          pattern: no-stubs-shadow-*
+      - name: Reconcile immutable matrix evidence
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          records=[json.loads(p.read_text(encoding='utf-8')) for p in Path('/tmp/records').glob('**/record.json')]
+          if len(records)!=2: raise SystemExit(f'expected two records, got {len(records)}')
+          if sorted(r['python_version'] for r in records)!=['3.12','3.13']: raise SystemExit('incomplete matrix')
+          shas={r['candidate_sha'] for r in records}
+          if len(shas)!=1: raise SystemExit(f'candidate moved: {shas}')
+          for r in records:
+              expected={
+                  'focused':'green','production_findings':0,'ruff':'clean','compileall':'clean',
+                  'full_suite':'green','diff_check':'clean','scope':'three_file_stacked_repair',
+                  'transport_absent':True,
+              }
+              for key,value in expected.items():
+                  if r[key]!=value: raise SystemExit(f'failed evidence {key}')
+          Path('/tmp/summary.json').write_text(
+              json.dumps({'candidate_sha':next(iter(shas)),'run_id':records[0]['run_id']},sort_keys=True,indent=2)+'\n',
+              encoding='utf-8')
+          PY
+      - name: Publish exact evidence, supersession and blind Sol packet
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          python - <<'PY'
+          import json, os, subprocess
+          repo=os.environ['REPO']; summary=json.load(open('/tmp/summary.json',encoding='utf-8'))
+          fix_rows=json.loads(subprocess.run(
+              ['gh','pr','list','--repo',repo,'--state','open','--head','fix/no-stubs-exception-shadowing-20260822','--json','number,headRefOid,baseRefName'],
+              check=True,text=True,capture_output=True).stdout)
+          if len(fix_rows)!=1 or fix_rows[0]['headRefOid']!=summary['candidate_sha']:
+              raise SystemExit('repair PR missing or moved')
+          fix_pr=fix_rows[0]
+          base_rows=json.loads(subprocess.run(
+              ['gh','pr','list','--repo',repo,'--state','open','--head','ci/ast-no-stubs-contract-v0-20260822','--json','number,headRefOid'],
+              check=True,text=True,capture_output=True).stdout)
+          if len(base_rows)!=1: raise SystemExit('base no-stubs PR missing or ambiguous')
+          base_pr=base_rows[0]
+          subprocess.run(
+              ['gh','pr','comment',str(base_pr['number']),'--repo',repo,'--body',
+               f"## Superseded by adversarial lexical repair\n\nIndependent review found exception/Protocol name-shadowing false negatives. This base candidate is **not merge-ready**. Stacked repair PR #{fix_pr['number']} at `{summary['candidate_sha']}` passed exact Python 3.12/3.13 verification and production self-scan, but remains unmerged and Sol-pending."],
+              check=True)
+          packet=f'''## Exact-SHA verification and blind GPT-5.6 Sol review request
+
+Return exactly one verdict: `APPROVE`, `CHANGES_REQUIRED`, or `BLOCKED_BY_EVIDENCE`.
+
+### Boundary
+
+- Repair SHA: `{summary['candidate_sha']}`
+- Stack base: `ci/ast-no-stubs-contract-v0-20260822`
+- Candidate movement invalidates this request.
+
+### Exact repair scope
+
+- `scripts/verify_no_stubs.py`
+- `tests/test_no_stubs_exception_shadowing.py`
+- `tests/test_no_stubs_protocol_shadowing.py`
+
+### Contract and evidence
+
+- exception and Protocol exemptions are bound to exact AST class nodes and lexical binding state, not global name sets;
+- concrete classes named `ValueError`, `RuntimeError`, `Exception`, or a previously proven Protocol name are still reported when they do not inherit the relevant abstraction;
+- assignments, imports, functions and class rebindings shadow unqualified built-in exception names;
+- direct/transitive real exception subclasses and qualified `builtins` aliases remain accepted;
+- nested lexical scopes and source-order rebindings are tested;
+- existing Protocol/abstractmethod/overload behavior remains green;
+- Python 3.12 and 3.13 detached-checkout the same immutable SHA;
+- base+adversarial focused tests, production scan with zero findings, Ruff, compileall, full pytest and diff-check pass on both;
+- exact three-file scope, audit ancestry and transport cleanup are proven;
+- no suppression, runtime dependency, source annotation, public API or production behavior change;
+- verification run: {os.environ['RUN_URL']}.
+
+### Review focus
+
+- lexical binding semantics in modules, functions and class bodies;
+- conditional-scope conservatism and potential false exemptions;
+- alias shadowing for `builtins`, `typing`, local exception/Protocol chains;
+- whether node identity remains stable through one parse/scan pass;
+- duplicate or missed nested findings;
+- whether the fix creates unacceptable false positives in valid abstraction code.
+
+Inspect the exact stacked diff and tests. No merge of either base or repair without genuine independent Sol `APPROVE` on the final unchanged stack SHA.'''
+          subprocess.run(['gh','pr','comment',str(fix_pr['number']),'--repo',repo,'--body',packet],check=True)
+          issue_rows=json.loads(subprocess.run(
+              ['gh','issue','list','--repo',repo,'--state','open','--search','prevent no-stubs exception-name shadowing bypass in:title','--json','number'],
+              check=True,text=True,capture_output=True).stdout)
+          if len(issue_rows)==1:
+              subprocess.run(['gh','issue','comment',str(issue_rows[0]['number']),'--repo',repo,'--body',f"Repair `{summary['candidate_sha']}` passed exact Python 3.12/3.13 verification and zero-finding production self-scan. Blind Sol packet is on PR #{fix_pr['number']}; unmerged."],check=True)
+          subprocess.run(['gh','issue','comment','23','--repo',repo,'--body',f"No-stubs lexical repair `{summary['candidate_sha']}` passed exact cross-version verification. Base candidate marked superseded; blind Sol packet on PR #{fix_pr['number']}; no merge. Run: {os.environ['RUN_URL']}"],check=True)
+          PY
+      - name: Close verifier without merge
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: gh pr close "$PR_NUMBER" --repo "$REPO" --comment 'Exact lexical-shadowing verification completed. Evidence copied; closed without merge.'
