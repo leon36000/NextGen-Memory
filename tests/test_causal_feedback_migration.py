@@ -50,7 +50,8 @@ def test_causal_rows_require_complete_safe_immutable_evidence() -> None:
 def test_metadata_guard_uses_exact_allowlist_not_recursive_blacklist() -> None:
     sql = MIGRATION.read_text(encoding="utf-8")
 
-    assert "jsonb_object_length(p_metadata) = 10" in sql
+    assert "SELECT count(*) FROM jsonb_object_keys(p_metadata)" in sql
+    assert "jsonb_object_length" not in sql
     assert "p_metadata ?& ARRAY[" in sql
     assert "jsonb_object_keys(p_metadata)" in sql
     for key in ALLOWED_METADATA_KEYS:
