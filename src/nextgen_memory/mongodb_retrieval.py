@@ -24,6 +24,19 @@ class MongoResearchIndexConfig:
         "tags",
     )
     active_status: str = "active"
+    source_type: str = "paper"
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "active_status",
+            _normalize_policy_text("active_status", self.active_status),
+        )
+        object.__setattr__(
+            self,
+            "source_type",
+            _normalize_policy_text("source_type", self.source_type),
+        )
 
 
 def build_research_hybrid_pipeline(
@@ -36,10 +49,14 @@ def build_research_hybrid_pipeline(
     scope_filter = {
         "space_id": str(query.space_id),
         "status": config.active_status,
+        "source_type": config.source_type,
     }
     project: dict[str, Any] = {
         "_id": 1,
         "memory_id": 1,
+        "space_id": 1,
+        "status": 1,
+        "source_type": 1,
         "title": 1,
         "source_uri": 1,
         "tags": 1,
@@ -89,6 +106,12 @@ def build_research_hybrid_pipeline(
                                                 "equals": {
                                                     "path": "status",
                                                     "value": config.active_status,
+                                                }
+                                            },
+                                            {
+                                                "equals": {
+                                                    "path": "source_type",
+                                                    "value": config.source_type,
                                                 }
                                             },
                                         ],
@@ -164,10 +187,27 @@ class MongoResearchRetriever:
     ) -> tuple[ResearchRetrievalHit, ...]:
         pipeline = build_research_hybrid_pipeline(query, self.config)
         documents = self._collection.aggregate(pipeline)
-        return tuple(
-            self._map_document(document, rank)
-            for rank, document in enumerate(documents, start=1)
-        )
+        hits: list[ResearchRetrievalHit] = []
+        seen_memory_ids: set[UUID] = set()
+        seen_backend_refs: set[str] = set()
+
+        for rank, document in enumerate(documents, start=1):
+            if rank > query.limit:
+                raise ValueError("retrieval batch exceeds query limit")
+            hit = self._map_document(
+                document,
+                rank,
+                query=query,
+                config=self.config,
+            )
+            if hit.memory_id in seen_memory_ids:
+                raise ValueError("retrieval batch contains duplicate memory_id")
+            if hit.backend_ref in seen_backend_refs:
+                raise ValueError("retrieval batch contains duplicate backend_ref")
+            seen_memory_ids.add(hit.memory_id)
+            seen_backend_refs.add(hit.backend_ref)
+            hits.append(hit)
+        return tuple(hits)
 
     def close(self) -> None:
         if self._owned_client is not None:
@@ -177,14 +217,36 @@ class MongoResearchRetriever:
     def _map_document(
         document: Mapping[str, Any],
         rank: int,
+        *,
+        query: ResearchRetrievalQuery,
+        config: MongoResearchIndexConfig,
     ) -> ResearchRetrievalHit:
+        if not isinstance(document, Mapping):
+            raise ValueError("retrieval document must be a mapping")
+
+        raw_space_id = document.get("space_id")
+        try:
+            space_id = UUID(str(raw_space_id))
+        except (TypeError, ValueError, AttributeError) as exc:
+            raise ValueError("retrieval document has an invalid space_id") from exc
+        if space_id != query.space_id:
+            raise ValueError("retrieval document space_id mismatch")
+        if document.get("status") != config.active_status:
+            raise ValueError("retrieval document status mismatch")
+        if document.get("source_type") != config.source_type:
+            raise ValueError("retrieval document source_type mismatch")
+
         raw_memory_id = document.get("memory_id")
         try:
             memory_id = UUID(str(raw_memory_id))
         except (TypeError, ValueError, AttributeError) as exc:
             raise ValueError("retrieval document lacks a canonical memory_id UUID") from exc
 
-        backend_ref = str(document.get("_id", ""))
+        raw_backend_ref = document.get("_id")
+        backend_ref = str(raw_backend_ref).strip() if raw_backend_ref is not None else ""
+        if not backend_ref:
+            raise ValueError("retrieval document lacks a canonical backend_ref")
+
         tags_value = document.get("tags", ())
         if (
             isinstance(tags_value, (str, bytes))
@@ -198,7 +260,7 @@ class MongoResearchRetriever:
             raise ValueError("retrieval document lacks a fusion score")
         try:
             score = float(document["score"])
-        except (TypeError, ValueError) as exc:
+        except (TypeError, ValueError, OverflowError) as exc:
             raise ValueError("retrieval document has an invalid fusion score") from exc
 
         score_details = document.get("score_details")
@@ -215,3 +277,12 @@ class MongoResearchRetriever:
             tags=tags,
             score_details=score_details,
         )
+
+
+def _normalize_policy_text(name: str, value: object) -> str:
+    if not isinstance(value, str):
+        raise ValueError(f"{name} must be a string")
+    normalized = value.strip()
+    if not normalized:
+        raise ValueError(f"{name} must not be empty")
+    return normalized

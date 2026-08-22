@@ -34,6 +34,7 @@ def test_pipeline_uses_native_rank_fusion_with_scope_safe_search() -> None:
     assert vector_search["filter"] == {
         "space_id": str(query.space_id),
         "status": "active",
+        "source_type": "paper",
     }
     assert vector_search["limit"] == 10
     assert vector_search["numCandidates"] == 50
@@ -52,6 +53,7 @@ def test_pipeline_uses_native_rank_fusion_with_scope_safe_search() -> None:
     assert lexical_search["compound"]["filter"] == [
         {"equals": {"path": "space_id", "value": str(query.space_id)}},
         {"equals": {"path": "status", "value": "active"}},
+        {"equals": {"path": "source_type", "value": "paper"}},
     ]
     assert lexical_pipeline[1] == {"$limit": 10}
     assert len(lexical_pipeline) == 2
@@ -60,7 +62,9 @@ def test_pipeline_uses_native_rank_fusion_with_scope_safe_search() -> None:
         "lexical": 0.35,
     }
     assert pipeline[1] == {"$limit": 5}
-    assert "$project" in pipeline[2]
+    assert pipeline[2]["$project"]["space_id"] == 1
+    assert pipeline[2]["$project"]["status"] == 1
+    assert pipeline[2]["$project"]["source_type"] == 1
 
 
 def test_pipeline_enables_score_details_only_when_requested() -> None:
@@ -118,6 +122,16 @@ def test_query_rejects_zero_total_weight() -> None:
         )
 
 
+def scoped_document(**overrides: object) -> dict[str, object]:
+    values: dict[str, object] = {
+        "space_id": str(SPACE_ID),
+        "status": "active",
+        "source_type": "paper",
+    }
+    values.update(overrides)
+    return values
+
+
 class FakeCollection:
     def __init__(self, documents: list[dict[str, object]]) -> None:
         self.documents = documents
@@ -133,23 +147,23 @@ def test_retriever_maps_documents_to_ranked_immutable_hits() -> None:
 
     collection = FakeCollection(
         [
-            {
-                "_id": "paper:arxiv:2605.21951",
-                "memory_id": "4b84a18f-056f-5be9-bd27-a33ef835d29c",
-                "title": "Dynamic Mixture of Latent Memories",
-                "source_uri": "https://arxiv.org/html/2605.21951v1",
-                "tags": ["moe", "latent-memory"],
-                "score": 0.0163,
-                "score_details": {"value": 0.0163},
-            },
-            {
-                "_id": "paper:arxiv:2608.01739",
-                "memory_id": "2d6dc3f4-6fbb-51fb-b271-3ec5d70b70fa",
-                "title": "CoEvo-Mem",
-                "source_uri": "https://arxiv.org/html/2608.01739",
-                "tags": ["router", "utility"],
-                "score": 0.0159,
-            },
+            scoped_document(
+                _id="paper:arxiv:2605.21951",
+                memory_id="4b84a18f-056f-5be9-bd27-a33ef835d29c",
+                title="Dynamic Mixture of Latent Memories",
+                source_uri="https://arxiv.org/html/2605.21951v1",
+                tags=["moe", "latent-memory"],
+                score=0.0163,
+                score_details={"value": 0.0163},
+            ),
+            scoped_document(
+                _id="paper:arxiv:2608.01739",
+                memory_id="2d6dc3f4-6fbb-51fb-b271-3ec5d70b70fa",
+                title="CoEvo-Mem",
+                source_uri="https://arxiv.org/html/2608.01739",
+                tags=["router", "utility"],
+                score=0.0159,
+            ),
         ]
     )
     retriever = MongoResearchRetriever(collection)
@@ -177,13 +191,13 @@ def test_retriever_rejects_document_without_canonical_uuid() -> None:
 
     collection = FakeCollection(
         [
-            {
-                "_id": "paper:broken",
-                "memory_id": "not-a-uuid",
-                "title": "Broken",
-                "source_uri": "https://example.invalid",
-                "score": 0.1,
-            }
+            scoped_document(
+                _id="paper:broken",
+                memory_id="not-a-uuid",
+                title="Broken",
+                source_uri="https://example.invalid",
+                score=0.1,
+            )
         ]
     )
 
@@ -223,13 +237,13 @@ def test_retriever_rejects_document_without_fusion_score() -> None:
 
     collection = FakeCollection(
         [
-            {
-                "_id": "paper:arxiv:2605.21951",
-                "memory_id": "4b84a18f-056f-5be9-bd27-a33ef835d29c",
-                "title": "Dynamic Mixture of Latent Memories",
-                "source_uri": "https://arxiv.org/html/2605.21951v1",
-                "tags": ["moe"],
-            }
+            scoped_document(
+                _id="paper:arxiv:2605.21951",
+                memory_id="4b84a18f-056f-5be9-bd27-a33ef835d29c",
+                title="Dynamic Mixture of Latent Memories",
+                source_uri="https://arxiv.org/html/2605.21951v1",
+                tags=["moe"],
+            )
         ]
     )
 
@@ -244,14 +258,14 @@ def test_retriever_rejects_non_array_tags() -> None:
 
     collection = FakeCollection(
         [
-            {
-                "_id": "paper:arxiv:2605.21951",
-                "memory_id": "4b84a18f-056f-5be9-bd27-a33ef835d29c",
-                "title": "Dynamic Mixture of Latent Memories",
-                "source_uri": "https://arxiv.org/html/2605.21951v1",
-                "tags": {"moe": True},
-                "score": 0.0163,
-            }
+            scoped_document(
+                _id="paper:arxiv:2605.21951",
+                memory_id="4b84a18f-056f-5be9-bd27-a33ef835d29c",
+                title="Dynamic Mixture of Latent Memories",
+                source_uri="https://arxiv.org/html/2605.21951v1",
+                tags={"moe": True},
+                score=0.0163,
+            )
         ]
     )
 
