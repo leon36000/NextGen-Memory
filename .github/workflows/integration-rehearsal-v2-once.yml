@@ -35,7 +35,7 @@ jobs:
             b336a73d49da4c7589ab2e63704ef3a26b07ee89
             49db636a8ca9b548862ba61b4fcdc86cb01f32cd
             0de2763ad7809f37261690c706bb37856f20a70d
-            3b67c692e4833ce70920ae5766c071a8fa171157
+            5833d5c89286804e28108ca7f4ab9a4a8bf5c3f4
           )
           for sha in "${candidates[@]}"; do
             git cat-file -e "${sha}^{commit}"
@@ -50,7 +50,7 @@ jobs:
             b336a73d49da4c7589ab2e63704ef3a26b07ee89
             49db636a8ca9b548862ba61b4fcdc86cb01f32cd
             0de2763ad7809f37261690c706bb37856f20a70d
-            3b67c692e4833ce70920ae5766c071a8fa171157
+            5833d5c89286804e28108ca7f4ab9a4a8bf5c3f4
           )
           for sha in "${candidates[@]}"; do
             git merge --no-ff --no-edit "$sha"
@@ -69,7 +69,7 @@ jobs:
             b336a73d49da4c7589ab2e63704ef3a26b07ee89
             49db636a8ca9b548862ba61b4fcdc86cb01f32cd
             0de2763ad7809f37261690c706bb37856f20a70d
-            3b67c692e4833ce70920ae5766c071a8fa171157
+            5833d5c89286804e28108ca7f4ab9a4a8bf5c3f4
           )
           printf '%s\n' "${candidates[@]}" > /tmp/candidate-shas.txt
           printf 'base=%s\n' 93cce924debb9ae2ff46d71b2e8fa043f4cefa0b
