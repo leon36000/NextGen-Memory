@@ -1,0 +1,268 @@
+name: One-shot action-memory usage schema and reader repair
+
+on:
+  pull_request:
+
+permissions:
+  contents: write
+
+jobs:
+  patch-and-verify:
+    if: github.event.pull_request.head.ref == 'fix/action-memory-usage-schema-and-reader-20260822'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/action-memory-usage-schema-and-reader-20260822
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Install project and development tools
+        run: python -m pip install -e '.[dev]'
+      - name: Record TDD audit baseline
+        shell: bash
+        run: |
+          set +e
+          python -m pytest -q tests/test_action_memory_usage_schema_compatibility.py > /tmp/action_usage_red.log 2>&1
+          printf '%s' "$?" > /tmp/action_usage_red_status
+          set -e
+      - name: Repair migration and application retrieval-column references
+        run: |
+          python - <<'PY'
+          from __future__ import annotations
+
+          import ast
+          import re
+          from pathlib import Path
+
+          migration_paths = [
+              path
+              for path in sorted(Path('migrations/neon').glob('*.sql'))
+              if 'action_memory_usage_events' in path.read_text(encoding='utf-8')
+          ]
+          if len(migration_paths) != 1:
+              raise SystemExit(f'expected one usage migration, got {migration_paths}')
+          migration = migration_paths[0]
+          sql = migration.read_text(encoding='utf-8')
+
+          replacements = [
+              (
+                  re.compile(
+                      r'REFERENCES\s+ngm\.retrieval_events\s*\(\s*event_id\s*\)',
+                      re.IGNORECASE,
+                  ),
+                  'REFERENCES ngm.retrieval_events(id)',
+                  'retrieval foreign key',
+              ),
+              (
+                  re.compile(
+                      r'SELECT\s+decision_id\s*,\s*memory_id\s*,\s*space_id\s*,\s*selected_for_context',
+                      re.IGNORECASE,
+                  ),
+                  'SELECT router_decision_id, node_id, space_id, selected_for_context',
+                  'target verification select list',
+              ),
+              (
+                  re.compile(
+                      r'FROM\s+ngm\.retrieval_events\s+WHERE\s+event_id\s*=\s*NEW\.retrieval_event_id',
+                      re.IGNORECASE,
+                  ),
+                  'FROM ngm.retrieval_events WHERE id = NEW.retrieval_event_id',
+                  'target verification lookup',
+              ),
+          ]
+          changed = False
+          for pattern, replacement, label in replacements:
+              sql, count = pattern.subn(replacement, sql, count=1)
+              if count:
+                  changed = True
+              elif replacement not in sql:
+                  raise SystemExit(f'unexpected usage migration structure for {label}')
+          migration.write_text(sql, encoding='utf-8')
+
+          def replace_retrieval_sql(text: str, path: Path) -> str:
+              # Only rewrite columns selected from or compared against retrieval_events;
+              # the usage-event contract itself intentionally retains decision_id/memory_id names.
+              original = text
+              aliases = set(
+                  re.findall(
+                      r'FROM\s+ngm\.retrieval_events(?:\s+AS)?\s+([a-zA-Z_][a-zA-Z0-9_]*)',
+                      text,
+                      flags=re.IGNORECASE,
+                  )
+              )
+              for alias in aliases:
+                  text = re.sub(
+                      rf'\b{re.escape(alias)}\.event_id\b',
+                      f'{alias}.id',
+                      text,
+                  )
+                  text = re.sub(
+                      rf'\b{re.escape(alias)}\.decision_id\b',
+                      f'{alias}.router_decision_id',
+                      text,
+                  )
+                  text = re.sub(
+                      rf'\b{re.escape(alias)}\.memory_id\b',
+                      f'{alias}.node_id',
+                      text,
+                  )
+              if 'FROM ngm.retrieval_events' in text:
+                  text = re.sub(
+                      r'(FROM\s+ngm\.retrieval_events\s+WHERE\s+)event_id\b',
+                      r'\1id',
+                      text,
+                      flags=re.IGNORECASE,
+                  )
+              if text != original:
+                  path.write_text(text, encoding='utf-8')
+              return text
+
+          source_paths = [
+              path
+              for path in sorted(Path('src/nextgen_memory').glob('*.py'))
+              if 'action_memory_usage_events' in path.read_text(encoding='utf-8')
+          ]
+          if not source_paths:
+              raise SystemExit('usage application module is missing')
+          for path in source_paths:
+              replace_retrieval_sql(path.read_text(encoding='utf-8'), path)
+
+          credit_path = Path('src/nextgen_memory/credit_targets.py')
+          credit_source = credit_path.read_text(encoding='utf-8')
+          tree = ast.parse(credit_source)
+          string_nodes: list[ast.Constant] = []
+          for node in ast.walk(tree):
+              if (
+                  isinstance(node, ast.Constant)
+                  and isinstance(node.value, str)
+                  and 'FROM ngm.retrieval_events' in node.value
+              ):
+                  string_nodes.append(node)
+          if len(string_nodes) != 1:
+              raise SystemExit(
+                  f'expected one retrieval SQL literal in credit_targets.py, got {len(string_nodes)}'
+              )
+          node = string_nodes[0]
+          sql_text = node.value
+          alias_match = re.search(
+              r'FROM\s+ngm\.retrieval_events(?:\s+AS)?\s+([a-zA-Z_][a-zA-Z0-9_]*)',
+              sql_text,
+              flags=re.IGNORECASE,
+          )
+          if not alias_match:
+              raise SystemExit('credit target SQL must alias retrieval_events')
+          alias = alias_match.group(1)
+          exists_sql = (
+              'EXISTS (\n'
+              '        SELECT 1\n'
+              '        FROM ngm.action_memory_usage_events AS usage\n'
+              f'        WHERE usage.retrieval_event_id = {alias}.id\n'
+              f'          AND usage.space_id = {alias}.space_id\n'
+              f'          AND usage.decision_id = {alias}.router_decision_id\n'
+              f'          AND usage.memory_id = {alias}.node_id\n'
+              '    ) AS used_in_action'
+          )
+          direct_patterns = [
+              re.compile(
+                  rf'\b{re.escape(alias)}\.used_in_action\b(?:\s+AS\s+used_in_action)?',
+                  re.IGNORECASE,
+              ),
+              re.compile(
+                  r'(?m)^(?P<indent>\s*)used_in_action\s*(?:,|AS\s+used_in_action\s*,?)',
+                  re.IGNORECASE,
+              ),
+          ]
+          replaced = False
+          for pattern in direct_patterns:
+              if pattern.search(sql_text):
+                  sql_text = pattern.sub(exists_sql, sql_text, count=1)
+                  replaced = True
+                  break
+          if not replaced:
+              if 'action_memory_usage_events' not in sql_text:
+                  raise SystemExit('credit target SQL does not expose a replaceable usage field')
+          # Keep all retrieval column references canonical as part of the same repair.
+          sql_text = re.sub(
+              rf'\b{re.escape(alias)}\.event_id\b', f'{alias}.id', sql_text
+          )
+          sql_text = re.sub(
+              rf'\b{re.escape(alias)}\.decision_id\b',
+              f'{alias}.router_decision_id',
+              sql_text,
+          )
+          sql_text = re.sub(
+              rf'\b{re.escape(alias)}\.memory_id\b', f'{alias}.node_id', sql_text
+          )
+
+          lines = credit_source.splitlines(keepends=True)
+          start = sum(len(line) for line in lines[: node.lineno - 1]) + node.col_offset
+          end = sum(len(line) for line in lines[: node.end_lineno - 1]) + node.end_col_offset
+          literal = repr(sql_text)
+          credit_source = credit_source[:start] + literal + credit_source[end:]
+          credit_path.write_text(credit_source, encoding='utf-8')
+          PY
+      - name: Remove transport and normalize scoped files
+        run: |
+          rm .github/workflows/action-memory-usage-schema-reader-patch-once.yml
+          ruff check --fix src/nextgen_memory tests/test_action_memory_usage_schema_compatibility.py
+          python - <<'PY'
+          from pathlib import Path
+          paths = [
+              Path('src/nextgen_memory/credit_targets.py'),
+              Path('tests/test_action_memory_usage_schema_compatibility.py'),
+          ]
+          paths.extend(
+              path for path in Path('src/nextgen_memory').glob('*.py')
+              if 'action_memory_usage_events' in path.read_text(encoding='utf-8')
+          )
+          paths.extend(
+              path for path in Path('migrations/neon').glob('*.sql')
+              if 'action_memory_usage_events' in path.read_text(encoding='utf-8')
+          )
+          for path in sorted(set(paths)):
+              lines = path.read_text(encoding='utf-8').splitlines()
+              path.write_text('\n'.join(line.rstrip() for line in lines) + '\n', encoding='utf-8')
+          PY
+      - name: Focused verification
+        run: |
+          python -m pytest -q \
+            tests/test_action_memory_usage_schema_compatibility.py \
+            tests/test_credit_targets.py \
+            tests/test_action_memory_usage.py
+      - name: Complete verification
+        run: |
+          ruff check .
+          python -m compileall -q src
+          python -m pytest -q
+          git diff --check
+      - name: Reject weakening and unrelated scope
+        run: |
+          if git diff --unified=0 | grep -E '^\+.*(pytest\.mark\.(skip|xfail)|@unittest\.skip|# *noqa|NotImplementedError|TODO|FIXME|pass$)' ; then
+            echo 'test weakening, suppression, stub, or deferred implementation detected' >&2
+            exit 1
+          fi
+          while IFS= read -r path; do
+            case "$path" in
+              migrations/neon/*action*usage*.sql|src/nextgen_memory/*action*usage*.py|src/nextgen_memory/credit_targets.py|tests/test_action_memory_usage_schema_compatibility.py|.github/workflows/action-memory-usage-schema-reader-patch-once.yml) ;;
+              *)
+                # Existing candidate tests may have a different stable filename; allow only files that mention the usage table.
+                if [[ "$path" == tests/*.py ]] && grep -q 'action_memory_usage_events' "$path"; then
+                  :
+                else
+                  echo "unexpected changed path: $path" >&2
+                  exit 1
+                fi
+                ;;
+            esac
+          done < <(git diff --name-only HEAD)
+      - name: Commit verified repair
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add migrations/neon src/nextgen_memory tests/test_action_memory_usage_schema_compatibility.py
+          git add -u .github/workflows
+          git commit -m 'fix: align action-memory usage with canonical retrieval schema'
+          git push origin HEAD:fix/action-memory-usage-schema-and-reader-20260822
