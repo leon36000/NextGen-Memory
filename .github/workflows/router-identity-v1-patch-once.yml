@@ -27,6 +27,8 @@ jobs:
 
           path = Path('src/nextgen_memory/router.py')
           source = path.read_text(encoding='utf-8')
+          if 'POLICY_VERSION = "deterministic-v1"' in source:
+              raise SystemExit(0)
 
           old_imports = dedent('''\
           from __future__ import annotations
@@ -56,29 +58,38 @@ jobs:
               1,
           )
 
-          old_identity = dedent('''\
-          decision_id = uuid5(
+          old_identity = '''        decision_id = uuid5(
               NAMESPACE_URL,
               f"nextgen-memory:{POLICY_VERSION}:{request.request_id}",
           )
-          ''')
-          new_identity = dedent('''\
-          decision_id = _routing_decision_id(
+          '''
+          new_identity = '''        decision_id = _routing_decision_id(
               request=request,
               eligible=eligible,
               allocations=allocations,
               escalation=escalation,
               confidence=confidence,
           )
-          ''')
-          old_identity = ''.join(
-              f'        {line}\n' if line else '\n'
-              for line in old_identity.rstrip('\n').split('\n')
-          )
-          new_identity = ''.join(
-              f'        {line}\n' if line else '\n'
-              for line in new_identity.rstrip('\n').split('\n')
-          )
+          '''
+          old_identity = dedent(old_identity).replace('\n', '\n        ', 1)
+          new_identity = dedent(new_identity).replace('\n', '\n        ', 1)
+          if source.count(old_identity) != 1:
+              # Use the exact literal from the source when textwrap layout differs.
+              old_identity = (
+                  '        decision_id = uuid5(\n'
+                  '            NAMESPACE_URL,\n'
+                  '            f"nextgen-memory:{POLICY_VERSION}:{request.request_id}",\n'
+                  '        )\n'
+              )
+              new_identity = (
+                  '        decision_id = _routing_decision_id(\n'
+                  '            request=request,\n'
+                  '            eligible=eligible,\n'
+                  '            allocations=allocations,\n'
+                  '            escalation=escalation,\n'
+                  '            confidence=confidence,\n'
+                  '        )\n'
+              )
           if source.count(old_identity) != 1:
               raise SystemExit('unexpected request-ID-only decision identity block')
           source = source.replace(old_identity, new_identity, 1)
@@ -94,15 +105,17 @@ jobs:
               escalation: tuple[ExpertKey, ...],
               confidence: float,
           ) -> UUID:
-              """Bind one decision UUID to the complete privacy-safe route policy."""
+              """Bind one UUID to the complete privacy-safe routing policy and outcome."""
 
-              query_hash = hashlib.sha256(request.query.encode("utf-8")).hexdigest()
-              scope_fingerprint = _canonical_json_sha256(request.scope.to_dict())
               payload: dict[str, object] = {
                   "request": {
                       "request_id": str(request.request_id),
-                      "query_hash": query_hash,
-                      "scope_fingerprint": scope_fingerprint,
+                      "query_hash": hashlib.sha256(
+                          request.query.encode("utf-8")
+                      ).hexdigest(),
+                      "scope_fingerprint": _canonical_json_sha256(
+                          request.scope.to_dict()
+                      ),
                       "task_kind": request.task_kind.value,
                       "plan_phase": request.plan_phase.value,
                       "needs": sorted(need.value for need in request.needs),
@@ -117,8 +130,12 @@ jobs:
                   },
                   "outcome": {
                       "eligible_experts": [expert.value for expert in eligible],
-                      "allocations": [allocation.to_dict() for allocation in allocations],
-                      "escalation_experts": [expert.value for expert in escalation],
+                      "allocations": [
+                          allocation.to_dict() for allocation in allocations
+                      ],
+                      "escalation_experts": [
+                          expert.value for expert in escalation
+                      ],
                       "confidence": confidence,
                       "policy_version": POLICY_VERSION,
                   },
@@ -131,7 +148,7 @@ jobs:
 
 
           def _canonical_json_sha256(value: object) -> str:
-              """Hash an explicitly constructed JSON value with no string fallback."""
+              """Hash an explicitly built JSON value without arbitrary string fallback."""
 
               encoded = json.dumps(
                   value,
@@ -144,8 +161,7 @@ jobs:
           ''')
           if 'def _routing_decision_id(' in source:
               raise SystemExit('routing identity helper already exists unexpectedly')
-          source = source.rstrip() + helpers + '\n'
-          path.write_text(source, encoding='utf-8')
+          path.write_text(source.rstrip() + helpers.rstrip() + '\n', encoding='utf-8')
           PY
       - name: Document the v1 identity contract
         run: |
@@ -155,52 +171,35 @@ jobs:
 
           path = Path('docs/router-v0.md')
           source = path.read_text(encoding='utf-8')
+          if '## Deterministic decision identity' in source:
+              raise SystemExit(0)
           marker = '## Non-goals of v0\n'
           if source.count(marker) != 1:
               raise SystemExit('unexpected router documentation structure')
           section = dedent('''\
           ## Deterministic decision identity
 
-          Router policy version `deterministic-v1` binds each `decision_id` to the complete
-          privacy-safe request policy and deterministic route outcome. The canonical payload includes
-          the request UUID; SHA-256 fingerprints of the normalized query and complete hard scope;
-          task, phase, evidence, temporal, exactness and risk features; uncertainty and all budgets;
-          eligible experts; ordered allocations with reasons; ordered escalation; confidence; and the
-          policy version.
+          Router policy version `deterministic-v1` binds each `decision_id` to the
+          complete privacy-safe request policy and deterministic route outcome. The
+          identity includes the request UUID, SHA-256 fingerprints of the normalized
+          query and complete hard scope, all routing features and budgets, eligible
+          experts, ordered allocations and escalation, confidence, and policy version.
 
-          Raw query text and raw user/agent identifiers never enter the UUID5 name. The scope is
-          fingerprinted independently, then the complete safe payload is serialized as sorted canonical
-          JSON and hashed. The UUID5 name contains only the policy version and that final SHA-256 digest.
-          Set-like request fields are sorted while execution-order fields preserve their deterministic
-          order.
+          Raw query text and raw user or agent identifiers never enter the UUID5 name.
+          The complete safe payload is serialized as canonical sorted JSON and hashed;
+          the UUID5 name contains only the policy version and the final SHA-256 digest.
+          Set-like fields are sorted while execution-order fields preserve order.
 
-          Historical `deterministic-v0` rows remain valid historical evidence. New v1 decisions receive
-          new identities; no existing row is rewritten.
+          Historical `deterministic-v0` rows remain historical evidence. New v1
+          decisions receive new identities; no existing row is rewritten.
 
           ''')
-          source = source.replace(marker, section + marker, 1)
-          path.write_text(source, encoding='utf-8')
+          path.write_text(
+              source.replace(marker, section + marker, 1).rstrip() + '\n',
+              encoding='utf-8',
+          )
           PY
-      - name: Remove one-shot workflow
-        run: rm .github/workflows/router-identity-v1-patch-once.yml
-      - name: Normalize changed text files
-        run: |
-          python - <<'PY'
-          from pathlib import Path
-
-          for name in (
-              'src/nextgen_memory/router.py',
-              'tests/test_router_identity.py',
-              'docs/router-v0.md',
-          ):
-              path = Path(name)
-              lines = path.read_text(encoding='utf-8').splitlines()
-              path.write_text(
-                  '\n'.join(line.rstrip() for line in lines) + '\n',
-                  encoding='utf-8',
-              )
-          PY
-      - name: Diff integrity before verification
+      - name: Diff integrity
         run: git diff --check
       - name: Install project and development tools
         run: python -m pip install -e '.[dev]'
@@ -210,11 +209,14 @@ jobs:
         run: ruff check .
       - name: Full suite
         run: python -m pytest -q
-      - name: Commit verified implementation
+      - name: Commit verified production changes
         run: |
+          if git diff --quiet -- src/nextgen_memory/router.py docs/router-v0.md; then
+            echo 'Production patch already applied; no commit required.'
+            exit 0
+          fi
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add src/nextgen_memory/router.py tests/test_router_identity.py docs/router-v0.md
-          git add -u .github/workflows
+          git add src/nextgen_memory/router.py docs/router-v0.md
           git commit -m 'fix: bind routing decision identity to full policy'
           git push origin HEAD:fix/router-decision-identity-v1-20260822
