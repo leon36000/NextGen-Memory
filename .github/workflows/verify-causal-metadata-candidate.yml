@@ -1,0 +1,36 @@
+name: Verify causal metadata exact candidate SHA
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 6c60f2cc68e9b177f680d4464d42d089e4ed49db
+          fetch-depth: 1
+      - name: Prove exact checkout
+        run: test "$(git rev-parse HEAD)" = "6c60f2cc68e9b177f680d4464d42d089e4ed49db"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - name: Install project and development tools
+        run: python -m pip install -e '.[dev]'
+      - name: Lint exact candidate
+        run: ruff check .
+      - name: Focused exact candidate tests
+        run: python -m pytest -q tests/test_causal_feedback.py tests/test_causal_feedback_migration.py
+      - name: Full exact candidate suite
+        run: python -m pytest -q
+      - name: Diff integrity
+        run: git diff --check
