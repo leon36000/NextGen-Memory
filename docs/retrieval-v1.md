@@ -17,7 +17,9 @@ Research Retrieval v1 is the first executable read path for the NextGen Memory r
 
 ## Retrieval contract
 
-Every query requires a canonical `space_id`. The semantic branch applies `space_id` and `status=active` as vector prefilters. The lexical branch applies the same restrictions inside the `$search.compound.filter` stage; global lexical retrieval followed by `$match` is forbidden. Results are fused using MongoDB's reciprocal-rank fusion implementation.
+Every query requires a canonical `space_id`. The default research policy requires `status=active` and `source_type=paper`; both values are explicit validated `MongoResearchIndexConfig` fields.
+
+The semantic branch applies `space_id`, active status, and source type as Vector Search prefilters. The lexical branch applies the same restrictions inside `$search.compound.filter`; global retrieval followed by `$match` is forbidden. Results are fused using MongoDB's reciprocal-rank fusion implementation.
 
 ```python
 from os import environ
@@ -38,6 +40,26 @@ finally:
     retriever.close()
 ```
 
+## Canonical hit gate
+
+The aggregation projection retains `space_id`, `status`, and `source_type` only long enough for defense-in-depth validation at the adapter boundary. These internal gate fields are not added to the public `ResearchRetrievalHit` contract.
+
+Before a row becomes a hit, the retriever requires:
+
+- a mapping-shaped result document;
+- exact query `space_id` equality;
+- exact configured active status;
+- exact configured source type;
+- a canonical memory UUID;
+- a non-empty canonical backend reference;
+- a finite fusion score;
+- a string-array tag shape;
+- mapping-shaped score details when supplied.
+
+The complete returned batch must remain within `query.limit` and contain unique canonical memory IDs and backend references. Results receive one contiguous deterministic rank in backend-return order.
+
+This gate is defense in depth. It never substitutes for branch-local Atlas Search and Vector Search prefilters: unsafe ranking followed by post-filtering remains forbidden.
+
 ## Canonical identity reconciliation
 
 The ten MongoDB research records have matching UUID rows in `ngm.memory_nodes`. The idempotent seed is stored at `migrations/neon/0003_research_sources_seed.sql`; Neon remains authoritative for identity while MongoDB remains the rich-payload and retrieval backend.
@@ -45,6 +67,8 @@ The ten MongoDB research records have matching UUID rows in `ngm.memory_nodes`. 
 ## Privacy boundary
 
 The query is sent to Atlas because it is required for retrieval, but it is not copied into Neon retrieval telemetry. `ngm.router_decisions` owns the SHA-256 query hash and feature record. `ngm.retrieval_events` stores only decision ID, expert, canonical node/backend reference, rank, scores, and usage flags.
+
+Canonical hit-gate errors are bounded contract messages. They do not echo raw query text, complete backend documents, titles, URIs, tags, score details, or connection material.
 
 ## Live validation — August 14, 2026
 
@@ -61,6 +85,10 @@ For `utility-aware retrieval and co-evolving memory routing`, weighted native RR
 Score details showed each result's lexical and semantic rank. A lexical query using an unrelated `space_id` returned zero documents, verifying scope isolation inside Atlas Search.
 
 One immediate second auto-embedding request hit the provider's rate limit. This is an external capacity condition rather than an index-definition failure; callers must retain retry/backoff behavior and must not silently fall back to unscoped retrieval.
+
+## Read-only contract inspection — August 22, 2026
+
+A read-only inspection of the canonical project scope found ten active `research_sources` rows. Every inspected row carried the canonical project `space_id`, `status=active`, and `source_type=paper`, matching the explicit default retrieval policy. This timestamped observation supports the current profile; it does not replace runtime validation or permanently guarantee future collection state.
 
 ## Deferred work
 
