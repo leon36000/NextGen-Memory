@@ -1,0 +1,39 @@
+name: Verify Mongo hit gate exact candidate SHA
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 0de2763ad7809f37261690c706bb37856f20a70d
+          fetch-depth: 1
+      - name: Prove exact checkout
+        run: test "$(git rev-parse HEAD)" = "0de2763ad7809f37261690c706bb37856f20a70d"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - name: Install project and development tools
+        run: python -m pip install -e '.[dev]'
+      - name: Lint exact candidate
+        run: ruff check .
+      - name: Focused exact candidate tests
+        run: >-
+          python -m pytest -q
+          tests/test_mongodb_retrieval.py
+          tests/test_mongodb_retrieval_hit_gate.py
+      - name: Full exact candidate suite
+        run: python -m pytest -q
+      - name: Diff integrity
+        run: git diff --check
