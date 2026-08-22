@@ -14,36 +14,82 @@ LANGUAGE plpgsql
 IMMUTABLE
 STRICT
 AS $$
-DECLARE
-  v_key text;
-  v_value jsonb;
 BEGIN
-  IF octet_length(p_metadata::text) > 8192 THEN
+  IF octet_length(p_metadata::text) > 8192
+     OR jsonb_typeof(p_metadata) <> 'object' THEN
     RETURN false;
   END IF;
 
-  IF jsonb_typeof(p_metadata) = 'object' THEN
-    FOR v_key, v_value IN SELECT key, value FROM jsonb_each(p_metadata)
-    LOOP
-      IF lower(v_key) = ANY (ARRAY[
-        'api_key', 'argv', 'command', 'command_text', 'diff', 'env',
-        'environment', 'notes', 'password', 'patch', 'patch_text', 'prompt',
-        'query', 'query_text', 'raw', 'raw_payload', 'secret', 'stderr',
-        'stdout', 'token'
-      ]) THEN
-        RETURN false;
-      END IF;
-      IF NOT ngm.credit_metadata_is_safe(v_value) THEN
-        RETURN false;
-      END IF;
-    END LOOP;
-  ELSIF jsonb_typeof(p_metadata) = 'array' THEN
-    FOR v_value IN SELECT value FROM jsonb_array_elements(p_metadata)
-    LOOP
-      IF NOT ngm.credit_metadata_is_safe(v_value) THEN
-        RETURN false;
-      END IF;
-    END LOOP;
+  IF NOT ((SELECT count(*) FROM jsonb_object_keys(p_metadata)) = 10) THEN
+    RETURN false;
+  END IF;
+  IF NOT (p_metadata ?& ARRAY[
+    'credit_version',
+    'trial_count',
+    'mean_full_score',
+    'mean_no_memory_score',
+    'mean_without_memory_score',
+    'mean_bundle_uplift',
+    'mean_effect',
+    'standard_error',
+    'context_set_hash',
+    'continuation_set_hash'
+  ]::text[]) THEN
+    RETURN false;
+  END IF;
+  IF EXISTS (
+    SELECT 1
+    FROM jsonb_object_keys(p_metadata) AS keys(metadata_key)
+    WHERE NOT (metadata_key = ANY (ARRAY[
+      'credit_version',
+      'trial_count',
+      'mean_full_score',
+      'mean_no_memory_score',
+      'mean_without_memory_score',
+      'mean_bundle_uplift',
+      'mean_effect',
+      'standard_error',
+      'context_set_hash',
+      'continuation_set_hash'
+    ]::text[]))
+  ) THEN
+    RETURN false;
+  END IF;
+
+  IF NOT (
+    jsonb_typeof(p_metadata -> 'credit_version') = 'string'
+    AND p_metadata ->> 'credit_version' = 'paired_leave_one_out_v0'
+  ) THEN
+    RETURN false;
+  END IF;
+  IF NOT (
+    jsonb_typeof(p_metadata -> 'trial_count') = 'number'
+    AND p_metadata ->> 'trial_count' ~ '^[1-9][0-9]*$'
+  ) THEN
+    RETURN false;
+  END IF;
+
+  IF NOT (
+    jsonb_typeof(p_metadata -> 'mean_full_score') = 'number'
+    AND jsonb_typeof(p_metadata -> 'mean_no_memory_score') = 'number'
+    AND jsonb_typeof(p_metadata -> 'mean_without_memory_score') = 'number'
+    AND jsonb_typeof(p_metadata -> 'mean_bundle_uplift') = 'number'
+    AND jsonb_typeof(p_metadata -> 'mean_effect') = 'number'
+    AND jsonb_typeof(p_metadata -> 'standard_error') = 'number'
+  ) THEN
+    RETURN false;
+  END IF;
+  IF NOT ((p_metadata ->> 'standard_error')::numeric >= 0) THEN
+    RETURN false;
+  END IF;
+
+  IF NOT (
+    jsonb_typeof(p_metadata -> 'context_set_hash') = 'string'
+    AND p_metadata ->> 'context_set_hash' ~ '^[0-9a-f]{64}$'
+    AND jsonb_typeof(p_metadata -> 'continuation_set_hash') = 'string'
+    AND p_metadata ->> 'continuation_set_hash' ~ '^[0-9a-f]{64}$'
+  ) THEN
+    RETURN false;
   END IF;
 
   RETURN true;
@@ -75,6 +121,27 @@ BEGIN
   END IF;
 END;
 $$;
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_constraint
+    WHERE conname = 'memory_feedback_causal_metadata_v0_1_1_check'
+      AND conrelid = 'ngm.memory_feedback'::regclass
+  ) THEN
+    ALTER TABLE ngm.memory_feedback
+      ADD CONSTRAINT memory_feedback_causal_metadata_v0_1_1_check
+      CHECK (
+        credit_evaluation_id IS NULL
+        OR ngm.credit_metadata_is_safe(metadata)
+      ) NOT VALID;
+  END IF;
+END;
+$$;
+
+ALTER TABLE ngm.memory_feedback
+  VALIDATE CONSTRAINT memory_feedback_causal_metadata_v0_1_1_check;
 
 CREATE UNIQUE INDEX IF NOT EXISTS memory_feedback_causal_identity_uidx
   ON ngm.memory_feedback (space_id, credit_evaluation_id, node_id)
@@ -136,7 +203,7 @@ FOR EACH ROW EXECUTE FUNCTION ngm.reject_causal_feedback_mutation();
 INSERT INTO ngm.schema_meta (schema_key, schema_version, metadata)
 VALUES (
   'post_action_causal_credit',
-  '0.1.0',
+  '0.1.1',
   jsonb_build_object(
     'status', 'verified-candidate',
     'evidence_key', 'paired_leave_one_out_v0',
@@ -144,7 +211,8 @@ VALUES (
       'paired_leave_one_out',
       'deterministic_feedback_identity',
       'append_only_causal_rows',
-      'safe_aggregate_metadata'
+      'safe_aggregate_metadata',
+      'exact_causal_metadata_allowlist'
     )
   )
 )
