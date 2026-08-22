@@ -71,9 +71,11 @@ def test_legacy_fetch_contract_remains_available() -> None:
     cursor = FakeCursor(
         [
             {
-                "memory_id": MEMORY_A,
+                "space_id": SPACE_ID,
+                "node_id": MEMORY_A,
                 "retrieval_event_id": EVENT_A,
                 "router_decision_id": DECISION_ID,
+                "rank": 1,
                 "selected_for_context": True,
                 "used_in_action": False,
             }

@@ -1,8 +1,11 @@
 # Action-Memory Usage Events v0 Design
 
-**Date:** 2026-08-22  
-**Status:** Approved autonomous implementation direction  
-**Base:** `93cce924debb9ae2ff46d71b2e8fa043f4cefa0b`  
+**Date:** 2026-08-22
+
+**Status:** Approved autonomous implementation direction
+
+**Base:** `93cce924debb9ae2ff46d71b2e8fa043f4cefa0b`
+
 **Issues:** #40, #41, #42, #43, #44, #45
 
 ## Goal
