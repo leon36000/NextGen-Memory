@@ -25,56 +25,45 @@ jobs:
           from pathlib import Path
 
           parser = Path('scripts/neon_migration_manifest.py')
-          source = parser.read_text(encoding='utf-8')
-          old_guard = '''        and pure_path.suffix == ".sql"
-                  and bool(pure_path.name)
-          '''
-          new_guard = '''        and pure_path.suffix == ".sql"
-                  and bool(pure_path.name)
-                  and pure_path.as_posix() == path
-          '''
-          old_guard = '\n'.join(
-              line[8:] if line.startswith('        ') else line
-              for line in old_guard.splitlines()
-          )
-          new_guard = '\n'.join(
-              line[8:] if line.startswith('        ') else line
-              for line in new_guard.splitlines()
-          )
-          if source.count(old_guard) != 1:
+          parser_lines = parser.read_text(encoding='utf-8').splitlines()
+          guard_line = '        and bool(pure_path.name)'
+          if parser_lines.count(guard_line) != 1:
               raise SystemExit('unexpected path guard structure')
-          parser.write_text(source.replace(old_guard, new_guard, 1), encoding='utf-8')
+          guard_index = parser_lines.index(guard_line)
+          canonical_line = '        and pure_path.as_posix() == path'
+          if canonical_line in parser_lines:
+              raise SystemExit('canonical path guard already exists')
+          parser_lines.insert(guard_index + 1, canonical_line)
+          parser.write_text('\n'.join(parser_lines) + '\n', encoding='utf-8')
 
           tests = Path('tests/test_neon_migration_manifest.py')
-          test_source = tests.read_text(encoding='utf-8')
-          marker = '''        (
-                      lambda entries: entries[0].update({"path": "migrations\\\\neon\\\\0001_alpha.sql"}),
-                      "safe repository-relative",
-                  ),
-          '''
-          marker = '\n'.join(
-              line[8:] if line.startswith('        ') else line
-              for line in marker.splitlines()
-          )
-          additions = '''        (
-                      lambda entries: entries[0].update({"path": "migrations/neon/./0001_alpha.sql"}),
-                      "safe repository-relative",
-                  ),
-                  (
-                      lambda entries: entries[0].update({"path": "migrations//neon/0001_alpha.sql"}),
-                      "safe repository-relative",
-                  ),
-          '''
-          additions = '\n'.join(
-              line[8:] if line.startswith('        ') else line
-              for line in additions.splitlines()
-          )
-          if test_source.count(marker) != 1:
+          test_lines = tests.read_text(encoding='utf-8').splitlines()
+          backslash_fragment = 'migrations\\\\neon\\\\0001_alpha.sql'
+          matching = [
+              index for index, line in enumerate(test_lines)
+              if backslash_fragment in line
+          ]
+          if len(matching) != 1:
               raise SystemExit('unexpected unsafe-path test structure')
-          tests.write_text(
-              test_source.replace(marker, additions + marker, 1),
-              encoding='utf-8',
-          )
+          insertion_index = matching[0] - 1
+          if test_lines[insertion_index].strip() != '(':
+              raise SystemExit('unsafe-path parameter block start not found')
+          additions = [
+              '        (',
+              '            lambda entries: entries[0].update(',
+              '                {"path": "migrations/neon/./0001_alpha.sql"}',
+              '            ),',
+              '            "safe repository-relative",',
+              '        ),',
+              '        (',
+              '            lambda entries: entries[0].update(',
+              '                {"path": "migrations//neon/0001_alpha.sql"}',
+              '            ),',
+              '            "safe repository-relative",',
+              '        ),',
+          ]
+          test_lines[insertion_index:insertion_index] = additions
+          tests.write_text('\n'.join(test_lines) + '\n', encoding='utf-8')
           PY
           rm .github/workflows/harden-neon-manifest-paths-once.yml
       - name: Install and verify
