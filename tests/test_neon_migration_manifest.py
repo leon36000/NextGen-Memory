@@ -5,7 +5,6 @@ import json
 from pathlib import Path
 
 import pytest
-
 from scripts.neon_migration_manifest import (
     ManifestError,
     MigrationManifest,
