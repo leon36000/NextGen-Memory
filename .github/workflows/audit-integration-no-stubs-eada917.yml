@@ -1,0 +1,93 @@
+name: Audit integration rehearsal for stub markers
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    if: github.event.pull_request.head.ref == 'bootstrap/audit-integration-no-stubs-eada917-20260822'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: eada91750b5d577ec452c7f8d1fb72126abb6a54
+          fetch-depth: 1
+      - name: Prove exact checkout
+        run: test "$(git rev-parse HEAD)" = "eada91750b5d577ec452c7f8d1fb72126abb6a54"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Enumerate all production stub markers without exemptions
+        run: |
+          python - <<'PY'
+          from __future__ import annotations
+
+          import ast
+          import io
+          import json
+          import tokenize
+          from pathlib import Path
+
+          roots = sorted(Path('src/nextgen_memory').rglob('*.py'))
+          findings: list[dict[str, object]] = []
+          for path in roots:
+              source = path.read_text(encoding='utf-8')
+              tree = ast.parse(source, filename=str(path))
+              parents: dict[ast.AST, ast.AST] = {}
+              for parent in ast.walk(tree):
+                  for child in ast.iter_child_nodes(parent):
+                      parents[child] = parent
+
+              for node in ast.walk(tree):
+                  kind: str | None = None
+                  if isinstance(node, ast.Pass):
+                      kind = 'pass'
+                  elif isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant) and node.value.value is Ellipsis:
+                      kind = 'ellipsis'
+                  elif isinstance(node, ast.Raise):
+                      exc = node.exc
+                      if isinstance(exc, ast.Call):
+                          exc = exc.func
+                      if isinstance(exc, ast.Name) and exc.id == 'NotImplementedError':
+                          kind = 'raise_not_implemented'
+                      elif isinstance(exc, ast.Attribute) and exc.attr == 'NotImplementedError':
+                          kind = 'raise_not_implemented'
+                  if kind is not None:
+                      owner: ast.AST | None = node
+                      while owner is not None and not isinstance(
+                          owner,
+                          (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef),
+                      ):
+                          owner = parents.get(owner)
+                      findings.append(
+                          {
+                              'path': str(path),
+                              'line': getattr(node, 'lineno', None),
+                              'kind': kind,
+                              'owner_type': type(owner).__name__ if owner else None,
+                              'owner_name': getattr(owner, 'name', None),
+                          }
+                      )
+
+              stream = io.StringIO(source)
+              for token in tokenize.generate_tokens(stream.readline):
+                  if token.type != tokenize.COMMENT:
+                      continue
+                  upper = token.string.upper()
+                  if 'TODO' in upper or 'FIXME' in upper:
+                      findings.append(
+                          {
+                              'path': str(path),
+                              'line': token.start[0],
+                              'kind': 'todo_or_fixme_comment',
+                              'text': token.string.strip(),
+                          }
+                      )
+
+          findings.sort(key=lambda item: (str(item['path']), int(item['line'] or 0), str(item['kind'])))
+          print(json.dumps(findings, indent=2, sort_keys=True))
+          print(f'finding_count={len(findings)}')
+          PY
