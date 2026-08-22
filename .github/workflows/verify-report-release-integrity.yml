@@ -1,0 +1,265 @@
+name: Verify and report release wheel integrity candidate
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+jobs:
+  verify:
+    if: github.event.pull_request.head.ref == 'bootstrap/verify-release-wheel-integrity-20260822'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - name: Resolve stable exact candidate
+        id: candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 60); do
+            expected="$(git ls-remote origin refs/heads/ci/release-wheel-integrity-v0-20260822 | awk '{print $1}')"
+            test -n "$expected"
+            git fetch --depth=1 origin "$expected"
+            if ! git cat-file -e "$expected:.github/workflows/release-integrity-patch-once.yml" 2>/dev/null; then
+              git checkout --detach "$expected"
+              test "$(git rev-parse HEAD)" = "$expected"
+              printf 'sha=%s\n' "$expected" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            sleep 10
+          done
+          echo 'release-integrity transport workflow did not disappear' >&2
+          exit 1
+      - name: Prove final scope and safe workflow surface
+        run: |
+          git fetch --depth=1 origin feat/corrective-retrieval-preproduction-v0.9.3
+          git diff --name-only FETCH_HEAD...HEAD > /tmp/paths.txt
+          test -s /tmp/paths.txt
+          while IFS= read -r path; do
+            case "$path" in
+              scripts/verify_release_artifact.py|tests/test_release_artifact.py|tests/test_release_integrity_workflow.py|.github/workflows/release-integrity.yml) ;;
+              *) echo "unexpected candidate path: $path" >&2; exit 1 ;;
+            esac
+          done < /tmp/paths.txt
+          test ! -e .github/workflows/release-integrity-patch-once.yml
+          grep -q 'paths:' .github/workflows/release-integrity.yml
+          grep -q 'contents: read' .github/workflows/release-integrity.yml
+          ! grep -Eqi 'twine upload|id-token:[[:space:]]*write|secrets\.|pypi' .github/workflows/release-integrity.yml
+          if git diff --unified=0 FETCH_HEAD...HEAD | grep -E '^\+.*(pytest\.mark\.(skip|xfail)|@unittest\.skip|# *noqa|NotImplementedError|TODO|FIXME|pass$)' ; then
+            exit 1
+          fi
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - name: Install exact candidate development environment
+        run: python -m pip install -e '.[dev]'
+      - name: Focused inspector and workflow tests
+        run: python -m pytest -q tests/test_release_artifact.py tests/test_release_integrity_workflow.py
+      - name: Build and inspect exact candidate wheel
+        shell: bash
+        run: |
+          rm -rf dist
+          python -m pip wheel --no-deps --no-build-isolation . --wheel-dir dist
+          mapfile -t wheels < <(find dist -maxdepth 1 -type f -name '*.whl' -print)
+          test "${#wheels[@]}" -eq 1
+          version="$(python - <<'PY'
+          import tomllib
+          from pathlib import Path
+          print(tomllib.loads(Path('pyproject.toml').read_text(encoding='utf-8'))['project']['version'])
+          PY
+          )"
+          mapfile -t modules < <(
+            find src/nextgen_memory -maxdepth 1 -type f -name '*.py' -printf '%f\n' |
+            sed -E 's/\.py$//' |
+            awk '$0 == "__init__" {print "nextgen_memory"; next} {print "nextgen_memory." $0}' |
+            sort -u
+          )
+          args=()
+          for module in "${modules[@]}"; do args+=(--required-module "$module"); done
+          python scripts/verify_release_artifact.py "${wheels[0]}" \
+            --expected-name nextgen-memory \
+            --expected-version "$version" \
+            "${args[@]}" > dist/wheel-report.json
+          printf 'WHEEL_PATH=%s\n' "${wheels[0]}" >> "$GITHUB_ENV"
+      - name: Install and import wheel outside checkout
+        shell: bash
+        run: |
+          smoke_root="$(mktemp -d)"
+          outside="$(mktemp -d)"
+          python -m venv "$smoke_root/venv"
+          "$smoke_root/venv/bin/python" -m pip install --no-deps "$WHEEL_PATH"
+          (
+            cd "$outside"
+            REPO_ROOT="$GITHUB_WORKSPACE" "$smoke_root/venv/bin/python" -I - <<'PY'
+          import os
+          import sys
+          from pathlib import Path
+          import nextgen_memory
+          module_path=Path(nextgen_memory.__file__).resolve()
+          prefix=Path(sys.prefix).resolve()
+          repository=Path(os.environ['REPO_ROOT']).resolve()
+          assert module_path.is_relative_to(prefix)
+          assert not module_path.is_relative_to(repository)
+          exports=nextgen_memory.__all__
+          assert isinstance(exports, tuple)
+          assert exports and len(exports)==len(set(exports))
+          for name in exports: getattr(nextgen_memory,name)
+          PY
+          )
+          "$smoke_root/venv/bin/python" -m pip check
+      - name: Complete exact-candidate verification
+        run: |
+          ruff check .
+          python -m compileall -q src scripts
+          python -m pytest -q
+          git diff --check
+      - name: Store immutable evidence
+        run: |
+          mkdir -p /tmp/evidence
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          report=json.loads(Path('dist/wheel-report.json').read_text(encoding='utf-8'))
+          record={
+              'candidate_sha':'${{ steps.candidate.outputs.sha }}',
+              'python_version':'${{ matrix.python-version }}',
+              'focused':'green','ruff':'clean','compileall':'clean',
+              'full_suite':'green','diff_check':'clean',
+              'wheel_sha256':report['wheel_sha256'],
+              'wheel_filename':report['wheel_filename'],
+              'wheel_member_count':report['member_count'],
+              'package_member_count':report['package_member_count'],
+              'isolated_import':'green','pip_check':'green',
+              'workflow_surface':'read_only_path_filtered',
+              'run_id':'${{ github.run_id }}',
+          }
+          Path('/tmp/evidence/record.json').write_text(json.dumps(record,sort_keys=True,indent=2)+'\n',encoding='utf-8')
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-integrity-${{ matrix.python-version }}
+          path: /tmp/evidence/record.json
+          if-no-files-found: error
+
+  report:
+    if: github.event.pull_request.head.ref == 'bootstrap/verify-release-wheel-integrity-20260822'
+    needs: verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: /tmp/records
+          pattern: release-integrity-*
+      - name: Reconcile exact matrix and wheel bytes
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          records=[json.loads(p.read_text(encoding='utf-8')) for p in Path('/tmp/records').glob('**/record.json')]
+          if len(records)!=2: raise SystemExit(f'expected two records, got {len(records)}')
+          if sorted(r['python_version'] for r in records)!=['3.12','3.13']: raise SystemExit('incomplete matrix')
+          shas={r['candidate_sha'] for r in records}
+          if len(shas)!=1: raise SystemExit(f'candidate moved: {shas}')
+          wheel_hashes={r['wheel_sha256'] for r in records}
+          if len(wheel_hashes)!=1: raise SystemExit(f'wheel bytes differ across Python matrix: {wheel_hashes}')
+          for r in records:
+              for key,value in {
+                  'focused':'green','ruff':'clean','compileall':'clean','full_suite':'green',
+                  'diff_check':'clean','isolated_import':'green','pip_check':'green',
+                  'workflow_surface':'read_only_path_filtered',
+              }.items():
+                  if r[key]!=value: raise SystemExit(f'failed evidence {key}')
+          summary={
+              'candidate_sha':next(iter(shas)),
+              'wheel_sha256':next(iter(wheel_hashes)),
+              'wheel_filename':records[0]['wheel_filename'],
+              'member_count':records[0]['wheel_member_count'],
+              'package_member_count':records[0]['package_member_count'],
+              'run_id':records[0]['run_id'],
+          }
+          Path('/tmp/summary.json').write_text(json.dumps(summary,sort_keys=True,indent=2)+'\n',encoding='utf-8')
+          PY
+      - name: Publish exact evidence and blind Sol packet
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          python - <<'PY'
+          import json, os, subprocess
+          repo=os.environ['REPO']; summary=json.load(open('/tmp/summary.json',encoding='utf-8'))
+          rows=json.loads(subprocess.run(
+              ['gh','pr','list','--repo',repo,'--state','open','--head','ci/release-wheel-integrity-v0-20260822','--json','number,headRefOid,baseRefName'],
+              check=True,text=True,capture_output=True,
+          ).stdout)
+          if len(rows)!=1: raise SystemExit(f'expected one candidate PR, got {rows}')
+          pr=rows[0]
+          if pr['headRefOid']!=summary['candidate_sha']: raise SystemExit('candidate moved')
+          packet=f'''## Exact-SHA verification and blind GPT-5.6 Sol review request
+
+Return exactly one verdict: `APPROVE`, `CHANGES_REQUIRED`, or `BLOCKED_BY_EVIDENCE`.
+
+### Exact boundary
+
+- Candidate SHA: `{summary['candidate_sha']}`
+- Wheel SHA-256: `{summary['wheel_sha256']}`
+- Wheel: `{summary['wheel_filename']}`
+- Candidate movement invalidates this request.
+
+### Scope
+
+- `scripts/verify_release_artifact.py`
+- `tests/test_release_artifact.py`
+- `tests/test_release_integrity_workflow.py`
+- `.github/workflows/release-integrity.yml`
+
+### Contract and evidence
+
+- dependency-free inspector validates safe normalized members, duplicate/collision handling, forbidden test/cache/VCS/key payloads, one metadata identity, normalized name, exact version and required modules;
+- report is deterministic and excludes archive contents/parent paths;
+- Python 3.12 and 3.13 detached-checkout the same immutable candidate SHA;
+- focused mutation tests, Ruff, compileall, full pytest and diff-check pass on both;
+- each job builds exactly one wheel with `pip wheel --no-deps --no-build-isolation`;
+- both versions produce byte-identical wheel SHA-256 `{summary['wheel_sha256']}`;
+- wheel is installed with `--no-deps` into a fresh venv outside the checkout;
+- isolated import proves `nextgen_memory.__file__` is under the venv prefix and not the repository;
+- every package-root `__all__` name resolves and `pip check` passes;
+- workflow is path-filtered and read-only, with no publish/token/secrets surface;
+- verification run: {os.environ['RUN_URL']}.
+
+### Review focus
+
+- ZIP path/collision edge cases and forbidden payload false positives/negatives;
+- metadata parsing and normalized distribution identity;
+- whether report fields remain privacy-safe;
+- whether wheel determinism across Python 3.12/3.13 is a valid expected property for this pure-Python package;
+- isolated import rigor and source-tree shadowing avoidance;
+- path filters and proportional CI cost;
+- whether any publication credential or runtime dependency was introduced.
+
+Do not rely on this summary. Inspect the exact diff, test corpus, workflow and immutable artifacts. No merge is allowed without a genuine independent Sol `APPROVE` on the unchanged SHA.'''
+          subprocess.run(['gh','pr','comment',str(pr['number']),'--repo',repo,'--body',packet],check=True)
+          issue_rows=json.loads(subprocess.run(
+              ['gh','issue','list','--repo',repo,'--state','open','--search','verify release wheel structure and isolated import in:title','--json','number'],
+              check=True,text=True,capture_output=True,
+          ).stdout)
+          if len(issue_rows)==1:
+              subprocess.run(['gh','issue','comment',str(issue_rows[0]['number']),'--repo',repo,'--body',f"Candidate `{summary['candidate_sha']}` is exact-SHA verified on Python 3.12/3.13. Byte-identical wheel `{summary['wheel_sha256']}` passed inspection and isolated installation/import. Blind Sol packet is on PR #{pr['number']}; unmerged."],check=True)
+          subprocess.run(['gh','issue','comment','23','--repo',repo,'--body',f"Release-integrity candidate `{summary['candidate_sha']}` passed exact cross-version wheel verification; blind Sol packet posted on PR #{pr['number']}. No merge. Run: {os.environ['RUN_URL']}"],check=True)
+          PY
+      - name: Close this verifier PR without merge
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: gh pr close "$PR_NUMBER" --repo "$REPO" --comment 'Exact wheel verification completed; evidence copied to candidate PR. Closed without merge.'
