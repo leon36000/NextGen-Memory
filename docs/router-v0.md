@@ -62,6 +62,22 @@ Passing a `RoutingDecisionSink` records a `RoutingTelemetryRecord`. The default 
 
 This record maps directly to the canonical `ngm.router_decisions` control-plane schema.
 
+## Deterministic decision identity
+
+Router policy version `deterministic-v1` binds each `decision_id` to the
+complete privacy-safe request policy and deterministic route outcome. The
+identity includes the request UUID, SHA-256 fingerprints of the normalized
+query and complete hard scope, all routing features and budgets, eligible
+experts, ordered allocations and escalation, confidence, and policy version.
+
+Raw query text and raw user or agent identifiers never enter the UUID5 name.
+The complete safe payload is serialized as canonical sorted JSON and hashed;
+the UUID5 name contains only the policy version and the final SHA-256 digest.
+Set-like fields are sorted while execution-order fields preserve order.
+
+Historical `deterministic-v0` rows remain historical evidence. New v1
+decisions receive new identities; no existing row is rewritten.
+
 ## Non-goals of v0
 
 - no embedding or LLM-based routing;
