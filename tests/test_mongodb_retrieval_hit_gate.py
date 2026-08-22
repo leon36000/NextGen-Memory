@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 from collections.abc import Mapping
 from uuid import UUID, uuid4
 
@@ -63,18 +64,19 @@ def test_config_declares_and_normalizes_required_research_source_type() -> None:
     assert config.active_status == "active"
 
 
-@pytest.mark.parametrize(
-    "kwargs",
-    [
-        {"active_status": ""},
-        {"active_status": "   "},
-        {"source_type": ""},
-        {"source_type": "   "},
-    ],
-)
-def test_config_rejects_blank_lifecycle_policy(kwargs: dict[str, object]) -> None:
+@pytest.mark.parametrize("active_status", ["", "   "])
+def test_config_rejects_blank_active_status(active_status: str) -> None:
     with pytest.raises(ValueError, match="must not be empty"):
-        MongoResearchIndexConfig(**kwargs)  # type: ignore[arg-type]
+        MongoResearchIndexConfig(active_status=active_status)
+
+
+@pytest.mark.parametrize("source_type", ["", "   "])
+def test_config_rejects_blank_source_type(source_type: str) -> None:
+    signature = inspect.signature(MongoResearchIndexConfig)
+    if "source_type" not in signature.parameters:
+        pytest.fail("source_type policy field is missing")
+    with pytest.raises(ValueError, match="must not be empty"):
+        MongoResearchIndexConfig(source_type=source_type)  # type: ignore[call-arg]
 
 
 def test_pipeline_filters_and_projects_scope_lifecycle_and_source_type() -> None:
