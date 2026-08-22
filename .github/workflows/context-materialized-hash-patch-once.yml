@@ -23,6 +23,7 @@ jobs:
         run: |
           python - <<'PY'
           from pathlib import Path
+          import re
 
           def replace_once(path: Path, source: str, old: str, new: str) -> str:
               if source.count(old) != 1:
@@ -38,27 +39,29 @@ jobs:
                   'import json\nimport re\n',
                   'import hashlib\nimport json\nimport re\n',
               )
-              old = '''        object.__setattr__(
-              self,
-              "content",
-              _normalize_required_text("content", self.content),
-          )
-          _validate_hash("content_hash", self.content_hash)
-          '''
-              new = '''        normalized_content = _normalize_required_text(
-              "content",
-              self.content,
-          )
-          object.__setattr__(self, "content", normalized_content)
-          _validate_hash("content_hash", self.content_hash)
-          expected_content_hash = hashlib.sha256(
-              normalized_content.encode("utf-8")
-          ).hexdigest()
-          if self.content_hash != expected_content_hash:
-              raise ContextCompilerValidationError(
-                  "content_hash must match normalized materialized content"
+              old = (
+                  '        object.__setattr__(\n'
+                  '            self,\n'
+                  '            "content",\n'
+                  '            _normalize_required_text("content", self.content),\n'
+                  '        )\n'
+                  '        _validate_hash("content_hash", self.content_hash)\n'
               )
-          '''
+              new = (
+                  '        normalized_content = _normalize_required_text(\n'
+                  '            "content",\n'
+                  '            self.content,\n'
+                  '        )\n'
+                  '        object.__setattr__(self, "content", normalized_content)\n'
+                  '        _validate_hash("content_hash", self.content_hash)\n'
+                  '        expected_content_hash = hashlib.sha256(\n'
+                  '            normalized_content.encode("utf-8")\n'
+                  '        ).hexdigest()\n'
+                  '        if self.content_hash != expected_content_hash:\n'
+                  '            raise ContextCompilerValidationError(\n'
+                  '                "content_hash must match normalized materialized content"\n'
+                  '            )\n'
+              )
               source = replace_once(contracts, source, old, new)
               contracts.write_text(source.rstrip() + '\n', encoding='utf-8')
 
@@ -69,20 +72,39 @@ jobs:
               Path('tests/test_context_heuristic_solver.py'),
               Path('tests/test_context_objective.py'),
           )
-          helper_patch = '''    values.update(overrides)
-          if "content_hash" not in overrides:
-              content = values.get("content")
-              normalized_content = content.strip() if isinstance(content, str) else ""
-              values["content_hash"] = hashlib.sha256(
-                  normalized_content.encode("utf-8")
-              ).hexdigest()
-          return IntegratedContextEvidence(**values)
-          '''
-          helper_patch = '\n'.join(
-              line[10:] if line.startswith('          ') else line
-              for line in helper_patch.splitlines()
-          ) + '\n'
+          helper_patch = (
+              '    values.update(overrides)\n'
+              '    if "content_hash" not in overrides:\n'
+              '        content = values.get("content")\n'
+              '        normalized_content = (\n'
+              '            content.strip() if isinstance(content, str) else ""\n'
+              '        )\n'
+              '        values["content_hash"] = hashlib.sha256(\n'
+              '            normalized_content.encode("utf-8")\n'
+              '        ).hexdigest()\n'
+              '    return IntegratedContextEvidence(**values)\n'
+          )
 
+          defaults = {
+              'tests/test_context_compiler_contracts.py': (
+                  '        "content_hash": "a" * 64,\n',
+              ),
+              'tests/test_context_compiler.py': (
+                  '    character = "0123456789abcdef"[index % 16]\n',
+                  '        "content_hash": character * 64,\n',
+              ),
+              'tests/test_context_exact_solver.py': (
+                  '    character = "0123456789abcdef"[index % 16]\n',
+                  '        "content_hash": character * 64,\n',
+              ),
+              'tests/test_context_heuristic_solver.py': (
+                  '    character = "0123456789abcdef"[index % 16]\n',
+                  '        "content_hash": character * 64,\n',
+              ),
+              'tests/test_context_objective.py': (
+                  '        "content_hash": suffix * 64,\n',
+              ),
+          }
           for path in helper_files:
               source = path.read_text(encoding='utf-8')
               if 'import hashlib\n' not in source:
@@ -92,6 +114,8 @@ jobs:
                       'from __future__ import annotations\n\n',
                       'from __future__ import annotations\n\nimport hashlib\n',
                   )
+              for old in defaults[str(path)]:
+                  source = source.replace(old, '')
               if 'if "content_hash" not in overrides:' not in source:
                   source = replace_once(
                       path,
@@ -99,51 +123,71 @@ jobs:
                       '    values.update(overrides)\n    return IntegratedContextEvidence(**values)\n',
                       helper_patch,
                   )
-              path.write_text(source, encoding='utf-8')
-
-          fixture_edits: dict[Path, tuple[tuple[str, str], ...]] = {
-              Path('tests/test_context_compiler_contracts.py'): (
-                  ('        "content_hash": "a" * 64,\n', ''),
-                  ('        content_hash="b" * 64,\n', ''),
-              ),
-              Path('tests/test_context_compiler.py'): (
-                  ('    character = "0123456789abcdef"[index % 16]\n', ''),
-                  ('        "content_hash": character * 64,\n', ''),
-                  (
-                      '                evidence(1, content="different", content_hash="f" * 64),\n',
-                      '                evidence(1, content="different"),\n',
-                  ),
-                  ('        content_hash="f" * 64,\n', ''),
-              ),
-              Path('tests/test_context_exact_solver.py'): (
-                  ('    character = "0123456789abcdef"[index % 16]\n', ''),
-                  ('        "content_hash": character * 64,\n', ''),
-              ),
-              Path('tests/test_context_heuristic_solver.py'): (
-                  ('    character = "0123456789abcdef"[index % 16]\n', ''),
-                  ('        "content_hash": character * 64,\n', ''),
-              ),
-              Path('tests/test_context_objective.py'): (
-                  ('        "content_hash": suffix * 64,\n', ''),
-                  ('        content_hash="f" * 64,\n', ''),
-              ),
-          }
-          for path, edits in fixture_edits.items():
-              source = path.read_text(encoding='utf-8')
-              for old, new in edits:
-                  if old in source:
-                      source = source.replace(old, new)
               path.write_text(source.rstrip() + '\n', encoding='utf-8')
+
+          contracts_test = Path('tests/test_context_compiler_contracts.py')
+          source = contracts_test.read_text(encoding='utf-8')
+          source = source.replace('        content_hash="b" * 64,\n', '')
+          contracts_test.write_text(source.rstrip() + '\n', encoding='utf-8')
+
+          compiler_test = Path('tests/test_context_compiler.py')
+          source = compiler_test.read_text(encoding='utf-8')
+          source = source.replace(
+              '                evidence(1, content="different", content_hash="f" * 64),\n',
+              '                evidence(1, content="different"),\n',
+          )
+          source = source.replace('        content_hash="f" * 64,\n', '')
+          compiler_test.write_text(source.rstrip() + '\n', encoding='utf-8')
+
+          objective_test = Path('tests/test_context_objective.py')
+          source = objective_test.read_text(encoding='utf-8')
+          source = source.replace(
+              '                evidence(MEMORY_A, content="conflict", content_hash="f" * 64),\n',
+              '                evidence(MEMORY_A, content="conflict"),\n',
+          )
+          source = source.replace('        content_hash="f" * 64,\n', '')
+          source = source.replace(
+              'def test_content_dedup_preserves_structural_anchor_and_rejects_hash_collision() -> None:\n',
+              'def test_content_dedup_preserves_structural_anchor() -> None:\n',
+          )
+          collision = re.compile(
+              r'\n    with pytest\.raises\('
+              r'ContextCompilerValidationError, match="content_hash"\):\n'
+              r'        canonicalize_context_problem\(\n'
+              r'            request\(\),\n'
+              r'            \(\n'
+              r'                evidence\(MEMORY_A, content="first", content_hash="e" \* 64\),\n'
+              r'                evidence\(MEMORY_B, content="second", content_hash="e" \* 64\),\n'
+              r'            \),\n'
+              r'            \(\),\n'
+              r'        \)\n'
+          )
+          source, count = collision.subn('', source, count=1)
+          if count != 1:
+              raise SystemExit('expected obsolete hash-collision assertion exactly once')
+          objective_test.write_text(source.rstrip() + '\n', encoding='utf-8')
 
           properties = Path('tests/test_context_compiler_properties.py')
           source = properties.read_text(encoding='utf-8')
-          source = replace_once(
-              properties,
-              source,
-              '        f"context-property:{case_index}:{item_index}".encode()\n',
-              '        f"property evidence {case_index}:{item_index}".encode("utf-8")\n',
+          old_property = (
+              '        f"context-property:{case_index}:{item_index}".encode()\n'
           )
+          new_property = (
+              '        f"property evidence {case_index}:{item_index}".encode("utf-8")\n'
+          )
+          if old_property in source:
+              source = source.replace(old_property, new_property, 1)
+          elif new_property not in source:
+              raise SystemExit('unexpected property content-hash helper')
           properties.write_text(source.rstrip() + '\n', encoding='utf-8')
+
+          suspicious = re.compile(
+              r'content_hash\s*(?::|=)[^\n]*["\'][0-9a-f]["\']\s*\*\s*64'
+          )
+          for path in Path('tests').glob('test_context*.py'):
+              matches = suspicious.findall(path.read_text(encoding='utf-8'))
+              if matches:
+                  raise SystemExit(f'fake valid digest remains in {path}: {matches}')
 
           design = Path(
               'docs/superpowers/specs/2026-08-14-context-compiler-integrated-v0-design.md'
@@ -162,17 +206,18 @@ jobs:
                   'rewrites their provenance.\n'
               )
               addition = marker + (
-                  '\nAt the compiler boundary, `content_hash` is the hash of the exact '
-                  'materialized content admitted to the packet. The upstream Neon canonical '
-                  'content hash remains a separate cross-store identity signal and must not be '
-                  'substituted for this materialized-content hash. A mismatch fails before '
-                  'canonicalization or optimization.\n'
+                  '\nAt the compiler boundary, `content_hash` is the SHA-256 hash of '
+                  'the exact normalized materialized content admitted to the packet. The '
+                  'upstream Neon canonical content hash remains a separate cross-store '
+                  'identity signal and must not be substituted for this materialized-content '
+                  'hash. A mismatch fails before canonicalization or optimization.\n'
               )
               source = replace_once(design, source, marker, addition)
-              source = source.replace(
+              source = replace_once(
+                  design,
+                  source,
                   '- content hashes, UUIDs, token estimates, ranks, signals, weights, or interaction statistics are invalid;\n',
                   '- content hashes are malformed or do not match normalized materialized content, or UUIDs, token estimates, ranks, signals, weights, or interaction statistics are invalid;\n',
-                  1,
               )
               design.write_text(source.rstrip() + '\n', encoding='utf-8')
           PY
