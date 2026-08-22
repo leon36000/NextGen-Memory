@@ -1,0 +1,264 @@
+name: One-shot Mongo canonical gate patch
+
+on:
+  pull_request:
+
+permissions:
+  contents: write
+
+jobs:
+  patch-and-verify:
+    if: github.event.pull_request.head.ref == 'fix/mongodb-post-ranking-canonical-gate-20260822'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/mongodb-post-ranking-canonical-gate-20260822
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Apply integrated projection and batch gate
+        run: |
+          python - <<'PY'
+          import ast
+          from pathlib import Path
+          from textwrap import dedent
+
+          path = Path('src/nextgen_memory/mongodb_retrieval.py')
+          source = path.read_text(encoding='utf-8')
+          if 'def _validate_research_result_batch(' in source or 'def _with_canonical_projection(' in source:
+              raise SystemExit('canonical gate helpers already exist unexpectedly')
+
+          future = 'from __future__ import annotations\n'
+          if source.count(future) != 1:
+              raise SystemExit('unexpected future import structure')
+          source = source.replace(
+              future,
+              future + '\nfrom collections.abc import Mapping as _MappingABC\n',
+              1,
+          )
+
+          def offsets(text: str):
+              starts = [0]
+              for index, character in enumerate(text):
+                  if character == '\n':
+                      starts.append(index + 1)
+              return starts
+
+          def span(text: str, node: ast.AST) -> tuple[int, int]:
+              starts = offsets(text)
+              return (
+                  starts[node.lineno - 1] + node.col_offset,
+                  starts[node.end_lineno - 1] + node.end_col_offset,
+              )
+
+          tree = ast.parse(source)
+          builders = [
+              node
+              for node in tree.body
+              if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+              and node.name == 'build_research_hybrid_pipeline'
+          ]
+          if len(builders) != 1:
+              raise SystemExit(f'expected one pipeline builder, got {len(builders)}')
+          returns = [node for node in ast.walk(builders[0]) if isinstance(node, ast.Return)]
+          if len(returns) != 1 or returns[0].value is None:
+              raise SystemExit(f'expected one value return in pipeline builder, got {len(returns)}')
+          return_node = returns[0]
+          return_start, return_end = span(source, return_node)
+          return_replacement = (
+              ' ' * return_node.col_offset
+              + 'return _with_canonical_projection('
+              + ast.unparse(return_node.value)
+              + ')'
+          )
+          source = source[:return_start] + return_replacement + source[return_end:]
+
+          tree = ast.parse(source)
+          retriever_classes = [
+              node for node in tree.body
+              if isinstance(node, ast.ClassDef) and node.name == 'MongoResearchRetriever'
+          ]
+          if len(retriever_classes) != 1:
+              raise SystemExit('expected one MongoResearchRetriever class')
+          methods = [
+              node for node in retriever_classes[0].body
+              if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+              and node.name == 'retrieve'
+          ]
+          if len(methods) != 1:
+              raise SystemExit('expected one retrieve method')
+          method = methods[0]
+          positional = [argument.arg for argument in method.args.args if argument.arg != 'self']
+          if not positional:
+              raise SystemExit('retrieve method has no query argument')
+          query_name = positional[0]
+          aggregate_calls = [
+              node for node in ast.walk(method)
+              if isinstance(node, ast.Call)
+              and isinstance(node.func, ast.Attribute)
+              and node.func.attr == 'aggregate'
+          ]
+          if len(aggregate_calls) != 1:
+              raise SystemExit(f'expected one aggregate call, got {len(aggregate_calls)}')
+          aggregate = aggregate_calls[0]
+          call_start, call_end = span(source, aggregate)
+          original_call = source[call_start:call_end]
+          wrapped = (
+              f'_validate_research_result_batch({original_call}, '
+              f'space_id={query_name}.space_id, max_results={query_name}.limit)'
+          )
+          source = source[:call_start] + wrapped + source[call_end:]
+
+          helpers = dedent('''\
+
+
+          def _with_canonical_projection(pipeline: object) -> list[dict[str, object]]:
+              """Copy a pipeline and expose the envelope needed for post-ranking checks."""
+
+              if not isinstance(pipeline, (list, tuple)):
+                  raise TypeError("pipeline must be a sequence")
+              copied: list[dict[str, object]] = []
+              projection_indexes: list[int] = []
+              for stage in pipeline:
+                  if not isinstance(stage, _MappingABC):
+                      raise ValueError("pipeline stage must be a mapping")
+                  stage_copy = dict(stage)
+                  if "$project" in stage:
+                      projection = stage["$project"]
+                      if not isinstance(projection, _MappingABC):
+                          raise ValueError("pipeline projection must be a mapping")
+                      stage_copy["$project"] = dict(projection)
+                      projection_indexes.append(len(copied))
+                  copied.append(stage_copy)
+              if len(projection_indexes) != 1:
+                  raise ValueError("pipeline must contain exactly one projection stage")
+              project = copied[projection_indexes[0]]["$project"]
+              if not isinstance(project, dict):
+                  raise ValueError("pipeline projection must be a mapping")
+              project.update(
+                  {
+                      "space_id": 1,
+                      "status": 1,
+                      "source_type": 1,
+                  }
+              )
+              return copied
+
+
+          def _validate_research_result_batch(
+              rows: object,
+              *,
+              space_id: UUID,
+              max_results: int,
+          ) -> tuple[dict[str, object], ...]:
+              """Fail closed on scope, lifecycle, identity, or batch-accounting drift."""
+
+              if isinstance(max_results, bool) or not isinstance(max_results, int):
+                  raise TypeError("max_results must be a positive integer")
+              if max_results <= 0:
+                  raise ValueError("max_results must be a positive integer")
+              try:
+                  materialized = tuple(rows)  # type: ignore[arg-type]
+              except TypeError as exc:
+                  raise TypeError("retrieval results must be iterable") from exc
+              if len(materialized) > max_results:
+                  raise ValueError("retrieval result limit exceeded")
+
+              admitted: list[dict[str, object]] = []
+              seen_memory_ids: set[UUID] = set()
+              seen_backend_refs: set[str] = set()
+              required = ("memory_id", "backend_ref", "space_id", "status", "source_type")
+              for row in materialized:
+                  if not isinstance(row, _MappingABC):
+                      raise ValueError("retrieval result row must be a mapping")
+                  for field in required:
+                      if field not in row:
+                          raise ValueError(f"retrieval result missing {field}")
+
+                  try:
+                      memory_id = (
+                          row["memory_id"]
+                          if isinstance(row["memory_id"], UUID)
+                          else UUID(str(row["memory_id"]))
+                      )
+                  except (AttributeError, TypeError, ValueError) as exc:
+                      raise ValueError("retrieval result memory_id must be a UUID") from exc
+                  try:
+                      returned_space = (
+                          row["space_id"]
+                          if isinstance(row["space_id"], UUID)
+                          else UUID(str(row["space_id"]))
+                      )
+                  except (AttributeError, TypeError, ValueError) as exc:
+                      raise ValueError("retrieval result space_id must be a UUID") from exc
+                  if returned_space != space_id:
+                      raise ValueError("retrieval result scope mismatch")
+
+                  backend_ref_value = row["backend_ref"]
+                  if not isinstance(backend_ref_value, str) or not backend_ref_value.strip():
+                      raise ValueError("retrieval result backend_ref must be non-empty")
+                  backend_ref = backend_ref_value.strip()
+                  if row["status"] != "active":
+                      raise ValueError("retrieval result must be active")
+                  source_type_value = row["source_type"]
+                  if not isinstance(source_type_value, str) or not source_type_value.strip():
+                      raise ValueError("retrieval result source_type must be non-empty")
+
+                  if memory_id in seen_memory_ids:
+                      raise ValueError("retrieval result contains duplicate memory_id")
+                  if backend_ref in seen_backend_refs:
+                      raise ValueError("retrieval result contains duplicate backend_ref")
+                  seen_memory_ids.add(memory_id)
+                  seen_backend_refs.add(backend_ref)
+                  admitted.append(dict(row))
+              return tuple(admitted)
+          ''')
+          source = source.rstrip() + helpers + '\n'
+          path.write_text(source, encoding='utf-8')
+          PY
+      - name: Remove transport and normalize scoped files
+        run: |
+          rm .github/workflows/mongodb-canonical-gate-patch-once.yml
+          ruff check --fix src/nextgen_memory/mongodb_retrieval.py tests/test_mongodb_retrieval_gate.py
+          python - <<'PY'
+          from pathlib import Path
+          for name in (
+              'src/nextgen_memory/mongodb_retrieval.py',
+              'tests/test_mongodb_retrieval_gate.py',
+          ):
+              path = Path(name)
+              lines = path.read_text(encoding='utf-8').splitlines()
+              path.write_text('\n'.join(line.rstrip() for line in lines) + '\n', encoding='utf-8')
+          PY
+      - name: Focused verification
+        run: python -m pytest -q tests/test_mongodb_retrieval.py tests/test_mongodb_retrieval_gate.py
+      - name: Full verification
+        run: |
+          ruff check .
+          python -m compileall -q src
+          python -m pytest -q
+          git diff --check
+      - name: Reject scope expansion and weakening
+        run: |
+          allowed='^(src/nextgen_memory/mongodb_retrieval\.py|tests/test_mongodb_retrieval_gate\.py|\.github/workflows/mongodb-canonical-gate-patch-once\.yml)$'
+          while IFS= read -r path; do
+            [[ "$path" =~ $allowed ]] || {
+              echo "unexpected changed path: $path" >&2
+              exit 1
+            }
+          done < <(git diff --name-only HEAD)
+          if git diff --unified=0 | grep -E '^\+.*(pytest\.mark\.(skip|xfail)|@unittest\.skip|# *noqa|NotImplementedError|TODO|FIXME|pass$)' ; then
+            echo 'test weakening, suppression, stub, or deferred implementation detected' >&2
+            exit 1
+          fi
+      - name: Commit verified implementation
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/nextgen_memory/mongodb_retrieval.py tests/test_mongodb_retrieval_gate.py
+          git add -u .github/workflows
+          git commit -m 'fix: add Mongo post-ranking canonical gate'
+          git push origin HEAD:fix/mongodb-post-ranking-canonical-gate-20260822
