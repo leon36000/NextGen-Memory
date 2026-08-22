@@ -1,0 +1,126 @@
+name: Verify canonical Neon migration manifest exact SHA
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    if: github.event.pull_request.head.ref == 'bootstrap/verify-neon-manifest-97a537c-20260822'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 97a537cdba2e81385088b57bb02987fedb0aff14
+          fetch-depth: 0
+      - name: Prove exact checkout and candidate surface
+        run: |
+          test "$(git rev-parse HEAD)" = "97a537cdba2e81385088b57bb02987fedb0aff14"
+          git fetch --depth=1 origin eada91750b5d577ec452c7f8d1fb72126abb6a54
+          mapfile -t changed < <(git diff --name-only eada91750b5d577ec452c7f8d1fb72126abb6a54...HEAD | sort)
+          expected=(
+            migrations/neon/manifest.json
+            scripts/neon_migration_manifest.py
+            tests/test_neon_migration_manifest.py
+          )
+          test "${#changed[@]}" -eq "${#expected[@]}"
+          diff -u <(printf '%s\n' "${expected[@]}" | sort) <(printf '%s\n' "${changed[@]}")
+          test -z "$(git diff --name-only eada91750b5d577ec452c7f8d1fb72126abb6a54...HEAD -- 'migrations/neon/*.sql')"
+          git diff --check eada91750b5d577ec452c7f8d1fb72126abb6a54...HEAD
+      - name: Independently recalculate exact SQL hashes and dependency order
+        run: |
+          python - <<'PY'
+          from __future__ import annotations
+
+          import hashlib
+          import json
+          from pathlib import Path, PurePosixPath
+
+          manifest_path = Path('migrations/neon/manifest.json')
+          raw = manifest_path.read_text(encoding='utf-8')
+          document = json.loads(raw)
+          if raw != json.dumps(document, indent=2, sort_keys=True) + '\n':
+              raise SystemExit('manifest is not canonical JSON')
+          if set(document) != {'manifest_version', 'schema', 'migrations'}:
+              raise SystemExit('unexpected top-level manifest fields')
+          if document['manifest_version'] != 1:
+              raise SystemExit('unexpected manifest version')
+          if document['schema'] != 'nextgen-memory-neon-migrations':
+              raise SystemExit('unexpected manifest schema')
+
+          expected_ids = [
+              '0001_memory_moe_kernel',
+              '0002_core_idempotency',
+              '0003_research_sources_seed',
+              '0005_causal_credit_feedback',
+              '0006_action_memory_usage_events',
+          ]
+          migrations = document['migrations']
+          ids = [entry['id'] for entry in migrations]
+          if ids != expected_ids:
+              raise SystemExit(f'unexpected migration order: {ids}')
+          if any('0004' in migration_id for migration_id in ids):
+              raise SystemExit('historical 0004 gap was hidden')
+
+          expected_dependencies = {
+              '0001_memory_moe_kernel': [],
+              '0002_core_idempotency': ['0001_memory_moe_kernel'],
+              '0003_research_sources_seed': ['0002_core_idempotency'],
+              '0005_causal_credit_feedback': ['0003_research_sources_seed'],
+              '0006_action_memory_usage_events': ['0005_causal_credit_feedback'],
+          }
+          actual_paths = sorted(path.as_posix() for path in Path('migrations/neon').glob('*.sql'))
+          manifest_paths = []
+          positions = {migration_id: index for index, migration_id in enumerate(ids)}
+          for index, entry in enumerate(migrations):
+              if set(entry) != {'depends_on', 'id', 'path', 'sha256'}:
+                  raise SystemExit('unexpected migration entry fields')
+              migration_id = entry['id']
+              path_text = entry['path']
+              pure_path = PurePosixPath(path_text)
+              if pure_path.as_posix() != path_text or pure_path.parts[:2] != ('migrations', 'neon'):
+                  raise SystemExit(f'noncanonical path: {path_text}')
+              path = Path(path_text)
+              if path.is_symlink() or not path.is_file():
+                  raise SystemExit(f'unsafe migration file: {path_text}')
+              if path.stem != migration_id:
+                  raise SystemExit('migration ID does not match filename')
+              actual_hash = hashlib.sha256(path.read_bytes()).hexdigest()
+              if actual_hash != entry['sha256']:
+                  raise SystemExit(f'hash mismatch: {migration_id}')
+              dependencies = entry['depends_on']
+              if dependencies != expected_dependencies[migration_id]:
+                  raise SystemExit(f'unexpected dependencies: {migration_id}')
+              if any(positions[dependency] >= index for dependency in dependencies):
+                  raise SystemExit(f'nonprior dependency: {migration_id}')
+              manifest_paths.append(path_text)
+          if sorted(manifest_paths) != actual_paths:
+              raise SystemExit('manifest does not cover every SQL file exactly once')
+          print(json.dumps({'ids': ids, 'hashes': [entry['sha256'] for entry in migrations]}, sort_keys=True))
+          PY
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - name: Install, lint and compile exact candidate
+        run: |
+          python -m pip install -e '.[dev]'
+          ruff check .
+          python -m compileall -q src scripts
+      - name: Focused manifest contract
+        run: |
+          python -m pytest -q tests/test_neon_migration_manifest.py
+          plan="$(python scripts/neon_migration_manifest.py)"
+          test "$(printf '%s' "$plan" | python -c 'import json,sys; print(json.load(sys.stdin)["plan_hash"])')" = "3b2b22af19dd3cf7812fe2fc8548b33bbef90568567c7c0666e3253fcc4e3075"
+          if printf '%s' "$plan" | grep -Eqi 'CREATE |ALTER |DROP |password|secret|token|dsn|connection'; then
+            echo 'safe plan leaked SQL or connection material' >&2
+            exit 1
+          fi
+      - name: Complete exact candidate suite
+        run: python -m pytest -q
