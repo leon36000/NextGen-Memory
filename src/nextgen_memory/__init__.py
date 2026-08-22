@@ -1,5 +1,13 @@
 """Public API for the NextGen Memory kernel."""
 
+from .action_usage import (
+    ACTION_MEMORY_USAGE_INSERT_SQL,
+    ACTION_MEMORY_USAGE_SELECT_SQL,
+    ActionMemoryUsageConflictError,
+    ActionMemoryUsageEvent,
+    ActionMemoryUsageWriter,
+    build_action_memory_usage_events,
+)
 from .causal_credit import (
     AttributedMemoryCredit,
     CausalCreditAssigner,
@@ -41,7 +49,11 @@ from .context_compiler import (
     IntegratedContextEvidence,
     IntegratedContextPacket,
 )
-from .credit_targets import CREDIT_TARGETS_SELECT_SQL, CreditTargetReader
+from .credit_targets import (
+    ACTION_CREDIT_TARGETS_SELECT_SQL,
+    CREDIT_TARGETS_SELECT_SQL,
+    CreditTargetReader,
+)
 from .domain import (
     EvidenceNeed,
     ExactnessNeed,
@@ -134,11 +146,17 @@ from .utility_reranker import (
 )
 
 __all__ = [
+    "ACTION_CREDIT_TARGETS_SELECT_SQL",
+    "ACTION_MEMORY_USAGE_INSERT_SQL",
+    "ACTION_MEMORY_USAGE_SELECT_SQL",
     "CAUSAL_FEEDBACK_INSERT_SQL",
     "CAUSAL_FEEDBACK_SELECT_SQL",
     "CREDIT_TARGETS_SELECT_SQL",
     "NODE_UTILITY_SELECT_SQL",
     "RETRIEVAL_EVENT_INSERT_SQL",
+    "ActionMemoryUsageConflictError",
+    "ActionMemoryUsageEvent",
+    "ActionMemoryUsageWriter",
     "AdaptiveOrderPlanner",
     "AdaptiveOrderPlannerConfig",
     "AttributedMemoryCredit",
@@ -240,6 +258,7 @@ __all__ = [
     "UtilityRerankerConfig",
     "UtilityScoreBreakdown",
     "UtilitySnapshotProvider",
+    "build_action_memory_usage_events",
     "build_memory_feedback_records",
     "build_research_hybrid_pipeline",
     "build_retrieval_events",
