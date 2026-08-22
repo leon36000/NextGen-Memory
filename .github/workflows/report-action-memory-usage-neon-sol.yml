@@ -1,0 +1,236 @@
+name: Report action-memory usage Neon evidence and Sol packet
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+jobs:
+  verify:
+    if: github.event.pull_request.head.ref == 'bootstrap/report-action-memory-usage-neon-sol-20260822'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - name: Resolve stable repair SHA
+        id: candidate
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 60); do
+            expected="$(git ls-remote origin refs/heads/fix/action-memory-usage-schema-and-reader-20260822 | awk '{print $1}')"
+            test -n "$expected"
+            git fetch --depth=1 origin "$expected"
+            if ! git cat-file -e "$expected:.github/workflows/action-memory-usage-schema-reader-patch-once.yml" 2>/dev/null; then
+              git checkout --detach "$expected"
+              test "$(git rev-parse HEAD)" = "$expected"
+              printf 'sha=%s\n' "$expected" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            sleep 10
+          done
+          exit 1
+      - name: Verify scope and canonical SQL integration
+        run: |
+          git fetch --depth=1 origin audit/action-memory-usage-schema-compatibility-20260822
+          git merge-base --is-ancestor FETCH_HEAD HEAD
+          git diff --check FETCH_HEAD...HEAD
+          git diff --name-only FETCH_HEAD...HEAD > /tmp/paths.txt
+          test -s /tmp/paths.txt
+          while IFS= read -r path; do
+            case "$path" in
+              migrations/neon/*action*usage*.sql|src/nextgen_memory/*action*usage*.py|src/nextgen_memory/credit_targets.py|tests/test_action_memory_usage_schema_compatibility.py) ;;
+              *)
+                if [[ "$path" == tests/*.py ]] && git show "HEAD:$path" | grep -q action_memory_usage_events; then
+                  :
+                else
+                  echo "unexpected path: $path" >&2
+                  exit 1
+                fi
+                ;;
+            esac
+          done < /tmp/paths.txt
+          usage_migration="$(git ls-tree -r --name-only HEAD migrations/neon | while read -r path; do git show "HEAD:$path" 2>/dev/null | grep -q action_memory_usage_events && { echo "$path"; break; }; done)"
+          test -n "$usage_migration"
+          git show "HEAD:$usage_migration" | grep -Eq 'REFERENCES[[:space:]]+ngm\.retrieval_events\([[:space:]]*id[[:space:]]*\)'
+          git show "HEAD:$usage_migration" | grep -Eq 'SELECT[[:space:]]+router_decision_id[[:space:]]*,[[:space:]]*node_id[[:space:]]*,[[:space:]]*space_id[[:space:]]*,[[:space:]]*selected_for_context'
+          git show HEAD:src/nextgen_memory/credit_targets.py | grep -q action_memory_usage_events
+          git show HEAD:src/nextgen_memory/credit_targets.py | grep -Eq 'EXISTS[[:space:]]*\('
+          if git diff --unified=0 FETCH_HEAD...HEAD | grep -E '^\+.*(pytest\.mark\.(skip|xfail)|@unittest\.skip|# *noqa|NotImplementedError|TODO|FIXME|pass$)' ; then
+            exit 1
+          fi
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - name: Install exact repair candidate
+        run: python -m pip install -e '.[dev]'
+      - name: Focused and complete verification
+        run: |
+          mapfile -t usage_tests < <(grep -rl action_memory_usage_events tests --include='*.py' | sort -u)
+          tests=(tests/test_action_memory_usage_schema_compatibility.py)
+          if [[ -e tests/test_credit_targets.py ]]; then tests+=(tests/test_credit_targets.py); fi
+          tests+=("${usage_tests[@]}")
+          mapfile -t unique_tests < <(printf '%s\n' "${tests[@]}" | awk 'NF && !seen[$0]++')
+          python -m pytest -q "${unique_tests[@]}"
+          ruff check .
+          python -m compileall -q src
+          python -m pytest -q
+          git diff --check
+      - name: Store exact evidence
+        run: |
+          mkdir -p /tmp/evidence
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          Path('/tmp/evidence/record.json').write_text(
+              json.dumps({
+                  'candidate_sha': '${{ steps.candidate.outputs.sha }}',
+                  'python_version': '${{ matrix.python-version }}',
+                  'focused': 'green',
+                  'ruff': 'clean',
+                  'compileall': 'clean',
+                  'full_suite': 'green',
+                  'diff_check': 'clean',
+                  'scope': 'reconciled',
+                  'canonical_sql': 'verified',
+                  'run_id': '${{ github.run_id }}',
+              }, sort_keys=True, indent=2) + '\n',
+              encoding='utf-8',
+          )
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: action-usage-sol-${{ matrix.python-version }}
+          path: /tmp/evidence/record.json
+          if-no-files-found: error
+
+  report:
+    if: github.event.pull_request.head.ref == 'bootstrap/report-action-memory-usage-neon-sol-20260822'
+    needs: verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: /tmp/records
+          pattern: action-usage-sol-*
+      - name: Reconcile immutable matrix
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          records = [json.loads(p.read_text(encoding='utf-8')) for p in Path('/tmp/records').glob('**/record.json')]
+          if len(records) != 2:
+              raise SystemExit(f'expected two records, got {len(records)}')
+          if sorted(r['python_version'] for r in records) != ['3.12','3.13']:
+              raise SystemExit('incomplete matrix')
+          shas = {r['candidate_sha'] for r in records}
+          if len(shas) != 1:
+              raise SystemExit(f'SHA moved: {shas}')
+          for r in records:
+              for key, value in {
+                  'focused':'green','ruff':'clean','compileall':'clean',
+                  'full_suite':'green','diff_check':'clean',
+                  'scope':'reconciled','canonical_sql':'verified',
+              }.items():
+                  if r[key] != value:
+                      raise SystemExit(f'failed evidence {key}')
+          Path('/tmp/summary.json').write_text(
+              json.dumps({'candidate_sha':next(iter(shas)),'run_id':records[0]['run_id']},sort_keys=True,indent=2)+'\n',
+              encoding='utf-8',
+          )
+          PY
+      - name: Publish full blind Sol packet with Neon evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          python - <<'PY'
+          import json, os, subprocess
+          repo=os.environ['REPO']
+          summary=json.load(open('/tmp/summary.json',encoding='utf-8'))
+          rows=json.loads(subprocess.run(
+              ['gh','pr','list','--repo',repo,'--state','open','--head','fix/action-memory-usage-schema-and-reader-20260822','--json','number,headRefOid,baseRefName'],
+              check=True,text=True,capture_output=True,
+          ).stdout)
+          if len(rows)!=1:
+              raise SystemExit(f'expected one repair PR, got {rows}')
+          pr=rows[0]
+          if pr['headRefOid']!=summary['candidate_sha']:
+              raise SystemExit('repair ref moved')
+          packet=f'''## Blind GPT-5.6 Sol review request — action-memory usage schema and reader
+
+Return exactly one verdict: `APPROVE`, `CHANGES_REQUIRED`, or `BLOCKED_BY_EVIDENCE`.
+
+### Exact boundary
+
+- Candidate SHA: `{summary['candidate_sha']}`
+- Candidate branch: `fix/action-memory-usage-schema-and-reader-20260822`
+- Audit parent: `audit/action-memory-usage-schema-compatibility-20260822`
+- Candidate movement invalidates this request.
+
+### Contract
+
+The append-only action-memory usage ledger must reference the real retrieval schema (`id`, `router_decision_id`, `node_id`) and `CreditTargetReader` must derive `used_in_action` through an `EXISTS` query over `ngm.action_memory_usage_events`. Historical `retrieval_events.used_in_action` remains false and immutable.
+
+### Exact code evidence
+
+- Python 3.12 and 3.13 resolved and detached-checkout the same immutable SHA.
+- Focused usage/reader tests, Ruff, compileall, full pytest and diff-check passed on both versions.
+- Audit ancestry and final repair scope were reconciled.
+- Migration FK and trigger select use canonical retrieval columns.
+- Credit target SQL invokes the append-only usage ledger.
+- No temporary workflow, test weakening, suppression, stub or deferred implementation remains.
+- Verification run: {os.environ['RUN_URL']}
+
+### Isolated Neon evidence
+
+Durable checkpoint: `m-head:action-memory-usage:schema-reader-neon:20260822`.
+
+On temporary branch `verify-action-memory-usage-schema-reader-20260822`:
+
+- corrected migration executed;
+- selected target derived usage changed from false to true after one append-only event;
+- historical retrieval row flag stayed false;
+- exact retry produced one usage row;
+- unselected target, decision mismatch, memory mismatch, scope mismatch and missing target were rejected;
+- update and delete were rejected;
+- invalid inserts produced zero parasite rows;
+- parent branch retained no `ngm.action_memory_usage_events` table;
+- temporary branch was deleted;
+- no production migration was applied.
+
+### Review focus
+
+- schema/column compatibility;
+- reader SQL correlation and scope isolation;
+- append-only semantics and retry/conflict behavior;
+- whether selected-only usage is enforced in both application and database boundaries;
+- migration idempotence and parent isolation;
+- any path that still reads or mutates the historical `used_in_action` flag;
+- whether evidence supports stacking the repair onto the original usage candidate.
+
+Do not rely on this summary. Inspect the exact diff, tests, migration and immutable workflow evidence. No merge is allowed without a genuine independent Sol `APPROVE` on the unchanged SHA.'''
+          subprocess.run(['gh','pr','comment',str(pr['number']),'--repo',repo,'--body',packet],check=True)
+          audit_rows=json.loads(subprocess.run(
+              ['gh','pr','list','--repo',repo,'--state','open','--head','audit/action-memory-usage-schema-compatibility-20260822','--json','number'],
+              check=True,text=True,capture_output=True,
+          ).stdout)
+          if len(audit_rows)==1:
+              subprocess.run(['gh','pr','comment',str(audit_rows[0]['number']),'--repo',repo,'--body',f"Repair candidate `{summary['candidate_sha']}` is exact-SHA verified on Python 3.12/3.13 and passed isolated Neon validation. Blind Sol packet is on PR #{pr['number']}. No merge occurred."],check=True)
+          subprocess.run(['gh','issue','comment','23','--repo',repo,'--body',f"Action-memory usage repair `{summary['candidate_sha']}` passed exact Python 3.12/3.13 verification plus isolated Neon smoke. Blind Sol packet posted on PR #{pr['number']}; unmerged. Run: {os.environ['RUN_URL']}"],check=True)
+          PY
+      - name: Close this control PR without merge
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: gh pr close "$PR_NUMBER" --repo "$REPO" --comment 'Exact code and Neon evidence reconciled; blind Sol packet published. Closed without merge.'
