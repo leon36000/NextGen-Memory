@@ -1,0 +1,61 @@
+name: Normalize runner StrEnum and test once
+
+on:
+  pull_request:
+
+permissions:
+  contents: write
+
+jobs:
+  normalize-and-test:
+    if: github.event.pull_request.head.ref == 'ci/neon-migration-runner-v1-20260822'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ci/neon-migration-runner-v1-20260822
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Use StrEnum without changing values
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('scripts/neon_migration_runner.py')
+          source = path.read_text(encoding='utf-8')
+          if source.count('from enum import Enum') != 1:
+              raise SystemExit('unexpected enum import')
+          if source.count('class ExitClass(str, Enum):') != 1:
+              raise SystemExit('unexpected ExitClass declaration')
+          source = source.replace('from enum import Enum', 'from enum import StrEnum', 1)
+          source = source.replace(
+              'class ExitClass(str, Enum):',
+              'class ExitClass(StrEnum):',
+              1,
+          )
+          path.write_text(source, encoding='utf-8')
+          PY
+          rm .github/workflows/runner-strenum-and-test-once.yml
+      - name: Install project and development tools
+        run: python -m pip install -e '.[dev]'
+      - name: Focused runner verification
+        run: |
+          ruff check scripts/neon_migration_runner.py tests/test_neon_migration_runner.py
+          python -m pytest -q tests/test_neon_migration_runner.py
+      - name: Repository verification
+        run: |
+          ruff check .
+          python -m compileall -q src scripts
+          python -m pytest -q
+          git diff --check 97a537cdba2e81385088b57bb02987fedb0aff14...HEAD
+      - name: Commit only after all checks pass
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add scripts/neon_migration_runner.py tests/test_neon_migration_runner.py
+          git add -u .github/workflows
+          git commit -m 'feat: implement deterministic Neon migration runner'
+          git push origin HEAD:ci/neon-migration-runner-v1-20260822
