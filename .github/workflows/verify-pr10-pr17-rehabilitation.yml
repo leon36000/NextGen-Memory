@@ -1,0 +1,52 @@
+name: Verify PR10 and PR17 rehabilitation refs
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        branch:
+          - fix/pr10-exact-ci-rehabilitation-20260822
+          - fix/pr17-exact-ci-rehabilitation-20260822
+        python-version: ["3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - name: Resolve and checkout immutable remote SHA
+        id: candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected="$(git ls-remote origin "refs/heads/${{ matrix.branch }}" | awk '{print $1}')"
+          test -n "$expected"
+          git fetch --depth=1 origin "$expected"
+          git checkout --detach "$expected"
+          test "$(git rev-parse HEAD)" = "$expected"
+          printf 'sha=%s\n' "$expected" >> "$GITHUB_OUTPUT"
+          printf 'candidate_branch=%s\n' '${{ matrix.branch }}' >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - name: Install exact candidate
+        run: python -m pip install -e '.[dev]'
+      - name: Lint exact candidate
+        run: ruff check .
+      - name: Compile exact candidate
+        run: python -m compileall -q src
+      - name: Test exact candidate
+        run: python -m pytest -q
+      - name: Diff integrity
+        run: git diff --check
+      - name: Prove no temporary rehabilitation workflow remains
+        run: |
+          test ! -e .github/workflows/pr10-rehabilitation-once.yml
+          test ! -e .github/workflows/pr17-rehabilitation-once.yml
