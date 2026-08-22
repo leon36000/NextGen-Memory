@@ -20,7 +20,7 @@ BEGIN
     RETURN false;
   END IF;
 
-  IF NOT (jsonb_object_length(p_metadata) = 10) THEN
+  IF NOT ((SELECT count(*) FROM jsonb_object_keys(p_metadata)) = 10) THEN
     RETURN false;
   END IF;
   IF NOT (p_metadata ?& ARRAY[
