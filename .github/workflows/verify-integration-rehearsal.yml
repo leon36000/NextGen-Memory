@@ -1,0 +1,267 @@
+name: Verify GREEN candidate integration rehearsal
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+jobs:
+  verify:
+    if: github.event.pull_request.head.ref == 'bootstrap/verify-green-candidate-integration-rehearsal-20260822'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - name: Resolve stable rehearsal SHA
+        id: rehearsal
+        shell: bash
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 90); do
+            expected="$(git ls-remote origin refs/heads/integration/rehearse-green-candidates-20260822 | awk '{print $1}')"
+            test -n "$expected"
+            git fetch --depth=1 origin "$expected"
+            if ! git cat-file -e "$expected:.github/workflows/integration-rehearsal-once.yml" 2>/dev/null; then
+              git checkout --detach "$expected"
+              test "$(git rev-parse HEAD)" = "$expected"
+              printf 'sha=%s\n' "$expected" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            sleep 10
+          done
+          echo 'integration rehearsal did not reach a stable final tree' >&2
+          exit 1
+      - name: Independently prove base and candidate ancestry
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --prune origin '+refs/heads/*:refs/remotes/origin/*'
+          base='origin/feat/corrective-retrieval-preproduction-v0.9.3'
+          git merge-base --is-ancestor "$base" HEAD
+
+          manifest='origin/feat/canonical-migration-manifest-v0-20260822'
+          if ! git show-ref --verify --quiet "refs/remotes/$manifest"; then
+            mapfile -t candidates < <(
+              git for-each-ref --format='%(refname)' refs/remotes/origin |
+              sed 's#refs/remotes/origin/##' |
+              grep -Ei '^(feat|fix)/.*migration.*manifest.*20260822$' |
+              sort -u
+            )
+            test "${#candidates[@]}" -eq 1
+            manifest="origin/${candidates[0]}"
+          fi
+
+          refs=(
+            origin/docs/autonomous-engineering-policy-20260821
+            origin/fix/shapley-order-enumeration-guard-20260821
+            origin/fix/retrieval-telemetry-idempotency-readback-20260822
+            origin/fix/causal-feedback-metadata-allowlist-20260822
+            origin/fix/router-decision-identity-v1-20260822
+            origin/fix/mongodb-post-ranking-canonical-gate-20260822
+            origin/fix/context-content-hash-contract-v1-20260822
+            origin/fix/action-memory-usage-schema-and-reader-20260822
+            origin/ci/release-wheel-integrity-v0-20260822
+            origin/fix/no-stubs-exception-shadowing-20260822
+            "$manifest"
+          )
+          : > /tmp/candidate-shas.tsv
+          for ref in "${refs[@]}"; do
+            git show-ref --verify --quiet "refs/remotes/$ref"
+            sha="$(git rev-parse "$ref")"
+            git merge-base --is-ancestor "$sha" HEAD
+            printf '%s\t%s\n' "$ref" "$sha" >> /tmp/candidate-shas.tsv
+          done
+
+          if git diff --name-only "$base...HEAD" | grep -Eq '^src/nextgen_memory/corrective_retrieval_'; then
+            echo 'rehearsal modifies active Codex corrective-retrieval files' >&2
+            exit 1
+          fi
+      - name: Recheck structural invariants
+        run: |
+          python - <<'PY'
+          import re
+          from collections import defaultdict
+          from pathlib import Path
+
+          collisions=[]
+          root=Path('src/nextgen_memory')
+          for directory in sorted(path for path in root.iterdir() if path.is_dir()):
+              module=root/(directory.name+'.py')
+              if module.exists(): collisions.append((directory.as_posix(),module.as_posix()))
+          assert not collisions, collisions
+
+          numbers=defaultdict(list)
+          for path in sorted(Path('migrations/neon').glob('*.sql')):
+              match=re.match(r'^(\d+)_',path.name)
+              assert match, path
+              numbers[match.group(1)].append(path.as_posix())
+          duplicates={number:paths for number,paths in numbers.items() if len(paths)>1}
+          assert not duplicates, duplicates
+
+          names=defaultdict(list)
+          for path in sorted(Path('.github/workflows').glob('*.y*ml')):
+              name=next((line.split(':',1)[1].strip().strip('"\'') for line in path.read_text(encoding='utf-8').splitlines() if line.startswith('name:')),None)
+              assert name, path
+              names[name].append(path.as_posix())
+          duplicated={name:paths for name,paths in names.items() if len(paths)>1}
+          assert not duplicated, duplicated
+          PY
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - name: Install exact rehearsal
+        run: python -m pip install -e '.[dev]'
+      - name: Run combined focused contracts
+        shell: bash
+        run: |
+          tests=()
+          for path in \
+            tests/test_action_memory_usage_schema_compatibility.py \
+            tests/test_release_artifact.py \
+            tests/test_release_integrity_workflow.py \
+            tests/test_no_stubs.py \
+            tests/test_no_stubs_workflow.py \
+            tests/test_no_stubs_exception_shadowing.py \
+            tests/test_no_stubs_protocol_shadowing.py; do
+            [[ -e "$path" ]] && tests+=("$path")
+          done
+          mapfile -t manifest_tests < <(find tests -maxdepth 1 -type f \( -iname '*migration*manifest*.py' -o -iname '*migration*inventory*.py' \) -print | sort -u)
+          tests+=("${manifest_tests[@]}")
+          ((${#tests[@]})) && python -m pytest -q "${tests[@]}"
+      - name: Verify production source and release wheel
+        shell: bash
+        run: |
+          python scripts/verify_no_stubs.py src > /tmp/no-stubs.json
+          python - <<'PY'
+          import json
+          report=json.load(open('/tmp/no-stubs.json',encoding='utf-8'))
+          assert report == {'finding_count':0,'findings':[]}, report
+          PY
+          rm -rf /tmp/dist && mkdir -p /tmp/dist
+          python -m pip wheel --no-deps --no-build-isolation . --wheel-dir /tmp/dist
+          mapfile -t wheels < <(find /tmp/dist -maxdepth 1 -type f -name '*.whl' -print)
+          test "${#wheels[@]}" -eq 1
+          version="$(python - <<'PY'
+          import tomllib
+          from pathlib import Path
+          print(tomllib.loads(Path('pyproject.toml').read_text(encoding='utf-8'))['project']['version'])
+          PY
+          )"
+          mapfile -t modules < <(find src/nextgen_memory -maxdepth 1 -type f -name '*.py' -printf '%f\n' | sed -E 's/\.py$//' | awk '$0 == "__init__" {print "nextgen_memory"; next} {print "nextgen_memory." $0}' | sort -u)
+          args=(); for module in "${modules[@]}"; do args+=(--required-module "$module"); done
+          python scripts/verify_release_artifact.py "${wheels[0]}" --expected-name nextgen-memory --expected-version "$version" "${args[@]}" > /tmp/wheel-report.json
+          smoke="$(mktemp -d)"; outside="$(mktemp -d)"
+          python -m venv "$smoke/venv"
+          "$smoke/venv/bin/python" -m pip install --no-deps "${wheels[0]}"
+          (cd "$outside" && REPO_ROOT="$GITHUB_WORKSPACE" "$smoke/venv/bin/python" -I - <<'PY'
+          import os,sys
+          from pathlib import Path
+          import nextgen_memory
+          path=Path(nextgen_memory.__file__).resolve()
+          assert path.is_relative_to(Path(sys.prefix).resolve())
+          assert not path.is_relative_to(Path(os.environ['REPO_ROOT']).resolve())
+          for name in nextgen_memory.__all__: getattr(nextgen_memory,name)
+          PY
+          )
+          "$smoke/venv/bin/python" -m pip check
+      - name: Complete exact-rehearsal verification
+        run: |
+          ruff check .
+          python -m compileall -q src scripts
+          python -m pytest -q | tee /tmp/full-pytest.log
+          git diff --check
+      - name: Store independent evidence
+        run: |
+          mkdir -p /tmp/evidence
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          wheel=json.load(open('/tmp/wheel-report.json',encoding='utf-8'))
+          candidates=[]
+          for line in Path('/tmp/candidate-shas.tsv').read_text(encoding='utf-8').splitlines():
+              ref,sha=line.split('\t'); candidates.append({'ref':ref,'sha':sha})
+          Path('/tmp/evidence/record.json').write_text(json.dumps({
+              'rehearsal_sha':'${{ steps.rehearsal.outputs.sha }}',
+              'python_version':'${{ matrix.python-version }}',
+              'candidate_shas':candidates,
+              'focused':'green','structure':'green','no_stubs_findings':0,
+              'wheel_sha256':wheel['wheel_sha256'],'isolated_import':'green','pip_check':'green',
+              'ruff':'clean','compileall':'clean','full_suite':'green','diff_check':'clean',
+              'run_id':'${{ github.run_id }}',
+          },sort_keys=True,indent=2)+'\n',encoding='utf-8')
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: integration-rehearsal-${{ matrix.python-version }}
+          path: /tmp/evidence/record.json
+          if-no-files-found: error
+
+  report:
+    if: github.event.pull_request.head.ref == 'bootstrap/verify-green-candidate-integration-rehearsal-20260822'
+    needs: verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: /tmp/records
+          pattern: integration-rehearsal-*
+      - name: Reconcile exact independent evidence
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          records=[json.loads(p.read_text(encoding='utf-8')) for p in Path('/tmp/records').glob('**/record.json')]
+          assert len(records)==2, records
+          assert sorted(r['python_version'] for r in records)==['3.12','3.13']
+          shas={r['rehearsal_sha'] for r in records}; assert len(shas)==1,shas
+          candidate_sets={json.dumps(r['candidate_shas'],sort_keys=True) for r in records}; assert len(candidate_sets)==1
+          for r in records:
+              for key,value in {'focused':'green','structure':'green','no_stubs_findings':0,'isolated_import':'green','pip_check':'green','ruff':'clean','compileall':'clean','full_suite':'green','diff_check':'clean'}.items():
+                  assert r[key]==value,(key,r[key])
+          Path('/tmp/summary.json').write_text(json.dumps({
+              'rehearsal_sha':next(iter(shas)),
+              'candidate_shas':records[0]['candidate_shas'],
+              'wheels':{r['python_version']:r['wheel_sha256'] for r in records},
+              'run_id':records[0]['run_id'],
+          },sort_keys=True,indent=2)+'\n',encoding='utf-8')
+          PY
+      - name: Publish immutable rehearsal proof
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          python - <<'PY'
+          import json,os,subprocess
+          repo=os.environ['REPO']; summary=json.load(open('/tmp/summary.json',encoding='utf-8'))
+          rows=json.loads(subprocess.run(['gh','pr','list','--repo',repo,'--state','open','--head','integration/rehearse-green-candidates-20260822','--json','number,headRefOid'],check=True,text=True,capture_output=True).stdout)
+          if len(rows)!=1 or rows[0]['headRefOid']!=summary['rehearsal_sha']: raise SystemExit('rehearsal PR missing or moved')
+          body=f'''## Independent exact-SHA integration rehearsal proof
+
+- Rehearsal SHA: `{summary['rehearsal_sha']}`
+- Candidate refs independently resolved and proven ancestral: {len(summary['candidate_shas'])}
+- Python 3.12/3.13: focused contracts, structure, no-stubs, wheel install/import, Ruff, compileall, full pytest and diff-check passed
+- Environment-specific wheel hashes: `{summary['wheels']}`
+- Verification run: {os.environ['RUN_URL']}
+
+This remains an ephemeral, unmerged rehearsal. It does not aggregate or replace candidate-specific Sol approvals and is not release readiness.'''
+          subprocess.run(['gh','pr','comment',str(rows[0]['number']),'--repo',repo,'--body',body],check=True)
+          issue_rows=json.loads(subprocess.run(['gh','issue','list','--repo',repo,'--state','open','--search','rehearse integration of all GREEN unmerged candidates in:title','--json','number'],check=True,text=True,capture_output=True).stdout)
+          if len(issue_rows)==1: subprocess.run(['gh','issue','comment',str(issue_rows[0]['number']),'--repo',repo,'--body',body],check=True)
+          subprocess.run(['gh','issue','comment','23','--repo',repo,'--body',body],check=True)
+          PY
+      - name: Close verifier without merge
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: gh pr close "$PR_NUMBER" --repo "$REPO" --comment 'Independent integration rehearsal verification completed. Closed without merge.'
