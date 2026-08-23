@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import pytest
-
 from scripts.verify_no_stubs import scan_source
 
 
