@@ -1,0 +1,225 @@
+name: Post blind Sol packets for router and stacked PRs
+
+on:
+  pull_request:
+
+permissions:
+  actions: read
+  contents: read
+  issues: write
+  pull-requests: write
+
+jobs:
+  publish:
+    if: github.event.pull_request.head.ref == 'bootstrap/post-sol-packets-router-pr17-pr19-20260823'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve exact heads and successful verifier runs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          encode() { python -c 'import sys,urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$1"; }
+          branch_sha() { gh api "repos/$REPO/branches/$(encode "$1")" --jq '.commit.sha'; }
+          successful_run() {
+            gh api --method GET "repos/$REPO/actions/runs" \
+              -f branch="$1" -f event=pull_request -f per_page=100 \
+              --jq ".workflow_runs | map(select(.name == \"$2\" and .status == \"completed\" and .conclusion == \"success\")) | sort_by(.created_at) | last | .id // empty"
+          }
+          prove_jobs() {
+            local run_id=$1 expected=$2
+            local jobs
+            jobs=$(gh api --method GET "repos/$REPO/actions/runs/$run_id/jobs" -f per_page=100)
+            test "$(printf '%s' "$jobs" | jq '[.jobs[] | select(.conclusion != "success")] | length')" -eq 0
+            test "$(printf '%s' "$jobs" | jq '[.jobs[] | select(.status == "completed" and .conclusion == "success")] | length')" -ge "$expected"
+          }
+
+          router_sha=$(branch_sha fix/router-decision-identity-v1-20260822)
+          test "$router_sha" = b336a73d49da4c7589ab2e63704ef3a26b07ee89
+          router_run=$(successful_run bootstrap/verify-router-v1-current-head-20260822 'Verify router identity v1 exact head')
+          stacked_run=$(successful_run bootstrap/verify-pr17-pr19-exact-heads-20260822 'Verify PR 17 and PR 19 exact heads')
+          test -n "$router_run"
+          test -n "$stacked_run"
+          prove_jobs "$router_run" 2
+          prove_jobs "$stacked_run" 4
+          printf '%s\n' "$router_run" > /tmp/router-run
+          printf '%s\n' "$stacked_run" > /tmp/stacked-run
+
+      - name: Publish router blind-review packet
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          run=$(cat /tmp/router-run)
+          body=$(cat <<EOF
+          ## Blind GPT-5.6 Sol review request — Router Decision Identity v1
+
+          Return exactly one verdict: \`APPROVE\`, \`CHANGES_REQUIRED\`, or \`BLOCKED_BY_EVIDENCE\`.
+
+          ### Exact boundary
+
+          - base: \`93cce924debb9ae2ff46d71b2e8fa043f4cefa0b\`
+          - candidate: \`b336a73d49da4c7589ab2e63704ef3a26b07ee89\`
+          - verifier run: \`$run\`
+          - any SHA movement invalidates this request.
+
+          ### Task contract
+
+          Replace request-ID-only routing identity with a versioned UUID5 bound to the complete privacy-safe request policy and deterministic route outcome, without exposing raw query/user/agent values in the UUID5 name or changing routing selection semantics.
+
+          ### Acceptance criteria
+
+          1. Identical normalized requests/outcomes keep one identity.
+          2. Every material request-policy change changes identity even when request UUID is reused.
+          3. Eligible experts, allocations, escalation, confidence and policy version are bound.
+          4. Set-like values are sorted; execution order is preserved.
+          5. UUID5 name contains only version plus one canonical SHA-256 digest.
+          6. Raw query/user/agent values do not occur in the UUID5 name.
+          7. Canonical JSON rejects NaN/non-finite values and has no arbitrary string fallback.
+          8. Historical v0 rows are untouched; new decisions use \`deterministic-v1\`.
+          9. Existing routing behavior and package-root API remain compatible.
+          10. No database, migration, dependency, workflow or corrective-retrieval source changes.
+
+          ### Evidence
+
+          - exact-head matrix run \`$run\`: Python 3.12 and 3.13 jobs completed successfully with focused router/identity tests, full suite, Ruff, compileall and diff integrity;
+          - independent combined branch coverage of \`router.py\` exceeded 90%;
+          - independent AST audit found no concrete stubs, nondeterministic clock/random/UUID calls, persistence/network imports or sensitive raw-payload fields;
+          - candidate is included unchanged in integration PR #78, whose exact integrated SHA passed 682 tests on both Python versions.
+
+          ### Review focus
+
+          - completeness of the bound request/outcome policy;
+          - normalization differences between validated values and hashed values;
+          - mutable aliases or float canonicalization;
+          - raw-principal/query leakage through nested scope serialization;
+          - whether policy-version transition creates ambiguous downstream joins;
+          - compatibility of deterministic UUID changes with existing telemetry/credit contracts.
+
+          Do not rely on this comment or PR prose as proof. Inspect the exact diff, tests and verifier logs before issuing a verdict.
+          EOF
+          )
+          gh api "repos/$REPO/issues/32/comments" -f body="$body"
+
+      - name: Publish PR 17 blind-review packet
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          run=$(cat /tmp/stacked-run)
+          body=$(cat <<EOF
+          ## Blind GPT-5.6 Sol review request — Paired Rerank Policy Evaluation v0
+
+          Return exactly one verdict: \`APPROVE\`, \`CHANGES_REQUIRED\`, or \`BLOCKED_BY_EVIDENCE\`.
+
+          ### Exact boundary
+
+          - base: \`d00992d20f970717268a8a7355f19ab487def4e9\`
+          - candidate: \`67e7c0bc05165c1676541bd3ce7e648e3df54dc7\`
+          - shared immutable-head verifier run: \`$run\`
+          - any SHA movement invalidates this request.
+
+          ### Task contract
+
+          Evaluate a treatment rerank policy against control using only matched replay pairs, compute within-pair effects and uncertainty, and produce bounded verdicts without copying a global reward to individual memories, claiming observational OPE, persisting results or activating policy.
+
+          ### Acceptance criteria
+
+          1. Pair identity requires matching scope/routing/candidates/context/continuation evidence.
+          2. Effects are computed within pair, never from unmatched global means.
+          3. Confidence interval/uncertainty calculations are deterministic and finite.
+          4. Verdicts are limited to insufficient evidence, harmful, too costly, promising, neutral and inconclusive.
+          5. Missing/conflicting/duplicated pairs fail closed or abstain explicitly.
+          6. Input permutation does not change canonical result identity/output.
+          7. No individual-memory reward assignment, persistence, rollout or automatic activation.
+          8. Privacy-safe contracts contain no raw query, prompt, continuation content or secrets.
+          9. Public exports and prior inherited-rerank telemetry behavior remain compatible.
+
+          ### Evidence
+
+          - immutable-head verifier run \`$run\`: exact candidate stack, Python 3.12/3.13, Ruff, complete tests, compileall and diff integrity all succeeded;
+          - exact diff contains production code and tests and no workflow change;
+          - independent focused branch coverage exceeded 90%;
+          - independent AST audit found no stubs, nondeterministic runtime calls, network/database imports, persistence surface or sensitive raw-payload fields.
+
+          ### Review focus
+
+          - pair comparability gates and duplicate/conflict handling;
+          - statistical formulas, small-sample behavior and interval semantics;
+          - cost/harm threshold precedence among six verdicts;
+          - canonical identity under reordered trials;
+          - accidental reward attribution or policy activation;
+          - whether focused tests adequately separate paired inference from naive unpaired analysis.
+
+          Do not rely on this comment or PR prose as proof. Inspect the exact production/test diff and verifier logs before issuing a verdict.
+          EOF
+          )
+          gh api "repos/$REPO/issues/17/comments" -f body="$body"
+
+      - name: Publish PR 19 blind-review packet
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          run=$(cat /tmp/stacked-run)
+          body=$(cat <<EOF
+          ## Blind GPT-5.6 Sol review request — Paired Replay Experiment Registry v0
+
+          Return exactly one verdict: \`APPROVE\`, \`CHANGES_REQUIRED\`, or \`BLOCKED_BY_EVIDENCE\`.
+
+          ### Exact boundary
+
+          - base: \`67e7c0bc05165c1676541bd3ce7e648e3df54dc7\`
+          - candidate: \`bdc7c43b3ed85821b025e2e9b25d35199ddd30fd\`
+          - shared immutable-head verifier run: \`$run\`
+          - any SHA movement invalidates this request.
+
+          ### Task contract
+
+          Build a deterministic counterbalanced paired replay registry with explicit budgets and one schedulable arm at a time, exact idempotent retries, terminal failures/cancellations, and matched-trial construction before final mutation, without executing agents, persisting state or orchestrating leases.
+
+          ### Acceptance criteria
+
+          1. Contexts are represented only by canonical SHA-256 identities.
+          2. Control/treatment ordering is deterministically counterbalanced.
+          3. Pair IDs are seed-independent while plan identity is seed-sensitive.
+          4. Worst-case budgets are validated before exposing work.
+          5. Exactly one arm is schedulable per pair; second arm requires accepted first arm.
+          6. Matched trial is validated before terminal registry mutation.
+          7. Exact retry is idempotent; immutable conflicts fail closed.
+          8. Failure/cancellation are terminal and cannot reopen work.
+          9. Input permutation does not change canonical plan/state/output.
+          10. No agent execution, lease, Temporal, persistence, feedback or protected payload.
+
+          ### Evidence
+
+          - immutable-head verifier run \`$run\`: exact stacked candidate, Python 3.12/3.13, Ruff, complete tests, compileall and diff integrity all succeeded;
+          - exact diff contains production code and tests and no workflow change;
+          - independent focused branch coverage exceeded 90%;
+          - independent AST audit found no stubs, nondeterministic runtime calls, network/database imports, persistence surface or sensitive raw-payload fields.
+
+          ### Review focus
+
+          - counterbalancing and seed/identity separation;
+          - state-machine transitions and race-like duplicate submissions;
+          - budget arithmetic and arm exposure ordering;
+          - exact retry/conflict semantics;
+          - trial construction atomicity before terminal mutation;
+          - whether any path can schedule both arms or revive a terminal pair.
+
+          Do not rely on this comment or PR prose as proof. Inspect the exact production/test diff and verifier logs before issuing a verdict.
+          EOF
+          )
+          gh api "repos/$REPO/issues/19/comments" -f body="$body"
+
+      - name: Close this evidence PR without merge
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+        run: gh api --method PATCH "repos/$REPO/pulls/$PR" -f state=closed >/dev/null
