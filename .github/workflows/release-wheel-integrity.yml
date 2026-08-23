@@ -1,0 +1,348 @@
+name: Release wheel integrity
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/release-wheel-integrity.yml"
+      - "docs/superpowers/plans/2026-08-23-release-wheel-integrity-v1.md"
+      - "docs/superpowers/specs/2026-08-23-release-wheel-integrity-v1-design.md"
+      - "pyproject.toml"
+      - "scripts/verify_release_wheel.py"
+      - "src/**"
+      - "tests/test_release_wheel_cli.py"
+      - "tests/test_release_wheel_integrity.py"
+      - "tests/test_release_wheel_reproducibility.py"
+      - "tests/test_release_wheel_workflow.py"
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-verify:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13"]
+    env:
+      LANG: C.UTF-8
+      LC_ALL: C.UTF-8
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+      PYTHONHASHSEED: '0'
+      TZ: UTC
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Prove exact source and derive commit-bound epoch
+        shell: bash
+        run: |
+          set -euo pipefail
+          candidate_sha=$(git rev-parse HEAD)
+          test "$candidate_sha" = "${{ github.event.pull_request.head.sha }}"
+          source_date_epoch=$(git show -s --format=%ct HEAD)
+          python scripts/verify_release_wheel.py \
+            validate-source-date-epoch "$source_date_epoch" \
+            > "$RUNNER_TEMP/source-date-epoch.json"
+          echo "CANDIDATE_SHA=$candidate_sha" >> "$GITHUB_ENV"
+          echo "SOURCE_DATE_EPOCH=$source_date_epoch" >> "$GITHUB_ENV"
+
+      - name: Install fixed build toolchain and development dependencies
+        run: |
+          python -m pip install --upgrade \
+            'pip==25.2' \
+            'setuptools==80.9.0' \
+            'wheel==0.45.1' \
+            'build==1.3.0'
+          python -m pip install -e '.[dev]'
+
+      - name: Repository and focused contract verification
+        run: |
+          ruff check .
+          python -m compileall -q src scripts
+          python -m pytest -q \
+            tests/test_release_wheel_integrity.py \
+            tests/test_release_wheel_reproducibility.py \
+            tests/test_release_wheel_cli.py \
+            tests/test_release_wheel_workflow.py
+          python -m pytest -q
+          git diff --check "${{ github.event.pull_request.base.sha }}...HEAD"
+
+      - name: Materialize two clean copies of the exact Git tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          release_root="$RUNNER_TEMP/release-wheel-${{ matrix.python-version }}"
+          rm -rf "$release_root"
+          mkdir -p \
+            "$release_root/source-a" \
+            "$release_root/source-b" \
+            "$release_root/build-a" \
+            "$release_root/build-b" \
+            "$release_root/evidence/wheel-a" \
+            "$release_root/evidence/wheel-b"
+          git archive --format=tar HEAD | tar -xf - -C "$release_root/source-a"
+          git archive --format=tar HEAD | tar -xf - -C "$release_root/source-b"
+          echo "RELEASE_ROOT=$release_root" >> "$GITHUB_ENV"
+
+      - name: Build twice under one fixed environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          (
+            cd "$RELEASE_ROOT/source-a"
+            python -m build --wheel --no-isolation \
+              --outdir "$RELEASE_ROOT/build-a"
+          )
+          (
+            cd "$RELEASE_ROOT/source-b"
+            python -m build --wheel --no-isolation \
+              --outdir "$RELEASE_ROOT/build-b"
+          )
+          mapfile -t wheels_a < <(find "$RELEASE_ROOT/build-a" -maxdepth 1 -type f -name '*.whl' | sort)
+          mapfile -t wheels_b < <(find "$RELEASE_ROOT/build-b" -maxdepth 1 -type f -name '*.whl' | sort)
+          if [ "${#wheels_a[@]}" -ne 1 ]; then
+            echo "expected exactly one wheel in build-a" >&2
+            exit 1
+          fi
+          if [ "${#wheels_b[@]}" -ne 1 ]; then
+            echo "expected exactly one wheel in build-b" >&2
+            exit 1
+          fi
+          test "$(basename "${wheels_a[0]}")" = "$(basename "${wheels_b[0]}")"
+          cp "${wheels_a[0]}" "$RELEASE_ROOT/evidence/wheel-a/"
+          cp "${wheels_b[0]}" "$RELEASE_ROOT/evidence/wheel-b/"
+          echo "WHEEL_A=$RELEASE_ROOT/evidence/wheel-a/$(basename "${wheels_a[0]}")" >> "$GITHUB_ENV"
+          echo "WHEEL_B=$RELEASE_ROOT/evidence/wheel-b/$(basename "${wheels_b[0]}")" >> "$GITHUB_ENV"
+
+      - name: Inspect and compare the two wheels
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY' > "$RELEASE_ROOT/evidence/required-modules.txt"
+          from pathlib import Path
+
+          modules = {"nextgen_memory"}
+          for path in Path("src/nextgen_memory").rglob("*.py"):
+              relative = path.relative_to("src").with_suffix("")
+              parts = list(relative.parts)
+              if parts[-1] == "__init__":
+                  parts.pop()
+              if parts:
+                  modules.add(".".join(parts))
+          print("\n".join(sorted(modules)))
+          PY
+
+          identity_args=(
+            --expected-name nextgen-memory
+            --expected-version 0.1.0
+            --required-module nextgen_memory
+          )
+          while IFS= read -r module; do
+            if [ "$module" != "nextgen_memory" ]; then
+              identity_args+=(--required-module "$module")
+            fi
+          done < "$RELEASE_ROOT/evidence/required-modules.txt"
+
+          python scripts/verify_release_wheel.py inspect \
+            "$WHEEL_A" "${identity_args[@]}" \
+            > "$RELEASE_ROOT/evidence/inspection-a.json"
+          python scripts/verify_release_wheel.py inspect \
+            "$WHEEL_B" "${identity_args[@]}" \
+            > "$RELEASE_ROOT/evidence/inspection-b.json"
+          python scripts/verify_release_wheel.py compare \
+            "$WHEEL_A" "$WHEEL_B" "${identity_args[@]}" \
+            > "$RELEASE_ROOT/evidence/same-interpreter-comparison.json"
+
+      - name: Record one canonical build environment report
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from __future__ import annotations
+
+          import hashlib
+          import importlib.metadata
+          import json
+          import os
+          import sys
+          from pathlib import Path
+
+          def digest(path: Path) -> str:
+              value = hashlib.sha256()
+              with path.open("rb") as stream:
+                  for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                      value.update(chunk)
+              return value.hexdigest()
+
+          wheel_a = Path(os.environ["WHEEL_A"])
+          wheel_b = Path(os.environ["WHEEL_B"])
+          sha_a = digest(wheel_a)
+          sha_b = digest(wheel_b)
+          if sha_a != sha_b:
+              raise SystemExit("same-interpreter wheel hashes differ")
+          report = {
+              "candidate_sha": os.environ["CANDIDATE_SHA"],
+              "python_version": ".".join(map(str, sys.version_info[:3])),
+              "same_interpreter_reproducible": True,
+              "source_date_epoch": int(os.environ["SOURCE_DATE_EPOCH"]),
+              "tools": {
+                  name: importlib.metadata.version(name)
+                  for name in ("build", "pip", "setuptools", "wheel")
+              },
+              "wheel_a_filename": wheel_a.name,
+              "wheel_a_sha256": sha_a,
+              "wheel_b_filename": wheel_b.name,
+              "wheel_b_sha256": sha_b,
+          }
+          destination = Path(os.environ["RELEASE_ROOT"]) / "evidence" / "build-environment.json"
+          destination.write_text(
+              json.dumps(
+                  report,
+                  ensure_ascii=False,
+                  allow_nan=False,
+                  sort_keys=True,
+                  separators=(",", ":"),
+              )
+              + "\n",
+              encoding="utf-8",
+          )
+          PY
+
+      - name: Install outside the checkout and verify the public API
+        shell: bash
+        run: |
+          set -euo pipefail
+          venv="$RUNNER_TEMP/release-wheel-venv-${{ matrix.python-version }}"
+          rm -rf "$venv"
+          python -m venv "$venv"
+          "$venv/bin/python" -m pip install --no-deps "$WHEEL_A"
+          isolated_directory=$(mktemp -d)
+          (
+            cd "$isolated_directory"
+            "$venv/bin/python" -I - <<'PY'
+          from pathlib import Path
+          import sys
+
+          import nextgen_memory
+
+          prefix = Path(sys.prefix).resolve()
+          module_path = Path(nextgen_memory.__file__).resolve()
+          if not module_path.is_relative_to(prefix):
+              raise SystemExit("nextgen_memory.__file__ is outside the isolated environment")
+          missing = [name for name in nextgen_memory.__all__ if not hasattr(nextgen_memory, name)]
+          if missing:
+              raise SystemExit(f"missing nextgen_memory.__all__ exports: {missing}")
+          PY
+          )
+          "$venv/bin/python" -m pip check
+
+      - name: Upload bounded same-interpreter evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-wheel-python-${{ matrix.python-version }}
+          path: |
+            ${{ runner.temp }}/release-wheel-${{ matrix.python-version }}/evidence/wheel-a/*.whl
+            ${{ runner.temp }}/release-wheel-${{ matrix.python-version }}/evidence/wheel-b/*.whl
+            ${{ runner.temp }}/release-wheel-${{ matrix.python-version }}/evidence/inspection-a.json
+            ${{ runner.temp }}/release-wheel-${{ matrix.python-version }}/evidence/inspection-b.json
+            ${{ runner.temp }}/release-wheel-${{ matrix.python-version }}/evidence/same-interpreter-comparison.json
+            ${{ runner.temp }}/release-wheel-${{ matrix.python-version }}/evidence/build-environment.json
+          if-no-files-found: error
+          retention-days: 7
+
+  summarize-cross-python:
+    needs: build-and-verify
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-wheel-python-*
+          path: ${{ runner.temp }}/release-wheel-matrix
+
+      - name: Keep cross-Python identity separate from local reproducibility
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from __future__ import annotations
+
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+
+          root = Path(os.environ["RUNNER_TEMP"]) / "release-wheel-matrix"
+          reports: dict[str, dict[str, object]] = {}
+          for path in sorted(root.rglob("build-environment.json")):
+              report = json.loads(path.read_text(encoding="utf-8"))
+              version = str(report["python_version"])
+              minor = ".".join(version.split(".")[:2])
+              if minor in reports:
+                  raise SystemExit(f"duplicate Python report: {minor}")
+              if report.get("same_interpreter_reproducible") is not True:
+                  raise SystemExit(f"same-interpreter reproducibility failed: {minor}")
+              artifact_root = path.parent
+              wheel_a = list((artifact_root / "wheel-a").glob("*.whl"))
+              wheel_b = list((artifact_root / "wheel-b").glob("*.whl"))
+              if len(wheel_a) != 1 or len(wheel_b) != 1:
+                  raise SystemExit(f"incomplete wheel evidence: {minor}")
+
+              def digest(wheel: Path) -> str:
+                  return hashlib.sha256(wheel.read_bytes()).hexdigest()
+
+              sha_a = digest(wheel_a[0])
+              sha_b = digest(wheel_b[0])
+              if sha_a != sha_b:
+                  raise SystemExit(f"same-interpreter bytes differ: {minor}")
+              if sha_a != report["wheel_a_sha256"] or sha_b != report["wheel_b_sha256"]:
+                  raise SystemExit(f"wheel hash differs from report: {minor}")
+              reports[minor] = report
+
+          if set(reports) != {"3.12", "3.13"}:
+              raise SystemExit(f"unexpected Python evidence set: {sorted(reports)}")
+          python_3_12_sha256 = str(reports["3.12"]["wheel_a_sha256"])
+          python_3_13_sha256 = str(reports["3.13"]["wheel_a_sha256"])
+          same_interpreter_reproducible = all(
+              report["same_interpreter_reproducible"] is True
+              for report in reports.values()
+          )
+          cross_python_byte_identical = python_3_12_sha256 == python_3_13_sha256
+          summary = {
+              "candidate_sha": reports["3.12"]["candidate_sha"],
+              "cross_python_byte_identical": cross_python_byte_identical,
+              "python_3_12_sha256": python_3_12_sha256,
+              "python_3_13_sha256": python_3_13_sha256,
+              "same_interpreter_reproducible": same_interpreter_reproducible,
+          }
+          if reports["3.13"]["candidate_sha"] != summary["candidate_sha"]:
+              raise SystemExit("Python matrix used different candidate SHAs")
+          destination = root / "cross-python-summary.json"
+          destination.write_text(
+              json.dumps(
+                  summary,
+                  ensure_ascii=False,
+                  allow_nan=False,
+                  sort_keys=True,
+                  separators=(",", ":"),
+              )
+              + "\n",
+              encoding="utf-8",
+          )
+          print(destination.read_text(encoding="utf-8"), end="")
+          PY
+
+      - name: Upload bounded cross-Python summary
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-wheel-cross-python-summary
+          path: ${{ runner.temp }}/release-wheel-matrix/cross-python-summary.json
+          if-no-files-found: error
+          retention-days: 7
