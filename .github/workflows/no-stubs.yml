@@ -25,8 +25,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-python-version: ${{ matrix.python-version }}
-cache: pip
+          python-version: ${{ matrix.python-version }}
+          cache: pip
       - name: Install project and development tools
         run: python -m pip install -e '.[dev]'
       - name: Focused scanner contracts
@@ -35,5 +35,5 @@ cache: pip
         run: python scripts/verify_no_stubs.py src
       - name: Static integrity
         run: |
-ruff check scripts/verify_no_stubs.py tests/test_no_stubs.py tests/test_no_stubs_workflow.py tests/test_no_stubs_exception_shadowing.py tests/test_no_stubs_protocol_shadowing.py
-python -m compileall -q src scripts
+          ruff check scripts/verify_no_stubs.py tests/test_no_stubs.py tests/test_no_stubs_workflow.py tests/test_no_stubs_exception_shadowing.py tests/test_no_stubs_protocol_shadowing.py
+          python -m compileall -q src scripts
