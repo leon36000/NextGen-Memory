@@ -3,11 +3,15 @@ from __future__ import annotations
 from pathlib import Path
 
 WORKFLOW = Path(".github/workflows/neon-migration-rehearsal.yml")
+PREREQUISITES = Path(
+    "tests/fixtures/neon_migration_rehearsal_prerequisites.sql"
+)
 EXPECTED_PATH_FILTERS = {
     ".github/workflows/neon-migration-rehearsal.yml",
     "migrations/neon/**",
     "scripts/neon_migration_manifest.py",
     "scripts/neon_migration_runner.py",
+    "tests/fixtures/neon_migration_rehearsal_prerequisites.sql",
     "tests/test_neon_migration_manifest.py",
     "tests/test_neon_migration_rehearsal_workflow.py",
     "tests/test_neon_migration_runner.py",
@@ -83,6 +87,32 @@ def test_workflow_passes_connection_data_only_through_environment() -> None:
     assert "--dbname" not in text
     assert "-d nextgen_migration_rehearsal" not in text
     assert "-h 127.0.0.1" not in text
+
+
+def test_rehearsal_fixture_declares_only_the_seed_prerequisites() -> None:
+    sql = PREREQUISITES.read_text(encoding="utf-8")
+
+    assert "INSERT INTO ngm.memory_spaces" in sql
+    assert "INSERT INTO ngm.source_principals" in sql
+    assert "279c0edc-e75d-5c7e-a857-2f461b4ba61e" in sql
+    assert "049b6cff-c7a6-5116-a38f-5a7527ca3a21" in sql
+    assert sql.count("ON CONFLICT DO NOTHING") == 2
+    assert "INSERT INTO ngm.memory_nodes" not in sql
+    assert "INSERT INTO ngm.schema_meta" not in sql
+    assert "password" not in sql.lower()
+    assert "secret" not in sql.lower()
+    assert "token" not in sql.lower()
+
+
+def test_workflow_applies_seed_prerequisites_before_the_two_pass_runner() -> None:
+    text = _workflow_text()
+    fixture = "tests/fixtures/neon_migration_rehearsal_prerequisites.sql"
+
+    assert f"--file {fixture}" in text
+    fixture_position = text.index(f"--file {fixture}")
+    runner_position = text.index("python scripts/neon_migration_runner.py")
+    assert fixture_position < runner_position
+    assert text.count(f"--file {fixture}") == 1
 
 
 def test_workflow_validates_safe_json_and_uploads_only_safe_reports() -> None:
