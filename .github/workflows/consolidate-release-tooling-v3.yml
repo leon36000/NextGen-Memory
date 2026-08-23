@@ -1,0 +1,205 @@
+name: Consolidate release tooling integration v3
+
+on:
+  pull_request:
+
+permissions:
+  actions: read
+  contents: read
+  issues: write
+  pull-requests: write
+
+jobs:
+  consolidate:
+    if: github.event.pull_request.head.ref == 'bootstrap/consolidate-release-tooling-v3-20260823'
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Resolve exact integration PR, graph and successful workflows
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          encode() { python -c 'import sys,urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$1"; }
+          branch_sha() { gh api "repos/$REPO/branches/$(encode "$1")" --jq '.commit.sha'; }
+          successful_run() {
+            local branch=$1 name=$2
+            gh api --method GET "repos/$REPO/actions/runs" \
+              -f branch="$branch" -f event=pull_request -f per_page=100 \
+              --jq ".workflow_runs | map(select(.name == \"$name\" and .status == \"completed\" and .conclusion == \"success\")) | sort_by(.created_at) | last | .id // empty"
+          }
+          prove_jobs() {
+            local run_id=$1 minimum=$2
+            local jobs
+            jobs=$(gh api --method GET "repos/$REPO/actions/runs/$run_id/jobs" -f per_page=100)
+            test "$(printf '%s' "$jobs" | jq '[.jobs[] | select(.conclusion != "success")] | length')" -eq 0
+            test "$(printf '%s' "$jobs" | jq '[.jobs[] | select(.status == "completed" and .conclusion == "success")] | length')" -ge "$minimum"
+          }
+
+          integration_branch='integration/rehearse-release-tooling-v3-20260823'
+          integration_sha=$(branch_sha "$integration_branch")
+          manifest_sha=$(branch_sha ci/neon-migration-manifest-v1-20260822)
+          runner_sha=$(branch_sha candidate/neon-migration-runner-v1-20260823)
+          wheel_sha=$(branch_sha candidate/release-wheel-integrity-v1-20260823)
+          test "$manifest_sha" = 97a537cdba2e81385088b57bb02987fedb0aff14
+
+          pulls=$(gh api --method GET "repos/$REPO/pulls" -f state=all -f head="leon36000:$integration_branch" -f per_page=100)
+          test "$(printf '%s' "$pulls" | jq 'length')" -eq 1
+          integration_pr=$(printf '%s' "$pulls" | jq -r '.[0].number')
+          test "$(printf '%s' "$pulls" | jq -r '.[0].state')" = open
+          test "$(printf '%s' "$pulls" | jq -r '.[0].draft')" = true
+          test "$(printf '%s' "$pulls" | jq -r '.[0].head.sha')" = "$integration_sha"
+          test "$(printf '%s' "$pulls" | jq -r '.[0].base.ref')" = integration/rehearse-green-candidates-v2-20260822
+
+          producer_run=$(successful_run bootstrap/rehearse-release-tooling-v3-20260823 'Rehearse release tooling v3')
+          verifier_run=$(successful_run bootstrap/verify-release-tooling-v3-20260823 'Verify release tooling integration v3 exact SHA')
+          test -n "$producer_run"
+          test -n "$verifier_run"
+          prove_jobs "$producer_run" 1
+          prove_jobs "$verifier_run" 4
+
+          jq -n \
+            --argjson integration_pr "$integration_pr" \
+            --arg integration_sha "$integration_sha" \
+            --arg manifest_sha "$manifest_sha" \
+            --arg runner_sha "$runner_sha" \
+            --arg wheel_sha "$wheel_sha" \
+            --argjson producer_run "$producer_run" \
+            --argjson verifier_run "$verifier_run" \
+            '{integration_pr:$integration_pr,integration_sha:$integration_sha,manifest_sha:$manifest_sha,runner_sha:$runner_sha,wheel_sha:$wheel_sha,producer_run:$producer_run,verifier_run:$verifier_run}' \
+            > /tmp/evidence.json
+          cat /tmp/evidence.json
+
+      - uses: actions/checkout@v4
+        with:
+          ref: integration/rehearse-release-tooling-v3-20260823
+          fetch-depth: 0
+      - name: Reprove exact graph and tooling-only scope
+        shell: bash
+        run: |
+          set -euo pipefail
+          integration_sha=$(jq -r '.integration_sha' /tmp/evidence.json)
+          test "$(git rev-parse HEAD)" = "$integration_sha"
+          for key in manifest_sha runner_sha wheel_sha; do
+            sha=$(jq -r ".$key" /tmp/evidence.json)
+            git cat-file -e "${sha}^{commit}"
+            git merge-base --is-ancestor "$sha" HEAD
+          done
+          test "$(git rev-list --count --merges eada91750b5d577ec452c7f8d1fb72126abb6a54..HEAD)" -eq 3
+          test -z "$(git diff --name-only eada91750b5d577ec452c7f8d1fb72126abb6a54...HEAD -- 'src/**' 'migrations/neon/*.sql')"
+          git diff --check eada91750b5d577ec452c7f8d1fb72126abb6a54...HEAD
+          test -z "$(git status --porcelain)"
+
+      - name: Update canonical integration PR and publish blind Sol packet
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          pr=$(jq -r '.integration_pr' /tmp/evidence.json)
+          sha=$(jq -r '.integration_sha' /tmp/evidence.json)
+          manifest_sha=$(jq -r '.manifest_sha' /tmp/evidence.json)
+          runner_sha=$(jq -r '.runner_sha' /tmp/evidence.json)
+          wheel_sha=$(jq -r '.wheel_sha' /tmp/evidence.json)
+          producer=$(jq -r '.producer_run' /tmp/evidence.json)
+          verifier=$(jq -r '.verifier_run' /tmp/evidence.json)
+
+          body=$(cat <<EOF
+          ## Status
+
+          **FUNCTIONALLY GREEN / draft / review_pending / unmerged.** Exact integration SHA: \`$sha\`.
+
+          Base: \`eada91750b5d577ec452c7f8d1fb72126abb6a54\`.
+          Immutable branch: \`integration/rehearse-release-tooling-v3-20260823\`.
+
+          ## Immutable constituent manifest
+
+          1. canonical migration manifest: \`$manifest_sha\`;
+          2. deterministic PostgreSQL runner: \`$runner_sha\`;
+          3. byte-reproducible release wheel: \`$wheel_sha\`.
+
+          All three are ancestors of the exact integration SHA through exactly three merge commits.
+
+          ## Verification
+
+          - producer run \`$producer\`: dependency-order merges, graph/scope checks, Ruff, compileall, focused/full tests, two complete byte-identical PostgreSQL 18 rehearsals, deterministic manifest/wheel reports and wheel install/API proof all succeeded before branch publication;
+          - independent verifier run \`$verifier\`: exact SHA/graph on Python 3.12 and 3.13, Ruff, compileall, focused/full tests, PostgreSQL 18 replay per version and cross-version equality of manifest plan, runner semantic report and raw wheel bytes all succeeded;
+          - no runtime \`src/\` file or SQL migration byte changed above integration v2;
+          - no production database, migration deployment or release publication occurred.
+
+          ## Merge rule
+
+          Do not merge until integration v2 and all three constituent candidates are approved/integrated in dependency order and a genuinely independent GPT-5.6 Sol review returns \`APPROVE\` for exact SHA \`$sha\`. Any SHA movement invalidates all evidence.
+          EOF
+          )
+          gh api --method PATCH "repos/$REPO/pulls/$pr" -f body="$body" >/dev/null
+
+          packet=$(cat <<EOF
+          ## Blind GPT-5.6 Sol review request — release tooling integration v3
+
+          Return exactly one verdict: \`APPROVE\`, \`CHANGES_REQUIRED\`, or \`BLOCKED_BY_EVIDENCE\`.
+
+          ### Exact boundary
+
+          - base integration: \`eada91750b5d577ec452c7f8d1fb72126abb6a54\`;
+          - integration candidate: \`$sha\`;
+          - manifest: \`$manifest_sha\`;
+          - runner: \`$runner_sha\`;
+          - release wheel: \`$wheel_sha\`;
+          - producer run: \`$producer\`;
+          - independent verifier run: \`$verifier\`;
+          - any SHA movement invalidates this request.
+
+          ### Task contract
+
+          Prove the canonical migration manifest, deterministic PostgreSQL 18 two-pass runner and byte-reproducible wheel tooling coexist on one integration tree without runtime or SQL migration changes, semantic interference, cross-Python divergence or artifact drift.
+
+          ### Acceptance criteria
+
+          1. All three exact candidate SHAs are ancestors through exactly three dependency-ordered merges.
+          2. No package runtime source or migration SQL bytes change above integration v2.
+          3. Ruff, compileall, focused tooling tests and complete repository tests pass.
+          4. PostgreSQL 18 applies the manifest twice per rehearsal and reports identical semantic state.
+          5. Two complete rehearsals produce identical privacy-safe reports.
+          6. Python 3.12 and 3.13 produce identical manifest plans and runner semantic reports.
+          7. Python 3.12 and 3.13 produce the same wheel filename, size, SHA-256 and raw bytes under the fixed toolchain.
+          8. Wheel install and package-root API import succeed.
+          9. No SQL/runtime payload, credentials or connection material leak into reports.
+          10. No production DB contact, migration deployment, release publication, stub or test weakening.
+
+          ### Review focus
+
+          - interaction between manifest hashes and packaging changes;
+          - PostgreSQL semantic snapshot completeness/stability;
+          - cross-Python report equality and hidden environment sensitivity;
+          - release build toolchain pinning and SOURCE_DATE_EPOCH assumptions;
+          - merge-order correctness and candidate ancestry;
+          - whether tooling-only scope is enforced strongly enough;
+          - whether independent verifier artifacts genuinely correspond to one exact integration SHA.
+
+          Do not rely on this comment or PR prose as proof. Inspect the exact graph/diff, constituent candidates and both workflow logs before issuing a verdict.
+          EOF
+          )
+          gh api "repos/$REPO/issues/$pr/comments" -f body="$packet"
+          gh api "repos/$REPO/issues/23/comments" -f body="$packet"
+
+      - name: Close producer, verifier and this evidence PR without merge
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SELF_PR: ${{ github.event.pull_request.number }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          pulls=$(gh api --method GET "repos/$REPO/pulls" -f state=open -f per_page=100)
+          for head in \
+            bootstrap/rehearse-release-tooling-v3-20260823 \
+            bootstrap/verify-release-tooling-v3-20260823; do
+            number=$(printf '%s' "$pulls" | jq -r --arg head "$head" '.[] | select(.head.ref == $head) | .number' | head -1)
+            if [ -n "$number" ]; then
+              gh api --method PATCH "repos/$REPO/pulls/$number" -f state=closed >/dev/null
+            fi
+          done
+          gh api --method PATCH "repos/$REPO/pulls/$SELF_PR" -f state=closed >/dev/null
