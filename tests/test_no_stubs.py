@@ -17,21 +17,17 @@ def kinds(source: str) -> list[str]:
         ("def unfinished():\n    pass\n", "function_stub"),
         (
             "async def unfinished():\n"
-            "    \"\"\"documentation does not complete behavior\"\"\"\n"
+            '    """documentation does not complete behavior"""\n'
             "    ...\n",
             "function_stub",
         ),
         ("class EmptyService:\n    pass\n", "class_stub"),
         (
-            "def outer():\n"
-            "    def inner():\n"
-            "        pass\n"
-            "    return inner\n",
+            "def outer():\n    def inner():\n        pass\n    return inner\n",
             "function_stub",
         ),
         (
-            "def unfinished():\n"
-            "    raise NotImplementedError('later')\n",
+            "def unfinished():\n    raise NotImplementedError('later')\n",
             "not_implemented_error",
         ),
         ("# TODO: implement real behavior\nVALUE = 1\n", "todo_comment"),
@@ -43,7 +39,7 @@ def test_scanner_rejects_concrete_stub_patterns(source: str, expected: str) -> N
 
 
 def test_scanner_accepts_narrow_language_level_abstractions() -> None:
-    source = '''
+    source = """
 from abc import abstractmethod as abstract
 from typing import Protocol as Interface, overload as signature
 
@@ -69,13 +65,13 @@ class Comparable:
         if not isinstance(other, Comparable):
             return NotImplemented
         return True
-'''
+"""
 
     assert scan_source(source, path="src/abstractions.py") == ()
 
 
 def test_scanner_recognizes_module_aliases_for_protocol_abstract_and_overload() -> None:
-    source = '''
+    source = """
 import abc as contracts
 import typing as types
 
@@ -88,18 +84,18 @@ class AbstractWorker:
 
 @types.overload
 def parse(value: int) -> int: ...
-'''
+"""
 
     assert scan_source(source, path="src/aliases.py") == ()
 
 
 def test_not_implemented_error_in_nested_concrete_scope_is_reported_once() -> None:
-    source = '''
+    source = """
 def outer():
     def inner():
         raise NotImplementedError
     return inner
-'''
+"""
 
     findings = scan_source(source, path="src/nested.py")
 
@@ -108,11 +104,11 @@ def outer():
 
 
 def test_todo_words_inside_strings_are_not_comments() -> None:
-    source = '''
+    source = """
 MESSAGE = "TODO is data, not a source comment"
 def complete() -> str:
     return "FIXME is also data"
-'''
+"""
 
     assert scan_source(source, path="src/strings.py") == ()
 

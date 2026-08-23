@@ -1,0 +1,39 @@
+name: AST no-stubs contract
+
+on:
+  pull_request:
+    paths:
+      - "src/**"
+      - "scripts/verify_no_stubs.py"
+      - "tests/test_no_stubs.py"
+      - "tests/test_no_stubs_workflow.py"
+      - "tests/test_no_stubs_exception_shadowing.py"
+      - "tests/test_no_stubs_protocol_shadowing.py"
+      - ".github/workflows/no-stubs.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+python-version: ${{ matrix.python-version }}
+cache: pip
+      - name: Install project and development tools
+        run: python -m pip install -e '.[dev]'
+      - name: Focused scanner contracts
+        run: python -m pytest -q tests/test_no_stubs.py tests/test_no_stubs_workflow.py tests/test_no_stubs_exception_shadowing.py tests/test_no_stubs_protocol_shadowing.py
+      - name: Scan production source
+        run: python scripts/verify_no_stubs.py src
+      - name: Static integrity
+        run: |
+ruff check scripts/verify_no_stubs.py tests/test_no_stubs.py tests/test_no_stubs_workflow.py tests/test_no_stubs_exception_shadowing.py tests/test_no_stubs_protocol_shadowing.py
+python -m compileall -q src scripts

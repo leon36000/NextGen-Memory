@@ -13,7 +13,7 @@ def kinds(source: str) -> list[str]:
     [
         "class ValueError:\n    pass\n",
         "class RuntimeError:\n    ...\n",
-        "class Exception:\n    \"\"\"not actually an exception\"\"\"\n    pass\n",
+        'class Exception:\n    """not actually an exception"""\n    pass\n',
     ],
 )
 def test_builtin_exception_name_without_inheritance_is_not_exempt(source: str) -> None:
@@ -21,14 +21,14 @@ def test_builtin_exception_name_without_inheritance_is_not_exempt(source: str) -
 
 
 def test_local_non_exception_class_shadows_builtin_for_later_base() -> None:
-    source = '''
+    source = """
 class ValueError:
     def marker(self) -> int:
         return 1
 
 class HiddenStub(ValueError):
     pass
-'''
+"""
 
     findings = scan_source(source, path="src/shadowing.py")
 
@@ -47,27 +47,30 @@ class HiddenStub(ValueError):
     ],
 )
 def test_prior_non_exception_binding_shadows_builtin_name(binding: str) -> None:
-    source = f'''\
+    source = f"""\
 {binding}
 
 class HiddenStub(ValueError):
     pass
-'''
+"""
 
-    assert [(finding.kind, finding.symbol) for finding in scan_source(
-        source,
-        path="src/shadowing.py",
-    )] == [("class_stub", "HiddenStub")]
+    assert [
+        (finding.kind, finding.symbol)
+        for finding in scan_source(
+            source,
+            path="src/shadowing.py",
+        )
+    ] == [("class_stub", "HiddenStub")]
 
 
 def test_direct_and_transitive_real_exception_subclasses_remain_exempt() -> None:
-    source = '''
+    source = """
 class DomainFailure(ValueError):
     pass
 
 class SpecializedFailure(DomainFailure):
     ...
-'''
+"""
 
     assert scan_source(source, path="src/exceptions.py") == ()
 
@@ -75,18 +78,18 @@ class SpecializedFailure(DomainFailure):
 @pytest.mark.parametrize(
     "source",
     [
-        '''
+        """
 import builtins
 
 class DomainFailure(builtins.ValueError):
     pass
-''',
-        '''
+""",
+        """
 import builtins as runtime
 
 class DomainFailure(runtime.ValueError):
     pass
-''',
+""",
     ],
 )
 def test_qualified_builtin_exception_base_is_recognized(source: str) -> None:
@@ -94,7 +97,7 @@ def test_qualified_builtin_exception_base_is_recognized(source: str) -> None:
 
 
 def test_nested_scope_shadowing_is_local_and_deterministic() -> None:
-    source = '''
+    source = """
 class Outer:
     class ValueError:
         def marker(self) -> int:
@@ -105,7 +108,7 @@ class Outer:
 
 class RealFailure(ValueError):
     pass
-'''
+"""
 
     findings = scan_source(source, path="src/nested.py")
 
@@ -115,7 +118,7 @@ class RealFailure(ValueError):
 
 
 def test_exception_name_rebound_after_real_subclass_blocks_future_exemption() -> None:
-    source = '''
+    source = """
 class FirstFailure(ValueError):
     pass
 
@@ -123,7 +126,7 @@ ValueError = object
 
 class HiddenStub(ValueError):
     pass
-'''
+"""
 
     findings = scan_source(source, path="src/rebound.py")
 
@@ -133,7 +136,7 @@ class HiddenStub(ValueError):
 
 
 def test_method_scope_does_not_inherit_class_exception_shadowing() -> None:
-    source = '''
+    source = """
 class Outer:
     ValueError = object
 
@@ -141,19 +144,19 @@ class Outer:
         class RealFailure(ValueError):
             pass
         return RealFailure
-'''
+"""
 
     assert scan_source(source, path="src/class_method.py") == ()
 
 
 def test_function_local_binding_shadows_builtin_before_assignment_executes() -> None:
-    source = '''
+    source = """
 def factory():
     class HiddenStub(ValueError):
         pass
     ValueError = object
     return HiddenStub
-'''
+"""
 
     findings = scan_source(source, path="src/function_local.py")
 
