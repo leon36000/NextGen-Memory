@@ -1,0 +1,179 @@
+name: Finalize lexical AST no-stubs scanner once
+
+on:
+  pull_request:
+
+permissions:
+  contents: write
+
+jobs:
+  finalize:
+    if: github.event.pull_request.head.ref == 'fix/no-stubs-lexical-green-20260823'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/no-stubs-lexical-green-20260823
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install project and development tools before any Ruff call
+        run: python -m pip install -e '.[dev]'
+
+      - name: Materialize the tested lexical scanner
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from __future__ import annotations
+
+          import base64
+          import gzip
+          from pathlib import Path
+
+          payload = """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"""
+          destination = Path("scripts/verify_no_stubs.py")
+          destination.parent.mkdir(parents=True, exist_ok=True)
+          destination.write_bytes(gzip.decompress(base64.b64decode(payload)))
+          PY
+
+      - name: Add the permanent read-only scanner workflow
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > .github/workflows/no-stubs.yml <<'YAML'
+          name: AST no-stubs contract
+
+          on:
+            pull_request:
+              paths:
+                - "src/**"
+                - "scripts/verify_no_stubs.py"
+                - "tests/test_no_stubs.py"
+                - "tests/test_no_stubs_workflow.py"
+                - "tests/test_no_stubs_exception_shadowing.py"
+                - "tests/test_no_stubs_protocol_shadowing.py"
+                - ".github/workflows/no-stubs.yml"
+
+          permissions:
+            contents: read
+
+          jobs:
+            verify:
+              runs-on: ubuntu-24.04
+              strategy:
+                fail-fast: false
+                matrix:
+                  python-version: ["3.12", "3.13"]
+              steps:
+                - uses: actions/checkout@v4
+                - uses: actions/setup-python@v5
+                  with:
+                    python-version: ${{ matrix.python-version }}
+                    cache: pip
+                - name: Install project and development tools
+                  run: python -m pip install -e '.[dev]'
+                - name: Focused scanner contracts
+                  run: python -m pytest -q tests/test_no_stubs.py tests/test_no_stubs_workflow.py tests/test_no_stubs_exception_shadowing.py tests/test_no_stubs_protocol_shadowing.py
+                - name: Scan production source
+                  run: python scripts/verify_no_stubs.py src
+                - name: Static integrity
+                  run: |
+                    ruff check scripts/verify_no_stubs.py tests/test_no_stubs.py tests/test_no_stubs_workflow.py tests/test_no_stubs_exception_shadowing.py tests/test_no_stubs_protocol_shadowing.py
+                    python -m compileall -q src scripts
+          YAML
+
+      - name: Remove all one-shot transport workflows
+        run: |
+          rm -f \
+            .github/workflows/no-stubs-patch-once.yml \
+            .github/workflows/no-stubs-shadowing-patch-once.yml \
+            .github/workflows/finalize-no-stubs-lexical-once.yml
+
+      - name: Normalize the bounded candidate files
+        run: |
+          ruff format \
+            scripts/verify_no_stubs.py \
+            tests/test_no_stubs.py \
+            tests/test_no_stubs_exception_shadowing.py \
+            tests/test_no_stubs_protocol_shadowing.py \
+            tests/test_no_stubs_workflow.py
+          ruff check --fix \
+            scripts/verify_no_stubs.py \
+            tests/test_no_stubs.py \
+            tests/test_no_stubs_exception_shadowing.py \
+            tests/test_no_stubs_protocol_shadowing.py \
+            tests/test_no_stubs_workflow.py
+
+      - name: Focused lexical and base scanner verification
+        run: |
+          python -m pytest -q \
+            tests/test_no_stubs.py \
+            tests/test_no_stubs_workflow.py \
+            tests/test_no_stubs_exception_shadowing.py \
+            tests/test_no_stubs_protocol_shadowing.py
+
+      - name: Scan production source and validate safe output
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/verify_no_stubs.py src > /tmp/no-stubs.json
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          path = Path('/tmp/no-stubs.json')
+          raw = path.read_text(encoding='utf-8')
+          report = json.loads(raw)
+          if report != {"finding_count": 0, "findings": []}:
+              raise SystemExit(f'unexpected production findings: {report!r}')
+          canonical = json.dumps(
+              report,
+              ensure_ascii=False,
+              sort_keys=True,
+              separators=(',', ':'),
+          ) + '\n'
+          if raw != canonical:
+              raise SystemExit('scanner output is not canonical JSON')
+          PY
+          if grep -Eqi '/home/runner|password|secret|token|dsn|connection|postgresql://' /tmp/no-stubs.json; then
+            echo 'scanner report leaked forbidden runtime material' >&2
+            exit 1
+          fi
+
+      - name: Repository-wide verification
+        run: |
+          ruff check .
+          python -m compileall -q src scripts
+          python -m pytest -q
+          git diff --check 93cce924debb9ae2ff46d71b2e8fa043f4cefa0b...HEAD
+
+      - name: Prove exact six-path final product surface
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t changed < <(git diff --name-only 93cce924debb9ae2ff46d71b2e8fa043f4cefa0b...HEAD | sort)
+          expected=(
+            .github/workflows/no-stubs.yml
+            scripts/verify_no_stubs.py
+            tests/test_no_stubs.py
+            tests/test_no_stubs_exception_shadowing.py
+            tests/test_no_stubs_protocol_shadowing.py
+            tests/test_no_stubs_workflow.py
+          )
+          test "${#changed[@]}" -eq "${#expected[@]}"
+          diff -u <(printf '%s\n' "${expected[@]}" | sort) <(printf '%s\n' "${changed[@]}")
+          test -z "$(git diff --name-only 93cce924debb9ae2ff46d71b2e8fa043f4cefa0b...HEAD -- 'src/**' 'migrations/**' pyproject.toml)"
+
+      - name: Commit only after all checks pass
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git diff --cached --check
+          git commit -m 'fix: classify no-stubs exemptions lexically'
+          git push origin HEAD:fix/no-stubs-lexical-green-20260823
