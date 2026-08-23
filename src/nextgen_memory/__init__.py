@@ -1,5 +1,13 @@
 """Public API for the NextGen Memory kernel."""
 
+from .bounded_inherited_reranker import (
+    BoundedInheritedReranker,
+    BoundedInheritedRerankerConfig,
+    BoundedInheritedRerankerValidationError,
+    InheritedAwareRerankedMemory,
+    InheritedEvidenceDisposition,
+    InheritedScoreBreakdown,
+)
 from .causal_credit import (
     AttributedMemoryCredit,
     CausalCreditAssigner,
@@ -162,6 +170,9 @@ __all__ = [
     "AdaptiveOrderPlannerConfig",
     "AttributedMemoryCredit",
     "BlockedPropagation",
+    "BoundedInheritedReranker",
+    "BoundedInheritedRerankerConfig",
+    "BoundedInheritedRerankerValidationError",
     "CausalCreditAssigner",
     "CausalCreditConfig",
     "CausalFeedbackConflictError",
@@ -186,7 +197,10 @@ __all__ = [
     "ExpertAllocation",
     "ExpertKey",
     "InMemoryRoutingDecisionSink",
+    "InheritedAwareRerankedMemory",
     "InheritedCreditContributionRecord",
+    "InheritedEvidenceDisposition",
+    "InheritedScoreBreakdown",
     "InheritedUtilityEvidence",
     "InteractionCreditAbstentionReason",
     "InteractionCreditConfig",
