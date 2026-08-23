@@ -1,0 +1,316 @@
+name: Verify integration v3 exact SHA
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13"]
+
+    services:
+      postgres:
+        image: pgvector/pgvector:0.8.6-pg18-bookworm
+        env:
+          POSTGRES_DB: nextgen_migration_rehearsal
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: synthetic-local-postgres-password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready --username=postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+    env:
+      PGDATABASE: nextgen_migration_rehearsal
+      PGHOST: 127.0.0.1
+      PGPASSWORD: synthetic-local-postgres-password
+      PGPORT: "5432"
+      PGUSER: postgres
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 937385e4d9235841a38fb28d079fcc0c7c3abe79
+          fetch-depth: 0
+
+      - name: Prove exact SHA, dependency ancestry and merge count
+        run: |
+          test "$(git rev-parse HEAD)" = "937385e4d9235841a38fb28d079fcc0c7c3abe79"
+          test "$(git merge-base HEAD eada91750b5d577ec452c7f8d1fb72126abb6a54)" = "eada91750b5d577ec452c7f8d1fb72126abb6a54"
+          git merge-base --is-ancestor 97a537cdba2e81385088b57bb02987fedb0aff14 HEAD
+          git merge-base --is-ancestor 2b609c98dcdd7fc0b5475205bdf5b635ebab2e7e HEAD
+          test "$(git rev-list --count --merges eada91750b5d577ec452c7f8d1fb72126abb6a54..HEAD)" -eq 2
+
+      - name: Prove exact eight-path integration scope
+        run: |
+          mapfile -t changed < <(git diff --name-only eada91750b5d577ec452c7f8d1fb72126abb6a54...HEAD | sort)
+          expected=(
+            .github/workflows/neon-migration-rehearsal.yml
+            migrations/neon/manifest.json
+            scripts/neon_migration_manifest.py
+            scripts/neon_migration_runner.py
+            tests/fixtures/neon_migration_rehearsal_prerequisites.sql
+            tests/test_neon_migration_manifest.py
+            tests/test_neon_migration_rehearsal_workflow.py
+            tests/test_neon_migration_runner.py
+          )
+          test "${#changed[@]}" -eq "${#expected[@]}"
+          diff -u <(printf '%s\n' "${expected[@]}" | sort) <(printf '%s\n' "${changed[@]}")
+          test -z "$(git diff --name-only eada91750b5d577ec452c7f8d1fb72126abb6a54...HEAD -- 'migrations/neon/*.sql')"
+          if printf '%s\n' "${changed[@]}" | grep -Eq '^src/nextgen_memory/corrective_retrieval_'; then
+            echo 'integration v3 modifies active Codex corrective retrieval' >&2
+            exit 1
+          fi
+          git diff --check eada91750b5d577ec452c7f8d1fb72126abb6a54...HEAD
+          test -z "$(git status --porcelain)"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install PostgreSQL 18 client
+        run: |
+          sudo install -d -m 0755 /usr/share/postgresql-common/pgdg
+          curl --fail --silent --show-error \
+            https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+            | sudo tee /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc >/dev/null
+          . /etc/os-release
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt ${VERSION_CODENAME}-pgdg main" \
+            | sudo tee /etc/apt/sources.list.d/pgdg.list >/dev/null
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends postgresql-client-18
+          test "$(psql --version | awk '{print $3}' | cut -d. -f1)" = "18"
+          test "$(pg_dump --version | awk '{print $3}' | cut -d. -f1)" = "18"
+
+      - name: Prove synthetic service readiness through environment only
+        run: |
+          for attempt in $(seq 1 30); do
+            if psql -X --no-psqlrc --tuples-only --no-align --quiet --command "SELECT 1" | grep -qx "1"; then
+              exit 0
+            fi
+            sleep 1
+          done
+          exit 1
+
+      - name: Install project and development tools
+        run: python -m pip install -e '.[dev]'
+
+      - name: Lint, compile and focused manifest-runner contracts
+        run: |
+          ruff check .
+          python -m compileall -q src scripts
+          python -m pytest -q tests/test_neon_migration_manifest.py \
+            tests/test_neon_migration_runner.py \
+            tests/test_neon_migration_rehearsal_workflow.py
+
+      - name: Complete exact integration suite
+        run: python -m pytest -q
+
+      - name: Validate manifest and bootstrap explicit prerequisites
+        run: |
+          python scripts/neon_migration_manifest.py > manifest-plan.json
+          python - <<'PY' > bootstrap-migrations.txt
+          from pathlib import Path
+          from scripts.neon_migration_manifest import load_manifest
+
+          manifest = load_manifest(Path.cwd())
+          expected = ("0001_memory_moe_kernel", "0002_core_idempotency")
+          actual = tuple(entry.id for entry in manifest.migrations[:2])
+          if actual != expected:
+              raise SystemExit(f"unexpected bootstrap prefix: {actual!r}")
+          for entry in manifest.migrations[:2]:
+              print(entry.path)
+          PY
+          while IFS= read -r migration_path; do
+            psql -X --no-psqlrc -v ON_ERROR_STOP=1 --quiet --file "$migration_path"
+          done < bootstrap-migrations.txt
+          psql -X --no-psqlrc -v ON_ERROR_STOP=1 --quiet \
+            --file tests/fixtures/neon_migration_rehearsal_prerequisites.sql
+          rm bootstrap-migrations.txt
+
+      - name: Run and independently validate two-pass PostgreSQL 18 rehearsal
+        run: |
+          python scripts/neon_migration_runner.py > migration-rehearsal.json
+          psql -X --no-psqlrc --tuples-only --no-align --quiet \
+            --command "SELECT tablename FROM pg_catalog.pg_tables WHERE schemaname = 'ngm' ORDER BY tablename" \
+            > live-table-list.txt
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          plan = json.loads(Path("manifest-plan.json").read_text(encoding="utf-8"))
+          report = json.loads(Path("migration-rehearsal.json").read_text(encoding="utf-8"))
+          live_tables = tuple(
+              line.strip()
+              for line in Path("live-table-list.txt").read_text(encoding="utf-8").splitlines()
+              if line.strip()
+          )
+          if report["manifest_path"] != plan["manifest_path"]:
+              raise SystemExit("manifest path mismatch")
+          if report["manifest_plan_hash"] != plan["plan_hash"]:
+              raise SystemExit("manifest plan hash mismatch")
+          if report["migration_count"] != 5 or report["pass_count"] != 2:
+              raise SystemExit("unexpected migration or pass count")
+          if report["stable"] is not True or report["pass_one"] != report["pass_two"]:
+              raise SystemExit("two-pass semantic state is unstable")
+          captured_tables = tuple(sorted(report["pass_one"]["table_counts"]))
+          if captured_tables != live_tables:
+              raise SystemExit("captured table inventory differs from live PostgreSQL")
+          required = {
+              "action_memory_usage_events",
+              "memory_nodes",
+              "memory_spaces",
+              "project_checkpoints",
+              "retrieval_events",
+              "router_decisions",
+              "schema_meta",
+              "source_principals",
+          }
+          if not required.issubset(captured_tables):
+              raise SystemExit("required migration tables are missing")
+          PY
+          rm live-table-list.txt
+
+      - name: Prove canonical privacy-safe reports
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          for name in ("manifest-plan.json", "migration-rehearsal.json"):
+              raw = Path(name).read_text(encoding="utf-8")
+              decoded = json.loads(raw)
+              canonical = json.dumps(
+                  decoded,
+                  ensure_ascii=False,
+                  allow_nan=False,
+                  sort_keys=True,
+                  separators=(",", ":"),
+              ) + "\n"
+              if raw != canonical:
+                  raise SystemExit(f"noncanonical report: {name}")
+              lowered = raw.lower()
+              for forbidden in (
+                  "create ", "alter ", "drop ", "password", "secret",
+                  "token", "dsn", "connection", "postgresql://", "postgres://",
+              ):
+                  if forbidden in lowered:
+                      raise SystemExit(f"forbidden report content: {forbidden}")
+          PY
+
+      - name: Prove zero concrete production stubs
+        run: |
+          python - <<'PY'
+          from __future__ import annotations
+          import ast
+          import io
+          import tokenize
+          from pathlib import Path
+
+          violations: list[str] = []
+          allowed = 0
+          for path in sorted(Path("src/nextgen_memory").rglob("*.py")):
+              source = path.read_text(encoding="utf-8")
+              tree = ast.parse(source, filename=str(path))
+              parents: dict[ast.AST, ast.AST] = {}
+              for parent in ast.walk(tree):
+                  for child in ast.iter_child_nodes(parent):
+                      parents[child] = parent
+              protocol_names = {
+                  alias.asname or alias.name
+                  for statement in tree.body
+                  if isinstance(statement, ast.ImportFrom) and statement.module == "typing"
+                  for alias in statement.names
+                  if alias.name == "Protocol"
+              }
+              protocol_classes = {
+                  node
+                  for node in ast.walk(tree)
+                  if isinstance(node, ast.ClassDef)
+                  and any(isinstance(base, ast.Name) and base.id in protocol_names for base in node.bases)
+              }
+              for node in ast.walk(tree):
+                  if isinstance(node, ast.Pass):
+                      violations.append(f"{path}:{node.lineno}:pass")
+                  elif isinstance(node, ast.Raise):
+                      exc = node.exc.func if isinstance(node.exc, ast.Call) else node.exc
+                      if (
+                          isinstance(exc, ast.Name) and exc.id == "NotImplementedError"
+                      ) or (
+                          isinstance(exc, ast.Attribute) and exc.attr == "NotImplementedError"
+                      ):
+                          violations.append(f"{path}:{node.lineno}:NotImplementedError")
+                  elif (
+                      isinstance(node, ast.Expr)
+                      and isinstance(node.value, ast.Constant)
+                      and node.value.value is Ellipsis
+                  ):
+                      function: ast.AST | None = parents.get(node)
+                      while function is not None and not isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                          function = parents.get(function)
+                      owner: ast.AST | None = parents.get(function) if function else None
+                      while owner is not None and not isinstance(owner, ast.ClassDef):
+                          owner = parents.get(owner)
+                      body = list(function.body) if isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)) else []
+                      if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant) and isinstance(body[0].value.value, str):
+                          body = body[1:]
+                      if owner not in protocol_classes or body != [node]:
+                          violations.append(f"{path}:{node.lineno}:ellipsis")
+                      else:
+                          allowed += 1
+              for token in tokenize.generate_tokens(io.StringIO(source).readline):
+                  if token.type == tokenize.COMMENT and (
+                      "TODO" in token.string.upper() or "FIXME" in token.string.upper()
+                  ):
+                      violations.append(f"{path}:{token.start[0]}:TODO/FIXME")
+          if violations:
+              raise SystemExit("\n".join(violations))
+          print("concrete_stub_findings=0")
+          print(f"protocol_signature_ellipses={allowed}")
+          PY
+
+      - name: Build, isolate-install and import wheel
+        run: |
+          rm -rf wheelhouse /tmp/integration-v3-wheel
+          python -m pip wheel --no-deps . -w wheelhouse
+          test "$(find wheelhouse -maxdepth 1 -name '*.whl' | wc -l)" -eq 1
+          python -m venv /tmp/integration-v3-wheel
+          /tmp/integration-v3-wheel/bin/python -m pip install --no-deps wheelhouse/*.whl
+          /tmp/integration-v3-wheel/bin/python - <<'PY'
+          import nextgen_memory
+
+          required = (
+              "ActionMemoryUsageEvent",
+              "CausalFeedbackWriter",
+              "CreditTargetReader",
+              "DeterministicMemoryRouter",
+              "IntegratedContextCompiler",
+              "MongoResearchRetriever",
+              "PrecedenceShapleyEstimator",
+              "RetrievalEventWriter",
+          )
+          missing = [name for name in required if not hasattr(nextgen_memory, name)]
+          if missing:
+              raise SystemExit(f"missing wheel exports: {missing}")
+          PY
+          sha256sum wheelhouse/*.whl
+
+      - name: Upload only canonical migration reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: integration-v3-937385e-python-${{ matrix.python-version }}
+          path: |
+            manifest-plan.json
+            migration-rehearsal.json
+          if-no-files-found: error
+          retention-days: 7
