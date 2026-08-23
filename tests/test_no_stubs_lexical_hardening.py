@@ -89,9 +89,23 @@ def unfinished() -> None:
 def unfinished(value: int) -> int:
     ...
 ''',
+        '''
+from abc import abstractmethod
+
+@abstractmethod()
+def unfinished() -> None:
+    pass
+''',
+        '''
+from typing import overload
+
+@overload()
+def unfinished(value: int) -> int:
+    ...
+''',
     ],
 )
-def test_shadowed_or_unbound_abstract_decorators_do_not_exempt_stubs(
+def test_shadowed_unbound_or_called_abstract_decorators_do_not_exempt_stubs(
     source: str,
 ) -> None:
     assert findings(source) == [("function_stub", "unfinished")]
@@ -125,6 +139,19 @@ class AbstractService:
     assert scan_source(source, path="src/class_abstract.py") == ()
 
 
+def test_direct_abstractmethod_assignment_alias_is_recognized() -> None:
+    source = '''
+from abc import abstractmethod
+abstract = abstractmethod
+
+@abstract
+def unfinished() -> None:
+    pass
+'''
+
+    assert scan_source(source, path="src/direct_abstract.py") == ()
+
+
 def test_function_local_decorator_rebinding_blocks_exemption() -> None:
     source = '''
 def factory():
@@ -139,6 +166,59 @@ def factory():
 '''
 
     assert findings(source) == [("function_stub", "factory.unfinished")]
+
+
+def test_late_function_import_is_prebound_and_cannot_use_outer_alias() -> None:
+    source = '''
+from abc import abstractmethod as abstract
+
+def factory():
+    @abstract
+    def unfinished() -> None:
+        pass
+
+    from abc import abstractmethod as abstract
+    return unfinished
+'''
+
+    assert findings(source) == [("function_stub", "factory.unfinished")]
+
+
+def test_except_alias_shadows_builtin_exception_in_handler() -> None:
+    source = '''
+try:
+    raise RuntimeError
+except RuntimeError as ValueError:
+    class HiddenStub(ValueError):
+        pass
+'''
+
+    assert findings(source) == [("class_stub", "HiddenStub")]
+
+
+def test_named_expression_binding_shadows_builtin_before_branch() -> None:
+    source = '''
+if (ValueError := object):
+    class HiddenStub(ValueError):
+        pass
+'''
+
+    assert findings(source) == [("class_stub", "HiddenStub")]
+
+
+def test_function_global_assignment_is_visible_to_later_class_base() -> None:
+    source = '''
+def factory():
+    global ValueError
+    ValueError = object
+
+    class HiddenStub(ValueError):
+        pass
+
+    return HiddenStub
+'''
+
+    assert findings(source) == [("class_stub", "factory.HiddenStub")]
 
 
 @pytest.mark.parametrize(
@@ -193,6 +273,13 @@ def unfinished() -> None:
         '''
 def unfinished() -> None:
     from builtins import NotImplementedError as MissingImplementation
+    raise MissingImplementation
+''',
+        '''
+import builtins
+MissingImplementation = builtins.NotImplementedError
+
+def unfinished() -> None:
     raise MissingImplementation
 ''',
     ],
