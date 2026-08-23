@@ -104,14 +104,23 @@ def test_rehearsal_fixture_declares_only_the_seed_prerequisites() -> None:
     assert "token" not in sql.lower()
 
 
-def test_workflow_applies_seed_prerequisites_before_the_two_pass_runner() -> None:
+def test_workflow_bootstraps_schema_then_applies_seed_prerequisites_once() -> None:
     text = _workflow_text()
     fixture = "tests/fixtures/neon_migration_rehearsal_prerequisites.sql"
 
+    assert "load_manifest(Path.cwd())" in text
+    assert "0001_memory_moe_kernel" in text
+    assert "0002_core_idempotency" in text
+    assert "bootstrap-migrations.txt" in text
+    assert 'while IFS= read -r migration_path; do' in text
+    assert '--file "$migration_path"' in text
     assert f"--file {fixture}" in text
+
+    manifest_position = text.index("load_manifest(Path.cwd())")
+    bootstrap_position = text.index('--file "$migration_path"')
     fixture_position = text.index(f"--file {fixture}")
     runner_position = text.index("python scripts/neon_migration_runner.py")
-    assert fixture_position < runner_position
+    assert manifest_position < bootstrap_position < fixture_position < runner_position
     assert text.count(f"--file {fixture}") == 1
 
 
