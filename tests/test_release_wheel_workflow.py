@@ -124,7 +124,7 @@ def test_workflow_installs_outside_checkout_and_verifies_all_public_exports() ->
 
     assert "python -m venv" in workflow
     assert "pip install --no-deps" in workflow
-    assert "python -I" in workflow
+    assert '"$venv/bin/python" -I' in workflow
     assert "mktemp -d" in workflow
     assert "nextgen_memory.__file__" in workflow
     assert "nextgen_memory.__all__" in workflow
