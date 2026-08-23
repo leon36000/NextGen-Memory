@@ -13,7 +13,13 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Protocol
 
-from scripts.neon_migration_manifest import MigrationManifest, load_manifest
+if __package__:
+    from scripts.neon_migration_manifest import (
+        MigrationManifest,
+        load_manifest,
+    )
+else:
+    from neon_migration_manifest import MigrationManifest, load_manifest
 
 SCHEMA_DUMP_RESTRICT_KEY = "NextGenMemoryMigrationRehearsalV1"
 
