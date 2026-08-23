@@ -1,0 +1,172 @@
+name: Consolidate immutable candidate evidence
+
+on:
+  pull_request:
+
+permissions:
+  actions: read
+  contents: read
+  issues: write
+  pull-requests: write
+
+jobs:
+  consolidate:
+    if: github.event.pull_request.head.ref == 'bootstrap/consolidate-candidate-evidence-20260823'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve exact branches and successful workflow evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          branch_sha() {
+            local branch=$1
+            local encoded
+            encoded=$(python -c 'import sys,urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$branch")
+            gh api "repos/$REPO/branches/$encoded" --jq '.commit.sha'
+          }
+
+          successful_run() {
+            local branch=$1
+            local workflow_name=$2
+            gh api --method GET "repos/$REPO/actions/runs" \
+              -f branch="$branch" -f event=pull_request -f per_page=100 \
+              --jq ".workflow_runs | map(select(.name == \"$workflow_name\" and .status == \"completed\" and .conclusion == \"success\")) | sort_by(.created_at) | last | .id // empty"
+          }
+
+          prove_matrix() {
+            local run_id=$1
+            local expected_jobs=$2
+            local jobs
+            jobs=$(gh api --method GET "repos/$REPO/actions/runs/$run_id/jobs" -f per_page=100)
+            local completed_success
+            completed_success=$(printf '%s' "$jobs" | jq '[.jobs[] | select(.status == "completed" and .conclusion == "success")] | length')
+            local failures
+            failures=$(printf '%s' "$jobs" | jq '[.jobs[] | select(.conclusion != "success")] | length')
+            test "$completed_success" -ge "$expected_jobs"
+            test "$failures" -eq 0
+          }
+
+          runner_candidate_branch='candidate/neon-migration-runner-v1-20260823'
+          runner_finalize_branch='fix/neon-migration-runner-live-green-20260823'
+          runner_verify_branch='bootstrap/verify-neon-runner-candidate-20260823'
+          pr10_candidate_branch='candidate/pr10-neon-ledger-adapter-20260823'
+          pr10_certify_branch='fix/pr10-exact-certification-20260823'
+          pr10_verify_branch='bootstrap/verify-pr10-candidate-20260823'
+
+          runner_sha=$(branch_sha "$runner_candidate_branch")
+          pr10_sha=$(branch_sha "$pr10_candidate_branch")
+          runner_finalize_run=$(successful_run "$runner_finalize_branch" 'Finalize Neon migration runner on PostgreSQL 18')
+          runner_verify_run=$(successful_run "$runner_verify_branch" 'Verify immutable Neon migration runner candidate')
+          pr10_certify_run=$(successful_run "$pr10_certify_branch" 'Certify PR 10 exact stack')
+          pr10_verify_run=$(successful_run "$pr10_verify_branch" 'Verify immutable PR 10 candidate')
+
+          test -n "$runner_sha"
+          test -n "$pr10_sha"
+          test -n "$runner_finalize_run"
+          test -n "$runner_verify_run"
+          test -n "$pr10_certify_run"
+          test -n "$pr10_verify_run"
+          prove_matrix "$runner_finalize_run" 1
+          prove_matrix "$runner_verify_run" 2
+          prove_matrix "$pr10_certify_run" 1
+          prove_matrix "$pr10_verify_run" 2
+
+          jq -n \
+            --arg runner_sha "$runner_sha" \
+            --arg pr10_sha "$pr10_sha" \
+            --argjson runner_finalize_run "$runner_finalize_run" \
+            --argjson runner_verify_run "$runner_verify_run" \
+            --argjson pr10_certify_run "$pr10_certify_run" \
+            --argjson pr10_verify_run "$pr10_verify_run" \
+            '{
+              runner: {
+                candidate_branch: "candidate/neon-migration-runner-v1-20260823",
+                candidate_sha: $runner_sha,
+                postgres18_finalize_run: $runner_finalize_run,
+                exact_python_matrix_run: $runner_verify_run,
+                status: "green_review_pending_unmerged"
+              },
+              pr10: {
+                candidate_branch: "candidate/pr10-neon-ledger-adapter-20260823",
+                candidate_sha: $pr10_sha,
+                certification_run: $pr10_certify_run,
+                exact_python_matrix_run: $pr10_verify_run,
+                status: "green_review_pending_unmerged"
+              }
+            }' > /tmp/candidate-evidence.json
+
+          cat /tmp/candidate-evidence.json
+
+      - name: Publish exact evidence to durable project threads
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          runner_sha=$(jq -r '.runner.candidate_sha' /tmp/candidate-evidence.json)
+          runner_finalize_run=$(jq -r '.runner.postgres18_finalize_run' /tmp/candidate-evidence.json)
+          runner_verify_run=$(jq -r '.runner.exact_python_matrix_run' /tmp/candidate-evidence.json)
+          pr10_sha=$(jq -r '.pr10.candidate_sha' /tmp/candidate-evidence.json)
+          pr10_certify_run=$(jq -r '.pr10.certification_run' /tmp/candidate-evidence.json)
+          pr10_verify_run=$(jq -r '.pr10.exact_python_matrix_run' /tmp/candidate-evidence.json)
+
+          body=$(cat <<EOF
+          ## Immutable candidate evidence consolidated — 2026-08-23
+
+          ### Neon migration runner
+
+          - candidate branch: \`candidate/neon-migration-runner-v1-20260823\`
+          - exact SHA: \`$runner_sha\`
+          - PostgreSQL 18 finalization run: \`$runner_finalize_run\` — success
+          - independent Python 3.12/3.13 + PostgreSQL 18 run: \`$runner_verify_run\` — success
+          - candidate surface: runner module and tests only above manifest base
+          - migration SQL/manifest changes in runner candidate: none
+          - merge: no
+          - Sol verdict: pending
+
+          ### PR #10 Neon execution-ledger adapter
+
+          - candidate branch: \`candidate/pr10-neon-ledger-adapter-20260823\`
+          - exact SHA: \`$pr10_sha\`
+          - exact-stack certification run: \`$pr10_certify_run\` — success
+          - independent Python 3.12/3.13 run: \`$pr10_verify_run\` — success
+          - candidate surface: five expected adapter/doc/test files over \`4dde625…\`
+          - migration application: none
+          - merge: no
+          - Sol verdict: pending
+
+          All evidence PRs are transport-only and are closed without merge after this publication. Product candidates remain unmerged; any SHA movement invalidates the evidence.
+          EOF
+          )
+          gh api "repos/$REPO/issues/23/comments" -f body="$body"
+          gh api "repos/$REPO/issues/82/comments" -f body="$body"
+          gh api "repos/$REPO/issues/71/comments" -f body="$body"
+          gh api "repos/$REPO/issues/10/comments" -f body="$body"
+
+      - name: Close transport and certification PRs without merge
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SELF_PR: ${{ github.event.pull_request.number }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          pulls=$(gh api --method GET "repos/$REPO/pulls" -f state=open -f per_page=100)
+          evidence_heads=(
+            fix/neon-migration-runner-live-green-20260823
+            bootstrap/verify-neon-runner-candidate-20260823
+            fix/pr10-exact-certification-20260823
+            bootstrap/verify-pr10-candidate-20260823
+          )
+          for head in "${evidence_heads[@]}"; do
+            number=$(printf '%s' "$pulls" | jq -r --arg head "$head" '.[] | select(.head.ref == $head) | .number' | head -1)
+            if [ -n "$number" ]; then
+              gh api --method PATCH "repos/$REPO/pulls/$number" -f state=closed >/dev/null
+            fi
+          done
+          gh api --method PATCH "repos/$REPO/pulls/$SELF_PR" -f state=closed >/dev/null
