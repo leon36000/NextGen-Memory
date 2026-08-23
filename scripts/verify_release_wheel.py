@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import argparse
 import email.policy
 import hashlib
 import json
 import re
 import stat
+import sys
 import zipfile
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from email.parser import BytesParser
@@ -301,6 +304,102 @@ def validate_source_date_epoch(value: str) -> int:
     return epoch
 
 
+def main(argv: Sequence[str] | None = None) -> int:
+    """Run the privacy-safe wheel verification command-line interface."""
+
+    parser = _build_parser()
+    args = parser.parse_args(argv)
+    try:
+        if args.command == "inspect":
+            report = inspect_wheel(
+                Path(args.wheel),
+                expected_name=args.expected_name,
+                expected_version=args.expected_version,
+                required_modules=tuple(args.required_modules),
+            )
+            sys.stdout.write(report.to_json())
+            return 0
+        if args.command == "compare":
+            report = compare_wheels(
+                Path(args.left),
+                Path(args.right),
+                expected_name=args.expected_name,
+                expected_version=args.expected_version,
+                required_modules=tuple(args.required_modules),
+                require_byte_reproducible=not args.allow_byte_difference,
+            )
+            sys.stdout.write(report.to_json())
+            return 0
+        epoch = validate_source_date_epoch(args.value)
+        sys.stdout.write(
+            _canonical_json({"source_date_epoch": epoch, "valid": True})
+        )
+        return 0
+    except WheelReproducibilityError as exc:
+        sys.stderr.write(exc.to_json())
+        return 2
+    except WheelValidationError:
+        sys.stderr.write(
+            _canonical_json(
+                {
+                    "error_class": "wheel_validation_error",
+                    "message": "wheel validation failed",
+                }
+            )
+        )
+        return 2
+    except ValueError:
+        sys.stderr.write(
+            _canonical_json(
+                {
+                    "error_class": "source_date_epoch_error",
+                    "message": "source date epoch validation failed",
+                }
+            )
+        )
+        return 2
+    except Exception:
+        sys.stderr.write(
+            _canonical_json(
+                {
+                    "error_class": "unexpected_error",
+                    "message": "wheel verification failed unexpectedly",
+                }
+            )
+        )
+        return 2
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="verify_release_wheel")
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    inspect_parser = subparsers.add_parser("inspect")
+    inspect_parser.add_argument("wheel")
+    _add_identity_arguments(inspect_parser)
+
+    compare_parser = subparsers.add_parser("compare")
+    compare_parser.add_argument("left")
+    compare_parser.add_argument("right")
+    _add_identity_arguments(compare_parser)
+    compare_parser.add_argument("--allow-byte-difference", action="store_true")
+
+    source_date_parser = subparsers.add_parser("validate-source-date-epoch")
+    source_date_parser.add_argument("value")
+    return parser
+
+
+def _add_identity_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--expected-name", required=True)
+    parser.add_argument("--expected-version", required=True)
+    parser.add_argument(
+        "--required-module",
+        dest="required_modules",
+        action="append",
+        default=[],
+    )
+
+
 def _validate_input_path(path: Path) -> None:
     if path.suffix != ".whl":
         raise WheelValidationError("wheel filename must end with .whl")
@@ -480,3 +579,7 @@ def _canonical_json(value: object) -> str:
         )
         + "\n"
     )
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
