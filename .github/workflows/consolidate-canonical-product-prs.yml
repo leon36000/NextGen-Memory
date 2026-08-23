@@ -1,0 +1,144 @@
+name: Consolidate canonical immutable product PRs
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+jobs:
+  consolidate:
+    if: github.event.pull_request.head.ref == 'bootstrap/consolidate-canonical-product-prs-20260823'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve canonical product pull requests and immutable heads
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          resolve_pr() {
+            local head=$1
+            gh api --method GET "repos/$REPO/pulls" \
+              -f state=all -f head="leon36000:$head" -f per_page=100
+          }
+
+          runner_json=$(resolve_pr candidate/neon-migration-runner-v1-20260823)
+          pr10_json=$(resolve_pr candidate/pr10-neon-ledger-adapter-20260823)
+
+          test "$(printf '%s' "$runner_json" | jq 'length')" -eq 1
+          test "$(printf '%s' "$pr10_json" | jq 'length')" -eq 1
+
+          runner_pr=$(printf '%s' "$runner_json" | jq -r '.[0].number')
+          runner_sha=$(printf '%s' "$runner_json" | jq -r '.[0].head.sha')
+          runner_state=$(printf '%s' "$runner_json" | jq -r '.[0].state')
+          runner_draft=$(printf '%s' "$runner_json" | jq -r '.[0].draft')
+          runner_base=$(printf '%s' "$runner_json" | jq -r '.[0].base.ref')
+
+          pr10_pr=$(printf '%s' "$pr10_json" | jq -r '.[0].number')
+          pr10_sha=$(printf '%s' "$pr10_json" | jq -r '.[0].head.sha')
+          pr10_state=$(printf '%s' "$pr10_json" | jq -r '.[0].state')
+          pr10_draft=$(printf '%s' "$pr10_json" | jq -r '.[0].draft')
+          pr10_base=$(printf '%s' "$pr10_json" | jq -r '.[0].base.ref')
+
+          test "$runner_state" = open
+          test "$runner_draft" = true
+          test "$runner_base" = ci/neon-migration-manifest-v1-20260822
+          test "$pr10_state" = open
+          test "$pr10_draft" = true
+          test "$pr10_base" = feat/execution-ledger-v0
+
+          runner_branch_sha=$(gh api "repos/$REPO/branches/$(python -c 'import urllib.parse; print(urllib.parse.quote("candidate/neon-migration-runner-v1-20260823", safe=""))')" --jq '.commit.sha')
+          pr10_branch_sha=$(gh api "repos/$REPO/branches/$(python -c 'import urllib.parse; print(urllib.parse.quote("candidate/pr10-neon-ledger-adapter-20260823", safe=""))')" --jq '.commit.sha')
+          test "$runner_sha" = "$runner_branch_sha"
+          test "$pr10_sha" = "$pr10_branch_sha"
+
+          original_pr10_state=$(gh api "repos/$REPO/pulls/10" --jq '.state')
+          historical_runner_state=$(gh api "repos/$REPO/pulls/82" --jq '.state')
+          test "$original_pr10_state" = closed
+          test "$historical_runner_state" = closed
+
+          jq -n \
+            --argjson runner_pr "$runner_pr" \
+            --arg runner_sha "$runner_sha" \
+            --arg runner_base "$runner_base" \
+            --argjson pr10_pr "$pr10_pr" \
+            --arg pr10_sha "$pr10_sha" \
+            --arg pr10_base "$pr10_base" \
+            '{
+              runner: {
+                pull_request: $runner_pr,
+                branch: "candidate/neon-migration-runner-v1-20260823",
+                sha: $runner_sha,
+                base: $runner_base,
+                state: "open",
+                draft: true
+              },
+              pr10: {
+                pull_request: $pr10_pr,
+                branch: "candidate/pr10-neon-ledger-adapter-20260823",
+                sha: $pr10_sha,
+                base: $pr10_base,
+                state: "open",
+                draft: true
+              },
+              superseded: {
+                original_pr10: {pull_request: 10, state: "closed"},
+                runner_development_pr: {pull_request: 82, state: "closed"}
+              }
+            }' > /tmp/canonical-prs.json
+          cat /tmp/canonical-prs.json
+
+      - name: Publish one durable canonical status
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          runner_pr=$(jq -r '.runner.pull_request' /tmp/canonical-prs.json)
+          runner_sha=$(jq -r '.runner.sha' /tmp/canonical-prs.json)
+          pr10_pr=$(jq -r '.pr10.pull_request' /tmp/canonical-prs.json)
+          pr10_sha=$(jq -r '.pr10.sha' /tmp/canonical-prs.json)
+          body=$(cat <<EOF
+          ## Canonical immutable product reviews — 2026-08-23
+
+          ### Neon migration runner
+
+          - canonical draft PR: #$runner_pr
+          - immutable branch: \`candidate/neon-migration-runner-v1-20260823\`
+          - exact head: \`$runner_sha\`
+          - base: \`ci/neon-migration-manifest-v1-20260822\`
+          - PostgreSQL 18 finalization and independent Python 3.12/3.13 + PostgreSQL 18 matrix: GREEN
+          - Sol verdict: pending
+          - merge allowed: false
+
+          ### Neon execution-ledger adapter
+
+          - canonical draft PR: #$pr10_pr
+          - immutable branch: \`candidate/pr10-neon-ledger-adapter-20260823\`
+          - exact head: \`$pr10_sha\`
+          - base: \`feat/execution-ledger-v0\`
+          - exact-stack certification and Python 3.12/3.13 matrix: GREEN
+          - fresh PostgreSQL 18 migration replay and psycopg preparation of every adapter SQL contract: GREEN
+          - full live adapter bundle transaction claim: not made
+          - Sol verdict: pending
+          - merge allowed: false
+
+          Superseded review surfaces #10 and #82 are closed without merge. These two PRs are now the only canonical product review surfaces for their candidates. Any head movement invalidates the recorded evidence.
+          EOF
+          )
+          gh api "repos/$REPO/issues/23/comments" -f body="$body"
+          gh api "repos/$REPO/issues/$runner_pr/comments" -f body="$body"
+          gh api "repos/$REPO/issues/$pr10_pr/comments" -f body="$body"
+
+      - name: Close this evidence PR without merge
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+        run: gh api --method PATCH "repos/$REPO/pulls/$PR" -f state=closed >/dev/null
