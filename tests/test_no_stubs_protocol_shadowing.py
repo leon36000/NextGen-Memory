@@ -52,3 +52,24 @@ class ChildContract(ParentContract, Protocol):
 '''
 
     assert scan_source(source, path="src/protocols.py") == ()
+
+
+def test_method_scope_does_not_inherit_class_protocol_binding() -> None:
+    source = '''
+from typing import Protocol
+
+class Outer:
+    class Contract(Protocol):
+        def run(self) -> None: ...
+
+    def factory():
+        class HiddenStub(Contract):
+            pass
+        return HiddenStub
+'''
+
+    findings = scan_source(source, path="src/class_protocol.py")
+
+    assert [(finding.kind, finding.symbol) for finding in findings] == [
+        ("class_stub", "Outer.factory.HiddenStub")
+    ]
