@@ -1,0 +1,314 @@
+name: Finalize release wheel reproducibility candidate
+
+on:
+  pull_request:
+
+permissions:
+  actions: read
+  contents: write
+  issues: write
+  pull-requests: write
+
+jobs:
+  resolve:
+    if: github.event.pull_request.head.ref == 'bootstrap/finalize-release-wheel-candidate-20260823'
+    runs-on: ubuntu-24.04
+    outputs:
+      candidate_sha: ${{ steps.pr.outputs.candidate_sha }}
+      candidate_ref: ${{ steps.pr.outputs.candidate_ref }}
+      base_sha: ${{ steps.pr.outputs.base_sha }}
+      base_ref: ${{ steps.pr.outputs.base_ref }}
+    steps:
+      - name: Resolve PR 61 immutable review boundary
+        id: pr
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          pull=$(gh api "repos/$REPO/pulls/61")
+          test "$(printf '%s' "$pull" | jq -r '.state')" = open
+          test "$(printf '%s' "$pull" | jq -r '.draft')" = true
+          test "$(printf '%s' "$pull" | jq -r '.base.ref')" = integration/rehearse-green-candidates-v2-20260822
+          candidate_sha=$(printf '%s' "$pull" | jq -r '.head.sha')
+          candidate_ref=$(printf '%s' "$pull" | jq -r '.head.ref')
+          base_sha=$(printf '%s' "$pull" | jq -r '.base.sha')
+          base_ref=$(printf '%s' "$pull" | jq -r '.base.ref')
+          for value in "$candidate_sha" "$candidate_ref" "$base_sha" "$base_ref"; do
+            test -n "$value"
+            test "$value" != null
+          done
+          echo "candidate_sha=$candidate_sha" >> "$GITHUB_OUTPUT"
+          echo "candidate_ref=$candidate_ref" >> "$GITHUB_OUTPUT"
+          echo "base_sha=$base_sha" >> "$GITHUB_OUTPUT"
+          echo "base_ref=$base_ref" >> "$GITHUB_OUTPUT"
+          printf 'candidate_sha=%s\ncandidate_ref=%s\nbase_sha=%s\nbase_ref=%s\n' \
+            "$candidate_sha" "$candidate_ref" "$base_sha" "$base_ref"
+
+  build:
+    needs: resolve
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.candidate_sha }}
+          fetch-depth: 0
+      - name: Prove exact SHA and bounded candidate surface
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${{ needs.resolve.outputs.candidate_sha }}"
+          test "$(git merge-base HEAD ${{ needs.resolve.outputs.base_sha }})" = "${{ needs.resolve.outputs.base_sha }}"
+          mapfile -t changed < <(git diff --name-only "${{ needs.resolve.outputs.base_sha }}"...HEAD | sort)
+          test "${#changed[@]}" -gt 0
+          printf '%s\n' "${changed[@]}"
+          required=(
+            pyproject.toml
+            scripts/verify_release_wheel.py
+            tests/test_release_wheel_integrity.py
+          )
+          for path in "${required[@]}"; do
+            printf '%s\n' "${changed[@]}" | grep -Fx "$path" >/dev/null
+          done
+          for path in "${changed[@]}"; do
+            case "$path" in
+              pyproject.toml|README.md|scripts/verify_release_wheel.py|tests/test_release_wheel_integrity.py|docs/*|.github/workflows/*) ;;
+              *) echo "unexpected release-wheel candidate path: $path" >&2; exit 1 ;;
+            esac
+          done
+          if printf '%s\n' "${changed[@]}" | grep -Eq '^(src/|migrations/|src/nextgen_memory/corrective_retrieval_)'; then
+            echo 'release-wheel candidate modifies runtime or migration sources' >&2
+            exit 1
+          fi
+          git diff --check "${{ needs.resolve.outputs.base_sha }}"...HEAD
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - name: Install one fixed build toolchain and project
+        env:
+          PIP_DISABLE_PIP_VERSION_CHECK: '1'
+          PYTHONHASHSEED: '0'
+          SOURCE_DATE_EPOCH: '315532800'
+          TZ: UTC
+        run: |
+          python -m pip install \
+            'pip==25.2' \
+            'setuptools==80.9.0' \
+            'wheel==0.45.1' \
+            'build==1.3.0'
+          python -m pip install -e '.[dev]'
+      - name: Repository and focused release verification
+        env:
+          LC_ALL: C.UTF-8
+          LANG: C.UTF-8
+          PYTHONHASHSEED: '0'
+          SOURCE_DATE_EPOCH: '315532800'
+          TZ: UTC
+        shell: bash
+        run: |
+          set -euo pipefail
+          ruff check .
+          python -m compileall -q src scripts
+          python -m pytest -q tests/test_release_wheel_integrity.py
+          python -m pytest -q
+          python scripts/verify_release_wheel.py > /tmp/release-wheel-verifier.json
+          python - <<'PY'
+          from __future__ import annotations
+
+          import json
+          from pathlib import Path
+
+          path = Path('/tmp/release-wheel-verifier.json')
+          report = json.loads(path.read_text(encoding='utf-8'))
+          for key in ('reproducible', 'byte_reproducible', 'semantic_reproducible'):
+              if report.get(key) is not True:
+                  raise SystemExit(f'verifier did not prove {key}')
+          status = str(report.get('status', '')).lower()
+          if status not in {'ok', 'passed', 'success'}:
+              raise SystemExit(f'unexpected verifier status: {status!r}')
+          canonical = json.dumps(report, ensure_ascii=False, sort_keys=True, separators=(',', ':')) + '\n'
+          path.write_text(canonical, encoding='utf-8')
+          print(canonical, end='')
+          PY
+          if grep -Eqi \
+            'password|secret|token|dsn|connection|string://|CREATE |ALTER |DROP |SELECT ' \
+            /tmp/release-wheel-verifier.json; then
+            echo 'release verifier report contains forbidden runtime material' >&2
+            exit 1
+          fi
+      - name: Build one wheel under fixed reproducibility environment
+        env:
+          LC_ALL: C.UTF-8
+          LANG: C.UTF-8
+          PYTHONHASHSEED: '0'
+          SOURCE_DATE_EPOCH: '315532800'
+          TZ: UTC
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf dist build *.egg-info src/*.egg-info
+          python -m build --wheel --no-isolation --outdir dist
+          test "$(find dist -maxdepth 1 -type f -name '*.whl' | wc -l)" -eq 1
+          wheel=$(find dist -maxdepth 1 -type f -name '*.whl')
+          sha=$(sha256sum "$wheel" | awk '{print $1}')
+          size=$(stat -c '%s' "$wheel")
+          filename=$(basename "$wheel")
+          python - <<'PY'
+          from __future__ import annotations
+
+          import os
+          import zipfile
+          from pathlib import Path, PurePosixPath
+
+          wheels = list(Path('dist').glob('*.whl'))
+          if len(wheels) != 1:
+              raise SystemExit('expected exactly one wheel')
+          with zipfile.ZipFile(wheels[0]) as archive:
+              names = archive.namelist()
+              if len(names) != len(set(names)):
+                  raise SystemExit('wheel contains duplicate archive entries')
+              for name in names:
+                  pure = PurePosixPath(name)
+                  if pure.is_absolute() or '..' in pure.parts or '\\' in name:
+                      raise SystemExit(f'unsafe wheel entry: {name}')
+              required_suffixes = ('.dist-info/METADATA', '.dist-info/WHEEL', '.dist-info/RECORD')
+              for suffix in required_suffixes:
+                  if sum(name.endswith(suffix) for name in names) != 1:
+                      raise SystemExit(f'wheel must contain exactly one {suffix}')
+          PY
+          jq -n \
+            --arg candidate_sha "${{ needs.resolve.outputs.candidate_sha }}" \
+            --arg python "${{ matrix.python-version }}" \
+            --arg filename "$filename" \
+            --arg sha256 "$sha" \
+            --argjson size "$size" \
+            '{candidate_sha:$candidate_sha,python:$python,filename:$filename,sha256:$sha256,size_bytes:$size}' \
+            > /tmp/wheel-build-manifest.json
+          cat /tmp/wheel-build-manifest.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-wheel-python-${{ matrix.python-version }}
+          path: |
+            dist/*.whl
+            /tmp/wheel-build-manifest.json
+            /tmp/release-wheel-verifier.json
+          if-no-files-found: error
+          retention-days: 7
+
+  compare-and-publish:
+    needs: [resolve, build]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.candidate_sha }}
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-wheel-python-*
+          path: /tmp/release-wheel-artifacts
+      - name: Prove byte-identical cross-Python artifacts and reports
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from __future__ import annotations
+
+          import hashlib
+          import json
+          from pathlib import Path
+
+          root = Path('/tmp/release-wheel-artifacts')
+          manifests = sorted(root.rglob('wheel-build-manifest.json'))
+          reports = sorted(root.rglob('release-wheel-verifier.json'))
+          wheels = sorted(root.rglob('*.whl'))
+          if len(manifests) != 2 or len(reports) != 2 or len(wheels) != 2:
+              raise SystemExit(
+                  f'expected two manifests/reports/wheels, got {len(manifests)}/{len(reports)}/{len(wheels)}'
+              )
+          parsed = [json.loads(path.read_text(encoding='utf-8')) for path in manifests]
+          if {item['python'] for item in parsed} != {'3.12', '3.13'}:
+              raise SystemExit('artifact matrix did not cover Python 3.12 and 3.13')
+          if len({item['candidate_sha'] for item in parsed}) != 1:
+              raise SystemExit('matrix did not build one exact candidate SHA')
+          if parsed[0]['candidate_sha'] != '${{ needs.resolve.outputs.candidate_sha }}':
+              raise SystemExit('artifact candidate SHA differs from resolved PR head')
+          if len({item['filename'] for item in parsed}) != 1:
+              raise SystemExit('wheel filenames differ across Python versions')
+          if len({item['size_bytes'] for item in parsed}) != 1:
+              raise SystemExit('wheel sizes differ across Python versions')
+          if len({item['sha256'] for item in parsed}) != 1:
+              raise SystemExit('wheel hashes differ across Python versions')
+          wheel_hashes = [hashlib.sha256(path.read_bytes()).hexdigest() for path in wheels]
+          if len(set(wheel_hashes)) != 1:
+              raise SystemExit('downloaded wheel bytes differ across Python versions')
+          if wheel_hashes[0] != parsed[0]['sha256']:
+              raise SystemExit('downloaded wheel hash differs from build manifest')
+          report_documents = [json.loads(path.read_text(encoding='utf-8')) for path in reports]
+          for report in report_documents:
+              for key in ('reproducible', 'byte_reproducible', 'semantic_reproducible'):
+                  if report.get(key) is not True:
+                      raise SystemExit(f'verifier report lacks {key}')
+          summary = {
+              'candidate_sha': parsed[0]['candidate_sha'],
+              'filename': parsed[0]['filename'],
+              'python_versions': sorted(item['python'] for item in parsed),
+              'sha256': wheel_hashes[0],
+              'size_bytes': parsed[0]['size_bytes'],
+              'byte_identical': True,
+              'semantic_reproducible': True,
+          }
+          Path('/tmp/release-wheel-evidence.json').write_text(
+              json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True) + '\n',
+              encoding='utf-8',
+          )
+          print(json.dumps(summary, sort_keys=True, separators=(',', ':')))
+          PY
+      - name: Recheck exact PR state and publish immutable candidate branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          pull=$(gh api "repos/$REPO/pulls/61")
+          test "$(printf '%s' "$pull" | jq -r '.state')" = open
+          test "$(printf '%s' "$pull" | jq -r '.head.sha')" = "${{ needs.resolve.outputs.candidate_sha }}"
+          test "$(git rev-parse HEAD)" = "${{ needs.resolve.outputs.candidate_sha }}"
+          candidate_branch='candidate/release-wheel-integrity-v1-20260823'
+          if git ls-remote --exit-code --heads origin "$candidate_branch"; then
+            echo 'immutable release-wheel candidate branch already exists; refusing overwrite' >&2
+            exit 1
+          fi
+          git push origin HEAD:"refs/heads/$candidate_branch"
+          sha=$(git rev-parse HEAD)
+          wheel_sha=$(jq -r '.sha256' /tmp/release-wheel-evidence.json)
+          wheel_size=$(jq -r '.size_bytes' /tmp/release-wheel-evidence.json)
+          wheel_name=$(jq -r '.filename' /tmp/release-wheel-evidence.json)
+          body=$(cat <<EOF
+          ## Byte-reproducible release-wheel candidate published
+
+          - immutable branch: \`$candidate_branch\`
+          - exact candidate SHA: \`$sha\`
+          - Python matrix: 3.12 and 3.13
+          - wheel: \`$wheel_name\`
+          - wheel SHA-256: \`$wheel_sha\`
+          - wheel size: \`$wheel_size\` bytes
+          - raw wheel bytes identical across Python versions: yes
+          - candidate verifier reports byte/semantic reproducibility: yes
+          - repository Ruff, compileall, focused and complete tests: passed
+          - runtime source or migration changes: none
+          - merge: none
+          - Sol verdict: pending
+
+          The immutable branch was published only after exact-PR-head revalidation and byte comparison. Independent raw-candidate verification remains required before final review.
+          EOF
+          )
+          gh api "repos/$REPO/issues/61/comments" -f body="$body"
+          gh api "repos/$REPO/issues/23/comments" -f body="$body"
