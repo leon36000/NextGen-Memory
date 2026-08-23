@@ -1,0 +1,321 @@
+name: Integration rehearsal v3 manifest plus runner
+
+on:
+  pull_request:
+
+permissions:
+  contents: write
+
+jobs:
+  rehearse:
+    if: github.event.pull_request.head.ref == 'bootstrap/run-integration-rehearsal-v3-20260823'
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: pgvector/pgvector:0.8.6-pg18-bookworm
+        env:
+          POSTGRES_DB: nextgen_migration_rehearsal
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: synthetic-local-postgres-password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready --username=postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+    env:
+      PGDATABASE: nextgen_migration_rehearsal
+      PGHOST: 127.0.0.1
+      PGPASSWORD: synthetic-local-postgres-password
+      PGPORT: "5432"
+      PGUSER: postgres
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: eada91750b5d577ec452c7f8d1fb72126abb6a54
+          fetch-depth: 0
+
+      - name: Configure isolated immutable rehearsal
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          test "$(git rev-parse HEAD)" = "eada91750b5d577ec452c7f8d1fb72126abb6a54"
+          if git ls-remote --exit-code --heads origin \
+            integration/rehearse-green-candidates-v3-20260823; then
+            echo 'stable rehearsal v3 branch already exists' >&2
+            exit 1
+          fi
+
+      - name: Fetch and prove exact dependency chain
+        run: |
+          git fetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*'
+          manifest_sha=97a537cdba2e81385088b57bb02987fedb0aff14
+          runner_sha=2b609c98dcdd7fc0b5475205bdf5b635ebab2e7e
+          git cat-file -e "${manifest_sha}^{commit}"
+          git cat-file -e "${runner_sha}^{commit}"
+          git merge-base --is-ancestor "$manifest_sha" "$runner_sha"
+          test "$(git merge-base eada91750b5d577ec452c7f8d1fb72126abb6a54 "$manifest_sha")" = \
+            "eada91750b5d577ec452c7f8d1fb72126abb6a54"
+
+      - name: Merge manifest then runner in explicit order
+        run: |
+          git merge --no-ff --no-edit \
+            97a537cdba2e81385088b57bb02987fedb0aff14
+          git merge --no-ff --no-edit \
+            2b609c98dcdd7fc0b5475205bdf5b635ebab2e7e
+          git merge-base --is-ancestor \
+            97a537cdba2e81385088b57bb02987fedb0aff14 HEAD
+          git merge-base --is-ancestor \
+            2b609c98dcdd7fc0b5475205bdf5b635ebab2e7e HEAD
+          test "$(git rev-list --count --merges \
+            eada91750b5d577ec452c7f8d1fb72126abb6a54..HEAD)" -eq 2
+          test -z "$(git status --porcelain)"
+
+      - name: Prove exact integrated scope
+        run: |
+          mapfile -t changed < <(git diff --name-only \
+            eada91750b5d577ec452c7f8d1fb72126abb6a54...HEAD | sort)
+          expected=(
+            .github/workflows/neon-migration-rehearsal.yml
+            migrations/neon/manifest.json
+            scripts/neon_migration_manifest.py
+            scripts/neon_migration_runner.py
+            tests/fixtures/neon_migration_rehearsal_prerequisites.sql
+            tests/test_neon_migration_manifest.py
+            tests/test_neon_migration_rehearsal_workflow.py
+            tests/test_neon_migration_runner.py
+          )
+          test "${#changed[@]}" -eq "${#expected[@]}"
+          diff -u <(printf '%s\n' "${expected[@]}" | sort) \
+            <(printf '%s\n' "${changed[@]}")
+          if printf '%s\n' "${changed[@]}" | grep -Eq \
+            '^src/nextgen_memory/corrective_retrieval_'; then
+            echo 'integration v3 modifies active Codex corrective retrieval' >&2
+            exit 1
+          fi
+          git diff --check \
+            eada91750b5d577ec452c7f8d1fb72126abb6a54...HEAD
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install PostgreSQL 18 client
+        run: |
+          sudo install -d -m 0755 /usr/share/postgresql-common/pgdg
+          curl --fail --silent --show-error \
+            https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+            | sudo tee /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc >/dev/null
+          . /etc/os-release
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt ${VERSION_CODENAME}-pgdg main" \
+            | sudo tee /etc/apt/sources.list.d/pgdg.list >/dev/null
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends postgresql-client-18
+          test "$(psql --version | awk '{print $3}' | cut -d. -f1)" = "18"
+          test "$(pg_dump --version | awk '{print $3}' | cut -d. -f1)" = "18"
+
+      - name: Install, lint and compile integrated candidate
+        run: |
+          python -m pip install -e '.[dev]'
+          ruff check .
+          python -m compileall -q src scripts
+
+      - name: Focused manifest and runner contracts
+        run: |
+          python -m pytest -q tests/test_neon_migration_manifest.py \
+            tests/test_neon_migration_runner.py \
+            tests/test_neon_migration_rehearsal_workflow.py
+
+      - name: Complete integrated suite
+        run: python -m pytest -q
+
+      - name: Run manifest-derived PostgreSQL 18 two-pass rehearsal
+        run: |
+          python scripts/neon_migration_manifest.py > manifest-plan.json
+          python - <<'PY' > bootstrap-migrations.txt
+          from pathlib import Path
+
+          from scripts.neon_migration_manifest import load_manifest
+
+          manifest = load_manifest(Path.cwd())
+          expected = (
+              '0001_memory_moe_kernel',
+              '0002_core_idempotency',
+          )
+          actual = tuple(entry.id for entry in manifest.migrations[:2])
+          if actual != expected:
+              raise SystemExit(f'unexpected bootstrap prefix: {actual!r}')
+          for entry in manifest.migrations[:2]:
+              print(entry.path)
+          PY
+          while IFS= read -r migration_path; do
+            psql -X --no-psqlrc -v ON_ERROR_STOP=1 --quiet \
+              --file "$migration_path"
+          done < bootstrap-migrations.txt
+          psql -X --no-psqlrc -v ON_ERROR_STOP=1 --quiet \
+            --file tests/fixtures/neon_migration_rehearsal_prerequisites.sql
+          rm bootstrap-migrations.txt
+          python scripts/neon_migration_runner.py > migration-rehearsal.json
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          plan = json.loads(Path('manifest-plan.json').read_text(encoding='utf-8'))
+          report = json.loads(
+              Path('migration-rehearsal.json').read_text(encoding='utf-8')
+          )
+          if report['manifest_plan_hash'] != plan['plan_hash']:
+              raise SystemExit('manifest/runner plan identity mismatch')
+          if report['migration_count'] != 5 or report['pass_count'] != 2:
+              raise SystemExit('unexpected migration/pass count')
+          if report['stable'] is not True or report['pass_one'] != report['pass_two']:
+              raise SystemExit('migration rehearsal is not semantically stable')
+          PY
+
+      - name: Prove reports are canonical and privacy-safe
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          for name in ('manifest-plan.json', 'migration-rehearsal.json'):
+              raw = Path(name).read_text(encoding='utf-8')
+              decoded = json.loads(raw)
+              expected = json.dumps(
+                  decoded,
+                  ensure_ascii=False,
+                  allow_nan=False,
+                  sort_keys=True,
+                  separators=(',', ':'),
+              ) + '\n'
+              if raw != expected:
+                  raise SystemExit(f'noncanonical report: {name}')
+              lowered = raw.lower()
+              for forbidden in (
+                  'create ', 'alter ', 'drop ', 'password', 'secret',
+                  'token', 'dsn', 'connection', 'postgresql://', 'postgres://',
+              ):
+                  if forbidden in lowered:
+                      raise SystemExit(f'forbidden report content: {forbidden}')
+          PY
+
+      - name: Prove no concrete production stubs
+        run: |
+          python - <<'PY'
+          from __future__ import annotations
+
+          import ast
+          import io
+          import tokenize
+          from pathlib import Path
+
+          violations: list[str] = []
+          allowed_protocol_ellipses = 0
+          for path in sorted(Path('src/nextgen_memory').rglob('*.py')):
+              source = path.read_text(encoding='utf-8')
+              tree = ast.parse(source, filename=str(path))
+              parents: dict[ast.AST, ast.AST] = {}
+              for parent in ast.walk(tree):
+                  for child in ast.iter_child_nodes(parent):
+                      parents[child] = parent
+              protocol_imports: set[str] = set()
+              for statement in tree.body:
+                  if isinstance(statement, ast.ImportFrom) and statement.module == 'typing':
+                      for alias in statement.names:
+                          if alias.name == 'Protocol':
+                              protocol_imports.add(alias.asname or alias.name)
+              protocol_classes = {
+                  node
+                  for node in ast.walk(tree)
+                  if isinstance(node, ast.ClassDef)
+                  and any(
+                      isinstance(base, ast.Name) and base.id in protocol_imports
+                      for base in node.bases
+                  )
+              }
+              for node in ast.walk(tree):
+                  if isinstance(node, ast.Pass):
+                      violations.append(f'{path}:{node.lineno}:pass')
+                  elif isinstance(node, ast.Raise):
+                      exc = node.exc.func if isinstance(node.exc, ast.Call) else node.exc
+                      if (
+                          isinstance(exc, ast.Name)
+                          and exc.id == 'NotImplementedError'
+                      ) or (
+                          isinstance(exc, ast.Attribute)
+                          and exc.attr == 'NotImplementedError'
+                      ):
+                          violations.append(f'{path}:{node.lineno}:NotImplementedError')
+                  elif (
+                      isinstance(node, ast.Expr)
+                      and isinstance(node.value, ast.Constant)
+                      and node.value.value is Ellipsis
+                  ):
+                      function: ast.AST | None = parents.get(node)
+                      while function is not None and not isinstance(
+                          function, (ast.FunctionDef, ast.AsyncFunctionDef)
+                      ):
+                          function = parents.get(function)
+                      owner: ast.AST | None = parents.get(function) if function else None
+                      while owner is not None and not isinstance(owner, ast.ClassDef):
+                          owner = parents.get(owner)
+                      body = list(function.body) if isinstance(
+                          function, (ast.FunctionDef, ast.AsyncFunctionDef)
+                      ) else []
+                      if (
+                          body
+                          and isinstance(body[0], ast.Expr)
+                          and isinstance(body[0].value, ast.Constant)
+                          and isinstance(body[0].value.value, str)
+                      ):
+                          body = body[1:]
+                      if owner not in protocol_classes or body != [node]:
+                          violations.append(f'{path}:{node.lineno}:ellipsis')
+                      else:
+                          allowed_protocol_ellipses += 1
+              for token in tokenize.generate_tokens(io.StringIO(source).readline):
+                  if token.type == tokenize.COMMENT and (
+                      'TODO' in token.string.upper() or 'FIXME' in token.string.upper()
+                  ):
+                      violations.append(f'{path}:{token.start[0]}:TODO/FIXME')
+          if violations:
+              raise SystemExit('\n'.join(violations))
+          print(f'concrete_stub_findings=0')
+          print(f'protocol_signature_ellipses={allowed_protocol_ellipses}')
+          PY
+
+      - name: Build and reinstall wheel in isolation
+        run: |
+          rm -rf wheelhouse /tmp/integration-v3-wheel
+          python -m pip wheel --no-deps . -w wheelhouse
+          python -m venv /tmp/integration-v3-wheel
+          /tmp/integration-v3-wheel/bin/python -m pip install --no-deps wheelhouse/*.whl
+          /tmp/integration-v3-wheel/bin/python - <<'PY'
+          import nextgen_memory
+
+          required = (
+              'ActionMemoryUsageEvent',
+              'CausalFeedbackWriter',
+              'CreditTargetReader',
+              'DeterministicMemoryRouter',
+              'IntegratedContextCompiler',
+              'MongoResearchRetriever',
+              'PrecedenceShapleyEstimator',
+              'RetrievalEventWriter',
+          )
+          missing = [name for name in required if not hasattr(nextgen_memory, name)]
+          if missing:
+              raise SystemExit(f'missing wheel exports: {missing}')
+          PY
+          sha256sum wheelhouse/*.whl
+
+      - name: Publish stable integration v3 only after all proof
+        run: |
+          final_sha="$(git rev-parse HEAD)"
+          git push origin HEAD:refs/heads/integration/rehearse-green-candidates-v3-20260823
+          echo "published_integration_v3_sha=${final_sha}"
