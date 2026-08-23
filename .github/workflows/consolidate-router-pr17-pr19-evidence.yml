@@ -1,0 +1,185 @@
+name: Consolidate router and stacked PR evidence
+
+on:
+  pull_request:
+
+permissions:
+  actions: read
+  contents: read
+  issues: write
+  pull-requests: write
+
+jobs:
+  consolidate:
+    if: github.event.pull_request.head.ref == 'bootstrap/consolidate-router-pr17-pr19-evidence-20260823'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve exact branches and latest verifier runs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          encode() {
+            python -c 'import sys,urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$1"
+          }
+
+          branch_sha() {
+            gh api "repos/$REPO/branches/$(encode "$1")" --jq '.commit.sha'
+          }
+
+          latest_named_run() {
+            local branch=$1
+            local name=$2
+            gh api --method GET "repos/$REPO/actions/runs" \
+              -f branch="$branch" -f event=pull_request -f per_page=100 \
+              --jq ".workflow_runs | map(select(.name == \"$name\")) | sort_by(.created_at) | last // empty"
+          }
+
+          router_branch='fix/router-decision-identity-v1-20260822'
+          router_verify_branch='bootstrap/verify-router-v1-current-head-20260822'
+          stacked_verify_branch='bootstrap/verify-pr17-pr19-exact-heads-20260822'
+
+          router_sha=$(branch_sha "$router_branch")
+          router_run=$(latest_named_run "$router_verify_branch" 'Verify router identity v1 exact head')
+          stacked_run=$(latest_named_run "$stacked_verify_branch" 'Verify PR 17 and PR 19 exact heads')
+
+          test -n "$router_sha"
+          test -n "$router_run"
+          test -n "$stacked_run"
+
+          router_run_id=$(printf '%s' "$router_run" | jq -r '.id')
+          router_status=$(printf '%s' "$router_run" | jq -r '.status')
+          router_conclusion=$(printf '%s' "$router_run" | jq -r '.conclusion // "pending"')
+          stacked_run_id=$(printf '%s' "$stacked_run" | jq -r '.id')
+          stacked_status=$(printf '%s' "$stacked_run" | jq -r '.status')
+          stacked_conclusion=$(printf '%s' "$stacked_run" | jq -r '.conclusion // "pending"')
+
+          router_jobs=$(gh api --method GET "repos/$REPO/actions/runs/$router_run_id/jobs" -f per_page=100)
+          stacked_jobs=$(gh api --method GET "repos/$REPO/actions/runs/$stacked_run_id/jobs" -f per_page=100)
+
+          printf '%s' "$router_jobs" | jq '[.jobs[] | {name, status, conclusion, head_sha}]' > /tmp/router-jobs.json
+          printf '%s' "$stacked_jobs" | jq '[.jobs[] | {name, status, conclusion, head_sha}]' > /tmp/stacked-jobs.json
+
+          router_success=$(jq '[.[] | select(.status == "completed" and .conclusion == "success")] | length' /tmp/router-jobs.json)
+          router_failures=$(jq '[.[] | select(.conclusion != "success")] | length' /tmp/router-jobs.json)
+          stacked_success=$(jq '[.[] | select(.status == "completed" and .conclusion == "success")] | length' /tmp/stacked-jobs.json)
+          stacked_failures=$(jq '[.[] | select(.conclusion != "success")] | length' /tmp/stacked-jobs.json)
+
+          jq -n \
+            --arg router_sha "$router_sha" \
+            --argjson router_run_id "$router_run_id" \
+            --arg router_status "$router_status" \
+            --arg router_conclusion "$router_conclusion" \
+            --argjson router_success "$router_success" \
+            --argjson router_failures "$router_failures" \
+            --argjson router_jobs "$(cat /tmp/router-jobs.json)" \
+            --arg pr17_sha '67e7c0bc05165c1676541bd3ce7e648e3df54dc7' \
+            --arg pr19_sha 'bdc7c43b3ed85821b025e2e9b25d35199ddd30fd' \
+            --argjson stacked_run_id "$stacked_run_id" \
+            --arg stacked_status "$stacked_status" \
+            --arg stacked_conclusion "$stacked_conclusion" \
+            --argjson stacked_success "$stacked_success" \
+            --argjson stacked_failures "$stacked_failures" \
+            --argjson stacked_jobs "$(cat /tmp/stacked-jobs.json)" \
+            '{
+              router: {
+                branch: "fix/router-decision-identity-v1-20260822",
+                sha: $router_sha,
+                verifier_run: $router_run_id,
+                run_status: $router_status,
+                run_conclusion: $router_conclusion,
+                successful_jobs: $router_success,
+                non_success_jobs: $router_failures,
+                jobs: $router_jobs
+              },
+              stacked: {
+                pr17_sha: $pr17_sha,
+                pr19_sha: $pr19_sha,
+                verifier_run: $stacked_run_id,
+                run_status: $stacked_status,
+                run_conclusion: $stacked_conclusion,
+                successful_jobs: $stacked_success,
+                non_success_jobs: $stacked_failures,
+                jobs: $stacked_jobs
+              }
+            }' > /tmp/evidence.json
+          cat /tmp/evidence.json
+
+      - name: Publish exact evidence without upgrading failures
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          router_sha=$(jq -r '.router.sha' /tmp/evidence.json)
+          router_run=$(jq -r '.router.verifier_run' /tmp/evidence.json)
+          router_status=$(jq -r '.router.run_status' /tmp/evidence.json)
+          router_conclusion=$(jq -r '.router.run_conclusion' /tmp/evidence.json)
+          router_failures=$(jq -r '.router.non_success_jobs' /tmp/evidence.json)
+          stacked_run=$(jq -r '.stacked.verifier_run' /tmp/evidence.json)
+          stacked_status=$(jq -r '.stacked.run_status' /tmp/evidence.json)
+          stacked_conclusion=$(jq -r '.stacked.run_conclusion' /tmp/evidence.json)
+          stacked_failures=$(jq -r '.stacked.non_success_jobs' /tmp/evidence.json)
+
+          router_verdict=blocked
+          if [ "$router_status" = completed ] && [ "$router_conclusion" = success ] && [ "$router_failures" -eq 0 ]; then
+            router_verdict=green_review_pending_unmerged
+          fi
+          stacked_verdict=blocked
+          if [ "$stacked_status" = completed ] && [ "$stacked_conclusion" = success ] && [ "$stacked_failures" -eq 0 ]; then
+            stacked_verdict=green_scope_audited_unmerged
+          fi
+
+          router_jobs=$(jq -r '.router.jobs[] | "- `" + .name + "`: status=`" + .status + "`, conclusion=`" + (.conclusion // "pending") + "`"' /tmp/evidence.json)
+          stacked_jobs=$(jq -r '.stacked.jobs[] | "- `" + .name + "`: status=`" + .status + "`, conclusion=`" + (.conclusion // "pending") + "`"' /tmp/evidence.json)
+
+          body=$(cat <<EOF
+          ## Router and stacked PR exact evidence — 2026-08-23
+
+          ### Router decision identity v1
+
+          - exact branch head: \`$router_sha\`
+          - verifier run: \`$router_run\`
+          - run: status=\`$router_status\`, conclusion=\`$router_conclusion\`
+          - qualified state: \`$router_verdict\`
+          $router_jobs
+
+          ### PR #17 / PR #19 immutable-head audit
+
+          - PR #17 head: \`67e7c0bc05165c1676541bd3ce7e648e3df54dc7\`
+          - PR #19 head: \`bdc7c43b3ed85821b025e2e9b25d35199ddd30fd\`
+          - verifier run: \`$stacked_run\`
+          - run: status=\`$stacked_status\`, conclusion=\`$stacked_conclusion\`
+          - qualified state: \`$stacked_verdict\`
+          $stacked_jobs
+
+          A non-success job remains blocking and is not relabelled GREEN. Successful verification does not authorize merge; exact-SHA blind Sol review and correct stack order remain mandatory.
+          EOF
+          )
+          gh api "repos/$REPO/issues/23/comments" -f body="$body"
+          gh api "repos/$REPO/issues/32/comments" -f body="$body"
+          gh api "repos/$REPO/issues/17/comments" -f body="$body"
+          gh api "repos/$REPO/issues/19/comments" -f body="$body"
+
+      - name: Close completed verifier PRs and this evidence PR without merge
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SELF_PR: ${{ github.event.pull_request.number }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          pulls=$(gh api --method GET "repos/$REPO/pulls" -f state=open -f per_page=100)
+          for head in \
+            bootstrap/verify-router-v1-current-head-20260822 \
+            bootstrap/verify-pr17-pr19-exact-heads-20260822; do
+            number=$(printf '%s' "$pulls" | jq -r --arg head "$head" '.[] | select(.head.ref == $head) | .number' | head -1)
+            if [ -n "$number" ]; then
+              gh api --method PATCH "repos/$REPO/pulls/$number" -f state=closed >/dev/null
+            fi
+          done
+          gh api --method PATCH "repos/$REPO/pulls/$SELF_PR" -f state=closed >/dev/null
