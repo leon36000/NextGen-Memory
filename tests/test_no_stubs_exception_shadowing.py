@@ -130,3 +130,33 @@ class HiddenStub(ValueError):
     assert [(finding.kind, finding.symbol) for finding in findings] == [
         ("class_stub", "HiddenStub")
     ]
+
+
+def test_method_scope_does_not_inherit_class_exception_shadowing() -> None:
+    source = '''
+class Outer:
+    ValueError = object
+
+    def factory():
+        class RealFailure(ValueError):
+            pass
+        return RealFailure
+'''
+
+    assert scan_source(source, path="src/class_method.py") == ()
+
+
+def test_function_local_binding_shadows_builtin_before_assignment_executes() -> None:
+    source = '''
+def factory():
+    class HiddenStub(ValueError):
+        pass
+    ValueError = object
+    return HiddenStub
+'''
+
+    findings = scan_source(source, path="src/function_local.py")
+
+    assert [(finding.kind, finding.symbol) for finding in findings] == [
+        ("class_stub", "factory.HiddenStub")
+    ]
