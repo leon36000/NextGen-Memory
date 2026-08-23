@@ -1,0 +1,349 @@
+name: Verify corrected learning evidence reader exact SHA
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13"]
+
+    services:
+      postgres:
+        image: pgvector/pgvector:0.8.6-pg18-bookworm
+        env:
+          POSTGRES_DB: learning_evidence_exact
+          POSTGRES_PASSWORD: synthetic-learning-evidence-password
+          POSTGRES_USER: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d learning_evidence_exact"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+    env:
+      PGDATABASE: learning_evidence_exact
+      PGHOST: 127.0.0.1
+      PGPASSWORD: synthetic-learning-evidence-password
+      PGPORT: "5432"
+      PGUSER: postgres
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: f0546ef4980239c4993baac8780c12975e91377c
+          fetch-depth: 0
+
+      - name: Prove exact checkout, ancestry and ten-path surface
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "f0546ef4980239c4993baac8780c12975e91377c"
+          test "$(git merge-base HEAD 167d5c60d485eaacc2fbf165797f7fae187be2eb)" = "167d5c60d485eaacc2fbf165797f7fae187be2eb"
+          mapfile -t changed < <(git diff --name-only 167d5c60d485eaacc2fbf165797f7fae187be2eb...HEAD | sort)
+          expected=(
+            docs/learning-evidence-reader-v0-red.md
+            docs/learning-evidence-reader-v0-verification.md
+            docs/superpowers/plans/2026-08-14-learning-evidence-reader-v0.md
+            docs/superpowers/specs/2026-08-14-learning-evidence-reader-v0-design.md
+            src/nextgen_memory/__init__.py
+            src/nextgen_memory/learning_evidence.py
+            tests/test_learning_evidence.py
+            tests/test_learning_evidence_properties.py
+            tests/test_learning_evidence_public_api.py
+            tests/test_learning_evidence_sql.py
+          )
+          test "${#changed[@]}" -eq "${#expected[@]}"
+          diff -u <(printf '%s\n' "${expected[@]}" | sort) <(printf '%s\n' "${changed[@]}")
+          test -z "$(git diff --name-only 167d5c60d485eaacc2fbf165797f7fae187be2eb...HEAD -- 'migrations/**' '.github/workflows/**' pyproject.toml)"
+          if printf '%s\n' "${changed[@]}" | grep -Eq '^src/nextgen_memory/corrective_retrieval_'; then
+            echo "candidate changes active corrective-retrieval source" >&2
+            exit 1
+          fi
+          git diff --check 167d5c60d485eaacc2fbf165797f7fae187be2eb...HEAD
+          test -z "$(git status --porcelain)"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install PostgreSQL 18 client
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo install -d /usr/share/postgresql-common/pgdg
+          sudo curl --fail --silent --show-error \
+            -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
+            https://www.postgresql.org/media/keys/ACCC4CF8.asc
+          . /etc/os-release
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt ${VERSION_CODENAME}-pgdg main" \
+            | sudo tee /etc/apt/sources.list.d/pgdg.list >/dev/null
+          sudo apt-get update -q
+          sudo apt-get install -y --no-install-recommends postgresql-client-18
+          sudo ln -sf /usr/lib/postgresql/18/bin/psql /usr/bin/psql
+          sudo ln -sf /usr/lib/postgresql/18/bin/pg_dump /usr/bin/pg_dump
+          psql --version | grep -E '^psql \(PostgreSQL\) 18\.'
+          pg_dump --version | grep -E '^pg_dump \(PostgreSQL\) 18\.'
+
+      - name: Install project and development tools
+        run: python -m pip install -e '.[dev]'
+
+      - name: Static, focused and complete verification
+        shell: bash
+        run: |
+          set -euo pipefail
+          ruff check .
+          python -m compileall -q src scripts
+          python -m pytest -q \
+            tests/test_learning_evidence.py \
+            tests/test_learning_evidence_properties.py \
+            tests/test_learning_evidence_public_api.py \
+            tests/test_learning_evidence_sql.py \
+            | tee /tmp/focused-tests.txt
+          python -m pytest -q | tee /tmp/full-tests.txt
+          git diff --check 167d5c60d485eaacc2fbf165797f7fae187be2eb...HEAD
+
+      - name: Audit reader, SQL and privacy boundaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from __future__ import annotations
+
+          import ast
+          from pathlib import Path
+
+          path = Path("src/nextgen_memory/learning_evidence.py")
+          source = path.read_text(encoding="utf-8")
+          tree = ast.parse(source, filename=str(path))
+          forbidden_import_roots = {
+              "asyncio", "httpx", "os", "psycopg", "pymongo",
+              "random", "requests", "socket", "sqlalchemy", "subprocess",
+              "temporalio", "time", "urllib",
+          }
+          forbidden_calls = {
+              "eval", "exec", "open", "sleep", "system", "urlopen",
+              "uuid1", "uuid4", "write_bytes", "write_text",
+          }
+          violations: list[str] = []
+          for node in ast.walk(tree):
+              if isinstance(node, ast.Pass):
+                  violations.append(f"{node.lineno}:pass")
+              elif isinstance(node, ast.Raise):
+                  exc = node.exc.func if isinstance(node.exc, ast.Call) else node.exc
+                  if (
+                      isinstance(exc, ast.Name) and exc.id == "NotImplementedError"
+                  ) or (
+                      isinstance(exc, ast.Attribute) and exc.attr == "NotImplementedError"
+                  ):
+                      violations.append(f"{node.lineno}:NotImplementedError")
+              elif isinstance(node, ast.Import):
+                  for alias in node.names:
+                      if alias.name.split(".", 1)[0] in forbidden_import_roots:
+                          violations.append(f"{node.lineno}:import:{alias.name}")
+              elif isinstance(node, ast.ImportFrom):
+                  if (node.module or "").split(".", 1)[0] in forbidden_import_roots:
+                      violations.append(f"{node.lineno}:import:{node.module}")
+              elif isinstance(node, ast.Call):
+                  name = node.func.id if isinstance(node.func, ast.Name) else node.func.attr if isinstance(node.func, ast.Attribute) else None
+                  if name in forbidden_calls:
+                      violations.append(f"{node.lineno}:call:{name}")
+          lowered = source.lower()
+          for marker in (
+              "postgresql://", "mongodb://", "http://", "https://",
+              "password", "credential", "# todo", "# fixme",
+              "raw_query", "raw_prompt", "response_text",
+          ):
+              if marker in lowered:
+                  violations.append(f"text:{marker}")
+          if violations:
+              raise SystemExit("\n".join(violations))
+          print("learning_evidence_side_effect_or_privacy_findings=0")
+          PY
+          python - <<'PY'
+          from nextgen_memory.learning_evidence import LEARNING_EVIDENCE_SELECT_SQL
+
+          sql = LEARNING_EVIDENCE_SELECT_SQL.strip().upper()
+          if not sql.startswith("SELECT"):
+              raise SystemExit("learning-evidence SQL is not SELECT-only")
+          for keyword in ("INSERT ", "UPDATE ", "DELETE ", "ALTER ", "DROP "):
+              if keyword in sql:
+                  raise SystemExit(f"learning-evidence SQL contains {keyword.strip()}")
+          PY
+
+      - name: Bootstrap canonical research-seed prerequisites
+        shell: bash
+        run: |
+          set -euo pipefail
+          psql -X --no-psqlrc -v ON_ERROR_STOP=1 --quiet --file migrations/neon/0001_memory_moe_kernel.sql
+          psql -X --no-psqlrc -v ON_ERROR_STOP=1 --quiet --file migrations/neon/0002_core_idempotency.sql
+          cat > /tmp/research-seed-prerequisites.sql <<'SQL'
+          INSERT INTO ngm.memory_spaces (
+            id, parent_id, kind, external_key, name, metadata
+          ) VALUES (
+            '279c0edc-e75d-5c7e-a857-2f461b4ba61e'::uuid,
+            NULL,
+            'project',
+            'synthetic:nextgen-memory-migration-rehearsal',
+            'Synthetic NextGen Memory Migration Rehearsal',
+            jsonb_build_object('purpose','migration_rehearsal','synthetic',true)
+          ) ON CONFLICT DO NOTHING;
+
+          INSERT INTO ngm.source_principals (
+            id, space_id, source_key, source_type, authority_class,
+            authority_score, origin_uri, metadata
+          ) VALUES (
+            '049b6cff-c7a6-5116-a38f-5a7527ca3a21'::uuid,
+            '279c0edc-e75d-5c7e-a857-2f461b4ba61e'::uuid,
+            'synthetic:research-sources-seed',
+            'research_corpus',
+            'contextual',
+            0.650,
+            NULL,
+            jsonb_build_object('purpose','migration_rehearsal','synthetic',true)
+          ) ON CONFLICT DO NOTHING;
+          SQL
+          psql -X --no-psqlrc -v ON_ERROR_STOP=1 --quiet --file /tmp/research-seed-prerequisites.sql
+
+      - name: Replay inherited-credit stack twice with deterministic schema snapshots
+        shell: bash
+        run: |
+          set -euo pipefail
+          migrations=(
+            migrations/neon/0001_memory_moe_kernel.sql
+            migrations/neon/0002_core_idempotency.sql
+            migrations/neon/0003_research_sources_seed.sql
+            migrations/neon/0005_causal_credit_feedback.sql
+            migrations/neon/0006_inherited_credit_ledger.sql
+          )
+          for pass in 1 2; do
+            for migration in "${migrations[@]}"; do
+              psql -X --no-psqlrc -v ON_ERROR_STOP=1 --quiet --file "$migration"
+            done
+            pg_dump --schema-only --no-owner --no-privileges --schema=ngm \
+              --format=plain --restrict-key=NextGenMemoryLearningEvidenceExact \
+              > "/tmp/schema-$pass.sql"
+            sha256sum "/tmp/schema-$pass.sql" | awk '{print $1}' > "/tmp/schema-$pass.sha256"
+            psql -X --no-psqlrc -Atq -v ON_ERROR_STOP=1 \
+              --command "SELECT jsonb_agg(jsonb_build_object('schema_key',schema_key,'schema_version',schema_version,'metadata',metadata) ORDER BY schema_key)::text FROM ngm.schema_meta" \
+              | sha256sum | awk '{print $1}' > "/tmp/schema-meta-$pass.sha256"
+            psql -X --no-psqlrc -Atq -v ON_ERROR_STOP=1 \
+              --command "SELECT tablename FROM pg_catalog.pg_tables WHERE schemaname='ngm' ORDER BY tablename" \
+              > "/tmp/tables-$pass.txt"
+            : > "/tmp/table-counts-$pass.txt"
+            while IFS= read -r table_name; do
+              count=$(psql -X --no-psqlrc -Atq -v ON_ERROR_STOP=1 \
+                --command "SELECT count(*) FROM ngm.\"$table_name\"")
+              printf '%s=%s\n' "$table_name" "$count" >> "/tmp/table-counts-$pass.txt"
+            done < "/tmp/tables-$pass.txt"
+          done
+          cmp /tmp/schema-1.sha256 /tmp/schema-2.sha256
+          cmp /tmp/schema-meta-1.sha256 /tmp/schema-meta-2.sha256
+          cmp /tmp/tables-1.txt /tmp/tables-2.txt
+          cmp /tmp/table-counts-1.txt /tmp/table-counts-2.txt
+
+      - name: Prove inherited-credit schema and exact learning-evidence view
+        shell: bash
+        run: |
+          set -euo pipefail
+          for relation in \
+            ngm.provenance_credit_evaluations \
+            ngm.inherited_credit_contributions \
+            ngm.provenance_credit_observations \
+            ngm.provenance_credit_accounting \
+            ngm.node_inherited_credit \
+            ngm.node_learning_evidence; do
+            test "$(psql -X --no-psqlrc -Atq -v ON_ERROR_STOP=1 --command "SELECT to_regclass('$relation')")" = "$relation"
+          done
+          expected_columns='space_id,node_id,direct_feedback_count,direct_avg_reward,direct_positive_count,direct_negative_count,last_direct_feedback_at,inherited_contribution_count,inherited_value_sum,inherited_absolute_value_sum,inherited_standard_error_sum,minimum_structural_confidence,last_inherited_credit_at'
+          actual_columns=$(psql -X --no-psqlrc -Atq -v ON_ERROR_STOP=1 \
+            --command "SELECT string_agg(column_name, ',' ORDER BY ordinal_position) FROM information_schema.columns WHERE table_schema='ngm' AND table_name='node_learning_evidence'")
+          test "$actual_columns" = "$expected_columns"
+          test "$(psql -X --no-psqlrc -Atq -v ON_ERROR_STOP=1 --command "SELECT count(*) FROM ngm.memory_feedback")" -eq 0
+          psql -X --no-psqlrc -Atq -v ON_ERROR_STOP=1 \
+            --command "SELECT count(*) FROM ngm.node_learning_evidence" \
+            > /tmp/learning-evidence-row-count.txt
+          if grep -RIEi 'synthetic-learning-evidence-password|password|secret|token|dsn|connection|postgresql://' \
+            /tmp/schema-*.sha256 /tmp/schema-meta-*.sha256 /tmp/table-counts-*.txt /tmp/learning-evidence-row-count.txt; then
+            echo "safe migration evidence leaked connection material" >&2
+            exit 1
+          fi
+
+      - name: Build and install exact wheel outside checkout
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf wheelhouse "$RUNNER_TEMP/learning-evidence-wheel-venv"
+          python -m pip wheel --no-deps . -w wheelhouse
+          test "$(find wheelhouse -maxdepth 1 -type f -name '*.whl' | wc -l)" -eq 1
+          python -m venv "$RUNNER_TEMP/learning-evidence-wheel-venv"
+          "$RUNNER_TEMP/learning-evidence-wheel-venv/bin/python" -m pip install --no-deps wheelhouse/*.whl
+          "$RUNNER_TEMP/learning-evidence-wheel-venv/bin/python" - <<'PY'
+          import nextgen_memory
+          from nextgen_memory import NeonLearningEvidenceReader
+          assert NeonLearningEvidenceReader is not None
+          assert "NeonLearningEvidenceReader" in nextgen_memory.__all__
+          PY
+          "$RUNNER_TEMP/learning-evidence-wheel-venv/bin/python" -m pip check
+          sha256sum wheelhouse/*.whl | awk '{print $1}' > /tmp/wheel.sha256
+
+      - name: Write bounded exact-head evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from __future__ import annotations
+
+          import json
+          import re
+          import sys
+          from pathlib import Path
+
+          def count_tests(path: Path) -> int:
+              matches = re.findall(r"(\d+) passed", path.read_text(encoding="utf-8"))
+              if not matches:
+                  raise SystemExit(f"test count missing from {path.name}")
+              return int(matches[-1])
+
+          report = {
+              "candidate": "pr14",
+              "candidate_sha": "f0546ef4980239c4993baac8780c12975e91377c",
+              "focused_test_count": count_tests(Path("/tmp/focused-tests.txt")),
+              "full_test_count": count_tests(Path("/tmp/full-tests.txt")),
+              "learning_evidence_row_count": int(Path("/tmp/learning-evidence-row-count.txt").read_text().strip()),
+              "migration_passes": 2,
+              "postgres_major": 18,
+              "python_version": ".".join(map(str, sys.version_info[:3])),
+              "schema_meta_stable": True,
+              "schema_stable": True,
+              "table_counts_stable": True,
+              "wheel_sha256": Path("/tmp/wheel.sha256").read_text().strip(),
+          }
+          Path("/tmp/exact-head-evidence.json").write_text(
+              json.dumps(
+                  report,
+                  ensure_ascii=False,
+                  allow_nan=False,
+                  sort_keys=True,
+                  separators=(",", ":"),
+              ) + "\n",
+              encoding="utf-8",
+          )
+          print(Path("/tmp/exact-head-evidence.json").read_text(), end="")
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pr14-python-${{ matrix.python-version }}
+          path: /tmp/exact-head-evidence.json
+          if-no-files-found: error
+          retention-days: 7
