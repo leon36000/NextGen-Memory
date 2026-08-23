@@ -1,0 +1,183 @@
+name: Neon migration rehearsal
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/neon-migration-rehearsal.yml"
+      - "migrations/neon/**"
+      - "scripts/neon_migration_manifest.py"
+      - "scripts/neon_migration_runner.py"
+      - "tests/fixtures/neon_migration_rehearsal_prerequisites.sql"
+      - "tests/test_neon_migration_manifest.py"
+      - "tests/test_neon_migration_rehearsal_workflow.py"
+      - "tests/test_neon_migration_runner.py"
+
+permissions:
+  contents: read
+
+jobs:
+  rehearse:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13"]
+
+    services:
+      postgres:
+        image: pgvector/pgvector:0.8.6-pg18-bookworm
+        env:
+          POSTGRES_DB: nextgen_migration_rehearsal
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: synthetic-local-postgres-password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready --username=postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+    env:
+      PGDATABASE: nextgen_migration_rehearsal
+      PGHOST: 127.0.0.1
+      PGPASSWORD: synthetic-local-postgres-password
+      PGPORT: "5432"
+      PGUSER: postgres
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install PostgreSQL 18 client
+        run: |
+          sudo install -d -m 0755 /usr/share/postgresql-common/pgdg
+          curl --fail --silent --show-error \
+            https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+            | sudo tee /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc >/dev/null
+          . /etc/os-release
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt ${VERSION_CODENAME}-pgdg main" \
+            | sudo tee /etc/apt/sources.list.d/pgdg.list >/dev/null
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends postgresql-client-18
+          psql --version
+          pg_dump --version
+          test "$(psql --version | awk '{print $3}' | cut -d. -f1)" = "18"
+          test "$(pg_dump --version | awk '{print $3}' | cut -d. -f1)" = "18"
+
+      - name: Verify synthetic service readiness through environment only
+        run: |
+          for attempt in $(seq 1 30); do
+            if psql -X --no-psqlrc --tuples-only --no-align --quiet \
+              --command "SELECT 1" | grep -qx "1"; then
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "synthetic PostgreSQL service did not become ready" >&2
+          exit 1
+
+      - name: Install project and development tools
+        run: python -m pip install -e '.[dev]'
+
+      - name: Focused manifest, runner and workflow contracts
+        run: |
+          python -m pytest -q tests/test_neon_migration_manifest.py \
+            tests/test_neon_migration_runner.py \
+            tests/test_neon_migration_rehearsal_workflow.py
+
+      - name: Validate canonical manifest plan
+        run: |
+          python scripts/neon_migration_manifest.py > manifest-plan.json
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          report = json.loads(Path("manifest-plan.json").read_text(encoding="utf-8"))
+          if report["manifest_path"] != "migrations/neon/manifest.json":
+              raise SystemExit("unexpected manifest path")
+          if report["migration_count"] != 5:
+              raise SystemExit("unexpected migration count")
+          if len(report["plan_hash"]) != 64:
+              raise SystemExit("invalid manifest plan hash")
+          PY
+
+      - name: Bootstrap explicit research-seed prerequisites
+        run: |
+          python - <<'PY' > bootstrap-migrations.txt
+          from pathlib import Path
+
+          from scripts.neon_migration_manifest import load_manifest
+
+          manifest = load_manifest(Path.cwd())
+          expected = (
+              "0001_memory_moe_kernel",
+              "0002_core_idempotency",
+          )
+          actual = tuple(entry.id for entry in manifest.migrations[:2])
+          if actual != expected:
+              raise SystemExit(f"unexpected bootstrap migration prefix: {actual!r}")
+          for entry in manifest.migrations[:2]:
+              print(entry.path)
+          PY
+          while IFS= read -r migration_path; do
+            psql -X --no-psqlrc -v ON_ERROR_STOP=1 --quiet \
+              --file "$migration_path"
+          done < bootstrap-migrations.txt
+          psql -X --no-psqlrc -v ON_ERROR_STOP=1 --quiet \
+            --file tests/fixtures/neon_migration_rehearsal_prerequisites.sql
+          rm bootstrap-migrations.txt
+
+      - name: Run exact two-pass migration rehearsal
+        run: |
+          python scripts/neon_migration_runner.py > migration-rehearsal.json
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          plan = json.loads(Path("manifest-plan.json").read_text(encoding="utf-8"))
+          report = json.loads(
+              Path("migration-rehearsal.json").read_text(encoding="utf-8")
+          )
+          if report["manifest_path"] != plan["manifest_path"]:
+              raise SystemExit("runner used an unexpected manifest")
+          if report["manifest_plan_hash"] != plan["plan_hash"]:
+              raise SystemExit("runner plan hash differs from validated manifest")
+          if report["migration_count"] != plan["migration_count"]:
+              raise SystemExit("runner migration count differs from manifest")
+          if report["pass_count"] != 2 or report["stable"] is not True:
+              raise SystemExit("migration replay is not semantically stable")
+          if report["pass_one"] != report["pass_two"]:
+              raise SystemExit("pass-one and pass-two semantic states differ")
+          PY
+
+      - name: Verify canonical reports contain no SQL or connection material
+        run: |
+          if grep -Eqi 'CREATE |ALTER |DROP |password|secret|token|dsn|connection' \
+            manifest-plan.json migration-rehearsal.json; then
+            echo "canonical report contains forbidden SQL or connection material" >&2
+            exit 1
+          fi
+
+      - name: Repository verification
+        run: |
+          ruff check .
+          python -m compileall -q src scripts
+          python -m pytest -q
+          git diff --check "${{ github.event.pull_request.base.sha }}...HEAD"
+
+      - name: Upload privacy-safe rehearsal evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: neon-migration-rehearsal-python-${{ matrix.python-version }}
+          path: |
+            manifest-plan.json
+            migration-rehearsal.json
+          if-no-files-found: error
+          retention-days: 7
