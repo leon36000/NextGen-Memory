@@ -1,0 +1,195 @@
+name: Post blind Sol packets for runner and PR 10
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+jobs:
+  publish:
+    if: github.event.pull_request.head.ref == 'bootstrap/post-sol-packets-runner-pr10-20260823'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve immutable candidate SHAs and successful evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          encode() { python -c 'import sys,urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$1"; }
+          branch_sha() { gh api "repos/$REPO/branches/$(encode "$1")" --jq '.commit.sha'; }
+          successful_run() {
+            gh api --method GET "repos/$REPO/actions/runs" \
+              -f branch="$1" -f event=pull_request -f per_page=100 \
+              --jq ".workflow_runs | map(select(.name == \"$2\" and .status == \"completed\" and .conclusion == \"success\")) | sort_by(.created_at) | last | .id // empty"
+          }
+          runner_sha=$(branch_sha candidate/neon-migration-runner-v1-20260823)
+          pr10_sha=$(branch_sha candidate/pr10-neon-ledger-adapter-20260823)
+          runner_finalize=$(successful_run fix/neon-migration-runner-live-green-20260823 'Finalize Neon migration runner on PostgreSQL 18')
+          runner_verify=$(successful_run bootstrap/verify-neon-runner-candidate-20260823 'Verify immutable Neon migration runner candidate')
+          pr10_certify=$(successful_run fix/pr10-exact-certification-20260823 'Certify PR 10 exact stack')
+          pr10_verify=$(successful_run bootstrap/verify-pr10-candidate-20260823 'Verify immutable PR 10 candidate')
+          for value in "$runner_sha" "$pr10_sha" "$runner_finalize" "$runner_verify" "$pr10_certify" "$pr10_verify"; do
+            test -n "$value"
+          done
+          printf '%s\n' "$runner_sha" > /tmp/runner-sha
+          printf '%s\n' "$pr10_sha" > /tmp/pr10-sha
+          printf '%s\n' "$runner_finalize" > /tmp/runner-finalize-run
+          printf '%s\n' "$runner_verify" > /tmp/runner-verify-run
+          printf '%s\n' "$pr10_certify" > /tmp/pr10-certify-run
+          printf '%s\n' "$pr10_verify" > /tmp/pr10-verify-run
+
+      - name: Publish runner blind-review packet
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          sha=$(cat /tmp/runner-sha)
+          finalize_run=$(cat /tmp/runner-finalize-run)
+          verify_run=$(cat /tmp/runner-verify-run)
+          body=$(cat <<EOF
+          ## Blind GPT-5.6 Sol review request — Neon migration runner
+
+          Return exactly one verdict: \`APPROVE\`, \`CHANGES_REQUIRED\`, or \`BLOCKED_BY_EVIDENCE\`.
+
+          ### Exact review boundary
+
+          - manifest base: \`97a537cdba2e81385088b57bb02987fedb0aff14\`
+          - candidate branch: \`candidate/neon-migration-runner-v1-20260823\`
+          - exact candidate SHA: \`$sha\`
+          - any SHA movement invalidates this request.
+
+          ### Task contract
+
+          Execute the canonical content-hashed Neon migration manifest twice against one PostgreSQL database and fail unless timestamp-free semantic state is identical after pass one and pass two. The runner must use argv-only subprocesses, connection data only through environment variables, fail-fast bounded errors, deterministic canonical JSON, and no SQL/output/credential leakage.
+
+          ### Exact surface
+
+          Candidate differs from manifest base only by:
+
+          - \`scripts/neon_migration_runner.py\`;
+          - \`tests/test_neon_migration_runner.py\`.
+
+          No migration SQL, manifest, dependency, runtime package, public API, workflow or corrective-retrieval source is changed in the immutable candidate.
+
+          ### Acceptance criteria
+
+          1. Order and paths come only from the validated manifest; no glob/lexical fallback.
+          2. Each migration is invoked with argv-style \`psql -X --no-psqlrc -v ON_ERROR_STOP=1 --file\`.
+          3. Connection material is never placed in argv, reports or exceptions.
+          4. Full plan is applied twice, with fail-fast behavior at the exact migration/pass.
+          5. Each pass captures a repeatable PostgreSQL 18 schema-only dump hash, all \`ngm\` table counts and canonical timestamp-free \`schema_meta\` hash.
+          6. Any semantic change between passes fails closed.
+          7. Missing executable, timeout, nonzero exit and malformed output produce bounded classifications without backend text.
+          8. Table names/counts/schema metadata are strictly validated before dynamic count SQL is constructed.
+          9. Reports are frozen/slotted, deterministic canonical JSON and contain no SQL/runtime payload.
+          10. Pure tests, full suite and real PostgreSQL 18 execution are green on Python 3.12 and 3.13.
+
+          ### Evidence
+
+          - PostgreSQL 18 finalization run \`$finalize_run\`: focused manifest/runner tests, repository Ruff/compileall/full suite, two complete rehearsals, byte-identical reports and privacy scan all succeeded before candidate publication.
+          - independent raw-candidate matrix run \`$verify_run\`: exact two-file surface, Python 3.12 and 3.13 focused/full tests, and independent PostgreSQL 18 two-pass replay all succeeded.
+          - immutable branch publication was conditional on all finalization checks; the branch is not overwritten.
+          - no production/Neon database was contacted or mutated.
+
+          ### Review focus
+
+          - environment handling and executable lookup;
+          - PostgreSQL 18 fixed restrict-key semantics and schema-dump stability;
+          - whether semantic snapshots omit a material state dimension or include unstable data;
+          - schema-meta canonicalization and table-count query safety;
+          - subprocess timeout/error privacy;
+          - deterministic report identity and repeated-run equivalence;
+          - manifest/runner coupling and mutation race windows;
+          - whether the real service proof is sufficient for the requested claim.
+
+          Do not rely on this comment or PR prose as proof. Inspect the exact candidate diff, test suite and workflow logs before issuing a verdict.
+          EOF
+          )
+          gh api "repos/$REPO/issues/82/comments" -f body="$body"
+          gh api "repos/$REPO/issues/71/comments" -f body="$body"
+
+      - name: Publish PR 10 blind-review packet
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          sha=$(cat /tmp/pr10-sha)
+          certify_run=$(cat /tmp/pr10-certify-run)
+          verify_run=$(cat /tmp/pr10-verify-run)
+          body=$(cat <<EOF
+          ## Blind GPT-5.6 Sol review request — PR #10 Neon execution-ledger adapter
+
+          Return exactly one verdict: \`APPROVE\`, \`CHANGES_REQUIRED\`, or \`BLOCKED_BY_EVIDENCE\`.
+
+          ### Exact review boundary
+
+          - base execution-ledger SHA: \`4dde625a2c8af82f5f36dc3923bf86debbb4dd5b\`
+          - candidate branch: \`candidate/pr10-neon-ledger-adapter-20260823\`
+          - exact candidate SHA: \`$sha\`
+          - any SHA movement invalidates this request.
+
+          ### Task contract
+
+          Adapt immutable Execution Ledger v0 contracts to parameterized Neon SQL without requiring psycopg as a package dependency, while preserving append-only/idempotent semantics, exact hash/readback validation and transaction-safe bundle writes.
+
+          ### Exact surface
+
+          Candidate differs from the base only by the five expected paths:
+
+          - \`docs/neon-execution-ledger-adapter-v0.md\`;
+          - design and implementation-plan documents;
+          - \`src/nextgen_memory/neon_execution_ledger.py\`;
+          - \`tests/test_neon_execution_ledger.py\`.
+
+          No migration, workflow, dependency, package-root export or corrective-retrieval file is changed.
+
+          ### Acceptance criteria
+
+          1. SQL is static/parameterized and no psycopg import is required.
+          2. Run, event and artifact writes preserve the Execution Ledger identities and immutable payload hashes.
+          3. Conflict handling performs insert-then-readback and rejects any stored mismatch.
+          4. Bundle validation proves run/event/artifact linkage and event-chain order before SQL.
+          5. One bundle uses one transaction and does not leave partial accepted state under tested failures.
+          6. Read methods expose execution heads/drift without weakening the ledger source of truth.
+          7. Error and metadata paths remain privacy-safe and bounded.
+          8. No migration is applied by the adapter candidate itself.
+          9. Full repository regression, focused adapter tests, compileall, diff integrity and weakening scans are green on Python 3.12 and 3.13.
+
+          ### Evidence
+
+          - exact-stack certification run \`$certify_run\`: exact five-file surface, Ruff, complete pytest, compileall, diff-check and weakening/stub scan succeeded before immutable branch publication.
+          - independent raw-candidate matrix run \`$verify_run\`: exact SHA/surface, focused adapter tests and complete suite succeeded on Python 3.12 and 3.13.
+          - no semantic auto-fix, test weakening, migration application, database write or merge occurred.
+          - historical PR prose describes an earlier temporary-Neon smoke, but this packet does **not** treat that historical smoke as fresh live evidence for the current candidate. Review may return \`BLOCKED_BY_EVIDENCE\` if a new real-driver/database smoke is required for the merge claim.
+
+          ### Review focus
+
+          - compatibility with the exact Execution Ledger contracts at base;
+          - transaction ownership and rollback assumptions;
+          - SQL placeholder/readback mapping against common DB-API/psycopg cursors;
+          - hash-field naming and Python/PostgreSQL identity alignment;
+          - duplicate/missing/unexpected readback handling;
+          - event-chain and artifact linkage validation completeness;
+          - whether unit tests using cursor doubles leave a material integration gap;
+          - whether the exact evidence supports merge without a fresh database smoke.
+
+          Do not rely on this comment or PR prose as proof. Inspect the exact five-file diff, base ledger contracts, tests and matrix logs before issuing a verdict.
+          EOF
+          )
+          gh api "repos/$REPO/issues/10/comments" -f body="$body"
+
+      - name: Close this evidence PR without merge
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+        run: gh api --method PATCH "repos/$REPO/pulls/$PR" -f state=closed >/dev/null
