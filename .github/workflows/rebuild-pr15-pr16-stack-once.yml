@@ -1,0 +1,323 @@
+name: Rebuild inherited reranker telemetry stack on corrected reader
+
+on:
+  pull_request:
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+jobs:
+  rebuild:
+    if: github.event.pull_request.head.ref == 'bootstrap/rebuild-pr15-pr16-stack-20260823'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: bootstrap/rebuild-pr15-pr16-stack-20260823
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Configure isolated stack and prove immutable inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git fetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*'
+          base_sha=$(git rev-parse origin/candidate/learning-evidence-reader-v0-20260823)
+          test "$base_sha" = 'f0546ef4980239c4993baac8780c12975e91377c'
+          git cat-file -e 'ead611e8cd7caee5a59c6ce19b671625975e976e^{commit}'
+          git cat-file -e 'd00992d20f970717268a8a7355f19ab487def4e9^{commit}'
+          git merge-base --is-ancestor ead611e8cd7caee5a59c6ce19b671625975e976e d00992d20f970717268a8a7355f19ab487def4e9
+          for branch in \
+            candidate/bounded-inherited-reranker-v0-20260823 \
+            candidate/inherited-rerank-telemetry-v0-20260823; do
+            if git ls-remote --exit-code --heads origin "$branch"; then
+              echo "immutable target already exists: $branch" >&2
+              exit 1
+            fi
+          done
+          printf 'base_sha=%s\n' "$base_sha" > /tmp/stack-inputs.txt
+          git switch -c candidate/bounded-inherited-reranker-v0-20260823 "$base_sha"
+          git merge --no-ff --no-edit ead611e8cd7caee5a59c6ce19b671625975e976e
+          git merge-base --is-ancestor "$base_sha" HEAD
+          git merge-base --is-ancestor ead611e8cd7caee5a59c6ce19b671625975e976e HEAD
+          echo "pr15_sha=$(git rev-parse HEAD)" >> /tmp/stack-inputs.txt
+
+      - name: Prove exact PR15 product surface
+        shell: bash
+        run: |
+          set -euo pipefail
+          base_sha=$(sed -n 's/^base_sha=//p' /tmp/stack-inputs.txt)
+          mapfile -t changed < <(git diff --name-only "$base_sha"...HEAD | sort)
+          expected=(
+            docs/bounded-inherited-reranker-v0-red.md
+            docs/bounded-inherited-reranker-v0-verification.md
+            docs/bounded-inherited-reranker-v0.md
+            docs/superpowers/plans/2026-08-14-bounded-inherited-reranker-v0.md
+            docs/superpowers/specs/2026-08-14-bounded-inherited-reranker-v0-design.md
+            scripts/simulate_bounded_inherited_reranker_v0.py
+            src/nextgen_memory/__init__.py
+            src/nextgen_memory/bounded_inherited_reranker.py
+            tests/test_bounded_inherited_reranker.py
+            tests/test_bounded_inherited_reranker_properties.py
+            tests/test_bounded_inherited_reranker_public_api.py
+            tests/test_bounded_inherited_reranker_simulation.py
+          )
+          test "${#changed[@]}" -eq "${#expected[@]}"
+          diff -u <(printf '%s\n' "${expected[@]}" | sort) <(printf '%s\n' "${changed[@]}")
+          test -z "$(git diff --name-only "$base_sha"...HEAD -- 'migrations/**' '.github/workflows/**' pyproject.toml 'src/nextgen_memory/corrective_retrieval_*')"
+          git diff --check "$base_sha"...HEAD
+          test -z "$(git status --porcelain)"
+
+      - name: Install and verify corrected PR15 candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install -e '.[dev]'
+          ruff check .
+          python -m compileall -q src scripts
+          python -m pytest -q \
+            tests/test_bounded_inherited_reranker.py \
+            tests/test_bounded_inherited_reranker_properties.py \
+            tests/test_bounded_inherited_reranker_public_api.py \
+            tests/test_bounded_inherited_reranker_simulation.py \
+            | tee /tmp/pr15-focused.txt
+          python -m pytest -q | tee /tmp/pr15-full.txt
+          python scripts/simulate_bounded_inherited_reranker_v0.py > /tmp/pr15-simulation-a.json
+          python scripts/simulate_bounded_inherited_reranker_v0.py > /tmp/pr15-simulation-b.json
+          cmp /tmp/pr15-simulation-a.json /tmp/pr15-simulation-b.json
+
+      - name: Audit bounded reranker side-effect and causal boundary
+        run: |
+          python - <<'PY'
+          from __future__ import annotations
+
+          import ast
+          from pathlib import Path
+
+          path = Path('src/nextgen_memory/bounded_inherited_reranker.py')
+          source = path.read_text(encoding='utf-8')
+          tree = ast.parse(source, filename=str(path))
+          forbidden_roots = {
+              'asyncio','httpx','os','pathlib','psycopg','pymongo','random',
+              'requests','socket','sqlalchemy','subprocess','temporalio','time','urllib',
+          }
+          forbidden_calls = {
+              'eval','exec','open','sleep','system','urlopen','uuid1','uuid4',
+              'write_bytes','write_text',
+          }
+          violations: list[str] = []
+          for node in ast.walk(tree):
+              if isinstance(node, ast.Pass):
+                  violations.append(f'{node.lineno}:pass')
+              elif isinstance(node, ast.Raise):
+                  exc = node.exc.func if isinstance(node.exc, ast.Call) else node.exc
+                  if (
+                      isinstance(exc, ast.Name) and exc.id == 'NotImplementedError'
+                  ) or (
+                      isinstance(exc, ast.Attribute) and exc.attr == 'NotImplementedError'
+                  ):
+                      violations.append(f'{node.lineno}:NotImplementedError')
+              elif isinstance(node, ast.Import):
+                  for alias in node.names:
+                      if alias.name.split('.',1)[0] in forbidden_roots:
+                          violations.append(f'{node.lineno}:import:{alias.name}')
+              elif isinstance(node, ast.ImportFrom):
+                  if (node.module or '').split('.',1)[0] in forbidden_roots:
+                      violations.append(f'{node.lineno}:import:{node.module}')
+              elif isinstance(node, ast.Call):
+                  name = node.func.id if isinstance(node.func, ast.Name) else node.func.attr if isinstance(node.func, ast.Attribute) else None
+                  if name in forbidden_calls:
+                      violations.append(f'{node.lineno}:call:{name}')
+          lowered = source.lower()
+          for marker in (
+              'postgresql://','mongodb://','http://','https://','password',
+              'credential','# todo','# fixme','memory_feedback','combined_utility',
+          ):
+              if marker in lowered:
+                  violations.append(f'text:{marker}')
+          if violations:
+              raise SystemExit('\n'.join(violations))
+          print('bounded_reranker_side_effect_or_causal_findings=0')
+          PY
+
+      - name: Build and install PR15 wheel outside checkout
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf wheelhouse /tmp/pr15-wheel-venv
+          python -m pip wheel --no-deps . -w wheelhouse
+          test "$(find wheelhouse -maxdepth 1 -type f -name '*.whl' | wc -l)" -eq 1
+          python -m venv /tmp/pr15-wheel-venv
+          /tmp/pr15-wheel-venv/bin/python -m pip install --no-deps wheelhouse/*.whl
+          /tmp/pr15-wheel-venv/bin/python - <<'PY'
+          import nextgen_memory
+          from nextgen_memory import BoundedInheritedReranker
+          assert BoundedInheritedReranker is not None
+          assert 'BoundedInheritedReranker' in nextgen_memory.__all__
+          PY
+          /tmp/pr15-wheel-venv/bin/python -m pip check
+          sha256sum wheelhouse/*.whl | awk '{print $1}' > /tmp/pr15-wheel.sha256
+
+      - name: Publish immutable corrected PR15 branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git push origin HEAD:refs/heads/candidate/bounded-inherited-reranker-v0-20260823
+
+      - name: Merge exact PR16 telemetry over corrected PR15
+        shell: bash
+        run: |
+          set -euo pipefail
+          pr15_sha=$(sed -n 's/^pr15_sha=//p' /tmp/stack-inputs.txt)
+          git switch -c candidate/inherited-rerank-telemetry-v0-20260823 "$pr15_sha"
+          git merge --no-ff --no-edit d00992d20f970717268a8a7355f19ab487def4e9
+          git merge-base --is-ancestor "$pr15_sha" HEAD
+          git merge-base --is-ancestor d00992d20f970717268a8a7355f19ab487def4e9 HEAD
+          echo "pr16_sha=$(git rev-parse HEAD)" >> /tmp/stack-inputs.txt
+
+      - name: Prove exact PR16 product surface
+        shell: bash
+        run: |
+          set -euo pipefail
+          pr15_sha=$(sed -n 's/^pr15_sha=//p' /tmp/stack-inputs.txt)
+          mapfile -t changed < <(git diff --name-only "$pr15_sha"...HEAD | sort)
+          expected=(
+            docs/superpowers/plans/2026-08-15-inherited-rerank-telemetry-v0.md
+            docs/superpowers/specs/2026-08-15-inherited-rerank-telemetry-v0-design.md
+            scripts/simulate_inherited_rerank_telemetry_v0.py
+            src/nextgen_memory/__init__.py
+            src/nextgen_memory/inherited_rerank_telemetry.py
+            tests/test_inherited_rerank_telemetry.py
+            tests/test_inherited_rerank_telemetry_properties.py
+            tests/test_inherited_rerank_telemetry_simulation.py
+          )
+          test "${#changed[@]}" -eq "${#expected[@]}"
+          diff -u <(printf '%s\n' "${expected[@]}" | sort) <(printf '%s\n' "${changed[@]}")
+          test -z "$(git diff --name-only "$pr15_sha"...HEAD -- 'migrations/**' '.github/workflows/**' pyproject.toml 'src/nextgen_memory/corrective_retrieval_*')"
+          git diff --check "$pr15_sha"...HEAD
+          test -z "$(git status --porcelain)"
+
+      - name: Verify corrected PR16 telemetry candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install -e '.[dev]'
+          ruff check .
+          python -m compileall -q src scripts
+          python -m pytest -q \
+            tests/test_inherited_rerank_telemetry.py \
+            tests/test_inherited_rerank_telemetry_properties.py \
+            tests/test_inherited_rerank_telemetry_simulation.py \
+            | tee /tmp/pr16-focused.txt
+          python -m pytest -q | tee /tmp/pr16-full.txt
+          python scripts/simulate_inherited_rerank_telemetry_v0.py > /tmp/pr16-simulation-a.json
+          python scripts/simulate_inherited_rerank_telemetry_v0.py > /tmp/pr16-simulation-b.json
+          cmp /tmp/pr16-simulation-a.json /tmp/pr16-simulation-b.json
+
+      - name: Audit telemetry privacy, identity and side-effect surface
+        run: |
+          python - <<'PY'
+          from __future__ import annotations
+
+          import ast
+          from pathlib import Path
+
+          path = Path('src/nextgen_memory/inherited_rerank_telemetry.py')
+          source = path.read_text(encoding='utf-8')
+          tree = ast.parse(source, filename=str(path))
+          forbidden_roots = {
+              'asyncio','httpx','os','pathlib','psycopg','pymongo','random',
+              'requests','socket','sqlalchemy','subprocess','temporalio','time','urllib',
+          }
+          forbidden_calls = {
+              'eval','exec','open','sleep','system','urlopen','uuid1','uuid4',
+              'write_bytes','write_text',
+          }
+          violations: list[str] = []
+          for node in ast.walk(tree):
+              if isinstance(node, ast.Pass):
+                  violations.append(f'{node.lineno}:pass')
+              elif isinstance(node, ast.Raise):
+                  exc = node.exc.func if isinstance(node.exc, ast.Call) else node.exc
+                  if (
+                      isinstance(exc, ast.Name) and exc.id == 'NotImplementedError'
+                  ) or (
+                      isinstance(exc, ast.Attribute) and exc.attr == 'NotImplementedError'
+                  ):
+                      violations.append(f'{node.lineno}:NotImplementedError')
+              elif isinstance(node, ast.Import):
+                  for alias in node.names:
+                      if alias.name.split('.',1)[0] in forbidden_roots:
+                          violations.append(f'{node.lineno}:import:{alias.name}')
+              elif isinstance(node, ast.ImportFrom):
+                  if (node.module or '').split('.',1)[0] in forbidden_roots:
+                      violations.append(f'{node.lineno}:import:{node.module}')
+              elif isinstance(node, ast.Call):
+                  name = node.func.id if isinstance(node.func, ast.Name) else node.func.attr if isinstance(node.func, ast.Attribute) else None
+                  if name in forbidden_calls:
+                      violations.append(f'{node.lineno}:call:{name}')
+          lowered = source.lower()
+          for marker in (
+              'postgresql://','mongodb://','http://','https://','password',
+              'credential','# todo','# fixme','raw_query','raw_prompt',
+              'response_text','memory_body','combined_utility',
+          ):
+              if marker in lowered:
+                  violations.append(f'text:{marker}')
+          if violations:
+              raise SystemExit('\n'.join(violations))
+          print('inherited_telemetry_side_effect_or_privacy_findings=0')
+          PY
+
+      - name: Build and install PR16 wheel outside checkout
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf wheelhouse /tmp/pr16-wheel-venv
+          python -m pip wheel --no-deps . -w wheelhouse
+          test "$(find wheelhouse -maxdepth 1 -type f -name '*.whl' | wc -l)" -eq 1
+          python -m venv /tmp/pr16-wheel-venv
+          /tmp/pr16-wheel-venv/bin/python -m pip install --no-deps wheelhouse/*.whl
+          /tmp/pr16-wheel-venv/bin/python - <<'PY'
+          import nextgen_memory
+          from nextgen_memory import InheritedRerankTelemetryBuilder
+          assert InheritedRerankTelemetryBuilder is not None
+          assert 'InheritedRerankTelemetryBuilder' in nextgen_memory.__all__
+          PY
+          /tmp/pr16-wheel-venv/bin/python -m pip check
+          sha256sum wheelhouse/*.whl | awk '{print $1}' > /tmp/pr16-wheel.sha256
+
+      - name: Publish immutable corrected PR16 branch and bounded evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git push origin HEAD:refs/heads/candidate/inherited-rerank-telemetry-v0-20260823
+          pr15_sha=$(sed -n 's/^pr15_sha=//p' /tmp/stack-inputs.txt)
+          pr16_sha=$(sed -n 's/^pr16_sha=//p' /tmp/stack-inputs.txt)
+          body=$(cat <<EOF
+          ## Corrected inherited-rerank stack producer GREEN
+
+          - corrected reader base: \`f0546ef4980239c4993baac8780c12975e91377c\`
+          - bounded reranker candidate: \`$pr15_sha\`
+          - telemetry candidate: \`$pr16_sha\`
+          - exact original PR #15/#16 SHAs are ancestors through controlled merge commits
+          - focused/full tests, deterministic simulations, side-effect/privacy audits and isolated wheel imports passed
+          - runtime migrations, dependencies and corrective-retrieval sources changed: none
+          - merge, production database, policy activation and release: none
+
+          Independent Python 3.12/3.13 exact-SHA verification and blind GPT-5.6 Sol review remain required.
+          EOF
+          )
+          gh api "repos/${{ github.repository }}/issues/15/comments" -f body="$body"
+          gh api "repos/${{ github.repository }}/issues/16/comments" -f body="$body"
+          gh api "repos/${{ github.repository }}/issues/23/comments" -f body="$body"
