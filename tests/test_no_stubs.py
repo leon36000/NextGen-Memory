@@ -4,7 +4,6 @@ import json
 from pathlib import Path
 
 import pytest
-
 from scripts.verify_no_stubs import Finding, main, scan_paths, scan_source
 
 
