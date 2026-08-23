@@ -9,7 +9,7 @@ import re
 import stat
 import zipfile
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from email.parser import BytesParser
 from pathlib import Path, PurePosixPath
 
@@ -293,7 +293,7 @@ def validate_source_date_epoch(value: str) -> int:
         raise ValueError("source date epoch is invalid")
     try:
         epoch = int(value)
-        timestamp = datetime.fromtimestamp(epoch, timezone.utc)
+        timestamp = datetime.fromtimestamp(epoch, UTC)
     except (OverflowError, OSError, ValueError) as exc:
         raise ValueError("source date epoch is invalid") from exc
     if epoch < _ZIP_MINIMUM_EPOCH or timestamp.year > _ZIP_MAXIMUM_YEAR:
