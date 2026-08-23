@@ -1,0 +1,184 @@
+name: Rebuild telemetry on corrected bounded reranker candidate
+
+on:
+  pull_request:
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+jobs:
+  rebuild:
+    if: github.event.pull_request.head.ref == 'bootstrap/rebuild-pr16-on-corrected-pr15-20260823'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: bootstrap/rebuild-pr16-on-corrected-pr15-20260823
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Configure exact corrected stack
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git fetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*'
+          base_sha=$(git rev-parse origin/candidate/bounded-inherited-reranker-v0-20260823)
+          test "$base_sha" = '807ea861a76983dd90c488fc8ec4ff6302fc568f'
+          git cat-file -e 'd00992d20f970717268a8a7355f19ab487def4e9^{commit}'
+          git merge-base --is-ancestor ead611e8cd7caee5a59c6ce19b671625975e976e d00992d20f970717268a8a7355f19ab487def4e9
+          if git ls-remote --exit-code --heads origin candidate/inherited-rerank-telemetry-v0-20260823; then
+            echo 'immutable telemetry candidate already exists' >&2
+            exit 1
+          fi
+          git switch -c candidate/inherited-rerank-telemetry-v0-20260823 "$base_sha"
+          git merge --no-ff --no-edit d00992d20f970717268a8a7355f19ab487def4e9
+          git merge-base --is-ancestor "$base_sha" HEAD
+          git merge-base --is-ancestor d00992d20f970717268a8a7355f19ab487def4e9 HEAD
+          echo "base_sha=$base_sha" > /tmp/stack.txt
+          echo "candidate_sha=$(git rev-parse HEAD)" >> /tmp/stack.txt
+
+      - name: Prove exact nine-path telemetry surface
+        shell: bash
+        run: |
+          set -euo pipefail
+          base_sha=$(sed -n 's/^base_sha=//p' /tmp/stack.txt)
+          mapfile -t changed < <(git diff --name-only "$base_sha"...HEAD | sort)
+          expected=(
+            docs/superpowers/plans/2026-08-15-inherited-rerank-telemetry-v0.md
+            docs/superpowers/specs/2026-08-15-inherited-rerank-telemetry-v0-design.md
+            scripts/simulate_inherited_rerank_telemetry_v0.py
+            src/nextgen_memory/__init__.py
+            src/nextgen_memory/inherited_rerank_telemetry.py
+            tests/test_inherited_rerank_telemetry.py
+            tests/test_inherited_rerank_telemetry_properties.py
+            tests/test_inherited_rerank_telemetry_public_api.py
+            tests/test_inherited_rerank_telemetry_simulation.py
+          )
+          test "${#changed[@]}" -eq "${#expected[@]}"
+          diff -u <(printf '%s\n' "${expected[@]}" | sort) <(printf '%s\n' "${changed[@]}")
+          test -z "$(git diff --name-only "$base_sha"...HEAD -- 'migrations/**' '.github/workflows/**' pyproject.toml 'src/nextgen_memory/corrective_retrieval_*')"
+          git diff --check "$base_sha"...HEAD
+          test -z "$(git status --porcelain)"
+
+      - name: Install and verify telemetry candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install -e '.[dev]'
+          ruff check .
+          python -m compileall -q src scripts
+          python -m pytest -q \
+            tests/test_inherited_rerank_telemetry.py \
+            tests/test_inherited_rerank_telemetry_properties.py \
+            tests/test_inherited_rerank_telemetry_public_api.py \
+            tests/test_inherited_rerank_telemetry_simulation.py \
+            | tee /tmp/focused.txt
+          python -m pytest -q | tee /tmp/full.txt
+          python scripts/simulate_inherited_rerank_telemetry_v0.py > /tmp/simulation-a.json
+          python scripts/simulate_inherited_rerank_telemetry_v0.py > /tmp/simulation-b.json
+          cmp /tmp/simulation-a.json /tmp/simulation-b.json
+
+      - name: Audit deterministic privacy and side-effect boundary
+        run: |
+          python - <<'PY'
+          from __future__ import annotations
+
+          import ast
+          from pathlib import Path
+
+          path = Path('src/nextgen_memory/inherited_rerank_telemetry.py')
+          source = path.read_text(encoding='utf-8')
+          tree = ast.parse(source, filename=str(path))
+          forbidden_roots = {
+              'asyncio','httpx','os','pathlib','psycopg','pymongo','random',
+              'requests','socket','sqlalchemy','subprocess','temporalio','time','urllib',
+          }
+          forbidden_calls = {
+              'eval','exec','open','sleep','system','urlopen','uuid1','uuid4',
+              'write_bytes','write_text',
+          }
+          violations: list[str] = []
+          for node in ast.walk(tree):
+              if isinstance(node, ast.Pass):
+                  violations.append(f'{node.lineno}:pass')
+              elif isinstance(node, ast.Raise):
+                  exc = node.exc.func if isinstance(node.exc, ast.Call) else node.exc
+                  if (
+                      isinstance(exc, ast.Name) and exc.id == 'NotImplementedError'
+                  ) or (
+                      isinstance(exc, ast.Attribute) and exc.attr == 'NotImplementedError'
+                  ):
+                      violations.append(f'{node.lineno}:NotImplementedError')
+              elif isinstance(node, ast.Import):
+                  for alias in node.names:
+                      if alias.name.split('.',1)[0] in forbidden_roots:
+                          violations.append(f'{node.lineno}:import:{alias.name}')
+              elif isinstance(node, ast.ImportFrom):
+                  if (node.module or '').split('.',1)[0] in forbidden_roots:
+                      violations.append(f'{node.lineno}:import:{node.module}')
+              elif isinstance(node, ast.Call):
+                  name = node.func.id if isinstance(node.func, ast.Name) else node.func.attr if isinstance(node.func, ast.Attribute) else None
+                  if name in forbidden_calls:
+                      violations.append(f'{node.lineno}:call:{name}')
+          lowered = source.lower()
+          for marker in (
+              'postgresql://','mongodb://','http://','https://','password',
+              'credential','# todo','# fixme','raw_query','raw_prompt',
+              'response_text','memory_body','combined_utility',
+          ):
+              if marker in lowered:
+                  violations.append(f'text:{marker}')
+          if violations:
+              raise SystemExit('\n'.join(violations))
+          print('telemetry_side_effect_or_privacy_findings=0')
+          PY
+
+      - name: Build and install exact wheel outside checkout
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf wheelhouse /tmp/telemetry-wheel-venv
+          python -m pip wheel --no-deps . -w wheelhouse
+          test "$(find wheelhouse -maxdepth 1 -type f -name '*.whl' | wc -l)" -eq 1
+          python -m venv /tmp/telemetry-wheel-venv
+          /tmp/telemetry-wheel-venv/bin/python -m pip install --no-deps wheelhouse/*.whl
+          /tmp/telemetry-wheel-venv/bin/python - <<'PY'
+          import nextgen_memory
+          from nextgen_memory import InheritedRerankTelemetryBuilder
+          assert InheritedRerankTelemetryBuilder is not None
+          assert 'InheritedRerankTelemetryBuilder' in nextgen_memory.__all__
+          PY
+          /tmp/telemetry-wheel-venv/bin/python -m pip check
+          sha256sum wheelhouse/*.whl | awk '{print $1}' > /tmp/wheel.sha256
+
+      - name: Publish immutable telemetry candidate and exact evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git push origin HEAD:refs/heads/candidate/inherited-rerank-telemetry-v0-20260823
+          candidate_sha=$(sed -n 's/^candidate_sha=//p' /tmp/stack.txt)
+          body=$(cat <<EOF
+          ## Corrected inherited-rerank telemetry candidate GREEN
+
+          - corrected bounded-reranker base: \`807ea861a76983dd90c488fc8ec4ff6302fc568f\`
+          - telemetry candidate: \`$candidate_sha\`
+          - exact original PR #16 SHA \`d00992d20f970717268a8a7355f19ab487def4e9\` is an ancestor
+          - exact nine-path scope, focused/full tests, deterministic simulation, side-effect/privacy audit and isolated wheel import passed
+          - migration, dependency, workflow and corrective-retrieval changes: none
+          - merge, production database, activation and release: none
+
+          Independent Python 3.12/3.13 exact-SHA verification and blind GPT-5.6 Sol review remain required.
+          EOF
+          )
+          gh api "repos/${{ github.repository }}/issues/16/comments" -f body="$body"
+          gh api "repos/${{ github.repository }}/issues/23/comments" -f body="$body"
