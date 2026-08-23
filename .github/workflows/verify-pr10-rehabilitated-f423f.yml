@@ -1,0 +1,66 @@
+name: Verify rehabilitated PR 10 exact candidate
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: f423f5e441e832c4f6b8f92c32f76092daa15527
+          fetch-depth: 0
+      - name: Prove exact checkout and stack
+        run: |
+          test "$(git rev-parse HEAD)" = "f423f5e441e832c4f6b8f92c32f76092daa15527"
+          test "$(git merge-base HEAD 4dde625a2c8af82f5f36dc3923bf86debbb4dd5b)" = "4dde625a2c8af82f5f36dc3923bf86debbb4dd5b"
+          mapfile -t changed < <(git diff --name-only 4dde625a2c8af82f5f36dc3923bf86debbb4dd5b...HEAD | sort)
+          expected=(
+            docs/superpowers/plans/2026-08-14-neon-execution-ledger-adapter-v0.md
+            docs/superpowers/specs/2026-08-14-neon-execution-ledger-adapter-v0-design.md
+            src/nextgen_memory/neon_execution_ledger.py
+            tests/test_neon_execution_ledger.py
+            tests/test_neon_execution_ledger_sql_contract.py
+          )
+          test "${#changed[@]}" -eq "${#expected[@]}"
+          diff -u <(printf '%s\n' "${expected[@]}" | sort) <(printf '%s\n' "${changed[@]}")
+          git diff --check 4dde625a2c8af82f5f36dc3923bf86debbb4dd5b...HEAD
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - name: Install project and development tools
+        run: python -m pip install -e '.[dev]'
+      - name: Focused adapter verification
+        run: |
+          python -m pytest -q \
+            tests/test_neon_execution_ledger.py \
+            tests/test_neon_execution_ledger_sql_contract.py
+      - name: Repository verification
+        run: |
+          ruff check .
+          python -m compileall -q src
+          python -m pytest -q
+      - name: Build and import wheel in isolation
+        run: |
+          rm -rf wheelhouse /tmp/pr10-wheel-venv
+          python -m pip wheel --no-deps . -w wheelhouse
+          python -m venv /tmp/pr10-wheel-venv
+          /tmp/pr10-wheel-venv/bin/python -m pip install --no-deps wheelhouse/*.whl
+          /tmp/pr10-wheel-venv/bin/python - <<'PY'
+          from nextgen_memory.neon_execution_ledger import (
+              ConnectionProtocol,
+              NeonExecutionLedgerAdapter,
+          )
+
+          assert ConnectionProtocol is not None
+          assert NeonExecutionLedgerAdapter is not None
+          PY
