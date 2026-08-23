@@ -7,6 +7,7 @@ on:
       - "migrations/neon/**"
       - "scripts/neon_migration_manifest.py"
       - "scripts/neon_migration_runner.py"
+      - "tests/fixtures/neon_migration_rehearsal_prerequisites.sql"
       - "tests/test_neon_migration_manifest.py"
       - "tests/test_neon_migration_rehearsal_workflow.py"
       - "tests/test_neon_migration_runner.py"
@@ -106,6 +107,32 @@ jobs:
           if len(report["plan_hash"]) != 64:
               raise SystemExit("invalid manifest plan hash")
           PY
+
+      - name: Bootstrap explicit research-seed prerequisites
+        run: |
+          python - <<'PY' > bootstrap-migrations.txt
+          from pathlib import Path
+
+          from scripts.neon_migration_manifest import load_manifest
+
+          manifest = load_manifest(Path.cwd())
+          expected = (
+              "0001_memory_moe_kernel",
+              "0002_core_idempotency",
+          )
+          actual = tuple(entry.id for entry in manifest.migrations[:2])
+          if actual != expected:
+              raise SystemExit(f"unexpected bootstrap migration prefix: {actual!r}")
+          for entry in manifest.migrations[:2]:
+              print(entry.path)
+          PY
+          while IFS= read -r migration_path; do
+            psql -X --no-psqlrc -v ON_ERROR_STOP=1 --quiet \
+              --file "$migration_path"
+          done < bootstrap-migrations.txt
+          psql -X --no-psqlrc -v ON_ERROR_STOP=1 --quiet \
+            --file tests/fixtures/neon_migration_rehearsal_prerequisites.sql
+          rm bootstrap-migrations.txt
 
       - name: Run exact two-pass migration rehearsal
         run: |
