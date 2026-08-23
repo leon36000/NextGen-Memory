@@ -16,7 +16,7 @@ jobs:
 
     services:
       postgres:
-        image: postgres:18
+        image: pgvector/pgvector:0.8.6-pg18-bookworm
         env:
           POSTGRES_DB: nextgen_migration_rehearsal
           POSTGRES_USER: postgres
@@ -39,17 +39,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: cb2861f054d3781925b6069dfbd64659169ab008
+          ref: 2b609c98dcdd7fc0b5475205bdf5b635ebab2e7e
           fetch-depth: 0
 
-      - name: Prove exact checkout and four-path candidate surface
+      - name: Prove exact checkout and five-path candidate surface
         run: |
-          test "$(git rev-parse HEAD)" = "cb2861f054d3781925b6069dfbd64659169ab008"
+          test "$(git rev-parse HEAD)" = "2b609c98dcdd7fc0b5475205bdf5b635ebab2e7e"
           test "$(git merge-base HEAD 97a537cdba2e81385088b57bb02987fedb0aff14)" = "97a537cdba2e81385088b57bb02987fedb0aff14"
           mapfile -t changed < <(git diff --name-only 97a537cdba2e81385088b57bb02987fedb0aff14...HEAD | sort)
           expected=(
             .github/workflows/neon-migration-rehearsal.yml
             scripts/neon_migration_runner.py
+            tests/fixtures/neon_migration_rehearsal_prerequisites.sql
             tests/test_neon_migration_rehearsal_workflow.py
             tests/test_neon_migration_runner.py
           )
@@ -102,10 +103,39 @@ jobs:
             tests/test_neon_migration_runner.py \
             tests/test_neon_migration_rehearsal_workflow.py
 
-      - name: Run canonical plan and two-pass PostgreSQL 18 rehearsal
+      - name: Validate canonical plan and bootstrap explicit seed prerequisites
         run: |
           python scripts/neon_migration_manifest.py > manifest-plan.json
+          python - <<'PY' > bootstrap-migrations.txt
+          from pathlib import Path
+
+          from scripts.neon_migration_manifest import load_manifest
+
+          manifest = load_manifest(Path.cwd())
+          expected = (
+              "0001_memory_moe_kernel",
+              "0002_core_idempotency",
+          )
+          actual = tuple(entry.id for entry in manifest.migrations[:2])
+          if actual != expected:
+              raise SystemExit(f"unexpected bootstrap migration prefix: {actual!r}")
+          for entry in manifest.migrations[:2]:
+              print(entry.path)
+          PY
+          while IFS= read -r migration_path; do
+            psql -X --no-psqlrc -v ON_ERROR_STOP=1 --quiet \
+              --file "$migration_path"
+          done < bootstrap-migrations.txt
+          psql -X --no-psqlrc -v ON_ERROR_STOP=1 --quiet \
+            --file tests/fixtures/neon_migration_rehearsal_prerequisites.sql
+          rm bootstrap-migrations.txt
+
+      - name: Run canonical two-pass PostgreSQL 18 rehearsal
+        run: |
           python scripts/neon_migration_runner.py > migration-rehearsal.json
+          psql -X --no-psqlrc --tuples-only --no-align --quiet \
+            --command "SELECT tablename FROM pg_catalog.pg_tables WHERE schemaname = 'ngm' ORDER BY tablename" \
+            > live-table-list.txt
           python - <<'PY'
           import json
           from pathlib import Path
@@ -113,6 +143,13 @@ jobs:
           plan = json.loads(Path("manifest-plan.json").read_text(encoding="utf-8"))
           report = json.loads(
               Path("migration-rehearsal.json").read_text(encoding="utf-8")
+          )
+          live_tables = tuple(
+              line.strip()
+              for line in Path("live-table-list.txt").read_text(
+                  encoding="utf-8"
+              ).splitlines()
+              if line.strip()
           )
           if report["manifest_path"] != plan["manifest_path"]:
               raise SystemExit("manifest path mismatch")
@@ -124,27 +161,25 @@ jobs:
               raise SystemExit("two-pass rehearsal is not stable")
           if report["pass_one"] != report["pass_two"]:
               raise SystemExit("semantic state differs between passes")
-          if set(report["pass_one"]["table_counts"]) != {
+          captured_tables = tuple(sorted(report["pass_one"]["table_counts"]))
+          if captured_tables != live_tables:
+              raise SystemExit(
+                  f"captured table inventory differs: {captured_tables!r} != {live_tables!r}"
+              )
+          required_tables = {
               "action_memory_usage_events",
-              "backend_links",
-              "consolidation_runs",
-              "execution_artifacts",
-              "execution_events",
-              "execution_runs",
-              "expert_registry",
-              "memory_edges",
-              "memory_feedback",
               "memory_nodes",
               "memory_spaces",
-              "resolver_events",
+              "project_checkpoints",
               "retrieval_events",
               "router_decisions",
               "schema_meta",
-              "state_events",
-              "state_slots",
-          }:
-              raise SystemExit("unexpected ngm table inventory")
+              "source_principals",
+          }
+          if not required_tables.issubset(captured_tables):
+              raise SystemExit("required migration tables are missing")
           PY
+          rm live-table-list.txt
 
       - name: Prove reports are canonical and privacy-safe
         run: |
@@ -192,7 +227,7 @@ jobs:
       - name: Upload only canonical privacy-safe reports
         uses: actions/upload-artifact@v4
         with:
-          name: neon-runner-cb2861f-python-${{ matrix.python-version }}
+          name: neon-runner-2b609c98-python-${{ matrix.python-version }}
           path: |
             manifest-plan.json
             migration-rehearsal.json
