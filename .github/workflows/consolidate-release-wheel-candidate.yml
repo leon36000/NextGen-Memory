@@ -1,0 +1,240 @@
+name: Consolidate immutable release wheel candidate
+
+on:
+  pull_request:
+
+permissions:
+  actions: read
+  contents: read
+  issues: write
+  pull-requests: write
+
+jobs:
+  consolidate:
+    if: github.event.pull_request.head.ref == 'bootstrap/consolidate-release-wheel-candidate-20260823'
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Resolve canonical candidate PR and exact successful runs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          encode() { python -c 'import sys,urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$1"; }
+          successful_run() {
+            local branch=$1 name=$2
+            gh api --method GET "repos/$REPO/actions/runs" \
+              -f branch="$branch" -f event=pull_request -f per_page=100 \
+              --jq ".workflow_runs | map(select(.name == \"$name\" and .status == \"completed\" and .conclusion == \"success\")) | sort_by(.created_at) | last | .id // empty"
+          }
+          prove_jobs() {
+            local run_id=$1 minimum=$2
+            local jobs
+            jobs=$(gh api --method GET "repos/$REPO/actions/runs/$run_id/jobs" -f per_page=100)
+            test "$(printf '%s' "$jobs" | jq '[.jobs[] | select(.conclusion != "success")] | length')" -eq 0
+            test "$(printf '%s' "$jobs" | jq '[.jobs[] | select(.status == "completed" and .conclusion == "success")] | length')" -ge "$minimum"
+          }
+
+          candidate_branch='candidate/release-wheel-integrity-v1-20260823'
+          candidate_sha=$(gh api "repos/$REPO/branches/$(encode "$candidate_branch")" --jq '.commit.sha')
+          candidate_prs=$(gh api --method GET "repos/$REPO/pulls" -f state=all -f head="leon36000:$candidate_branch" -f per_page=100)
+          test "$(printf '%s' "$candidate_prs" | jq 'length')" -eq 1
+          candidate_pr=$(printf '%s' "$candidate_prs" | jq -r '.[0].number')
+          test "$(printf '%s' "$candidate_prs" | jq -r '.[0].state')" = open
+          test "$(printf '%s' "$candidate_prs" | jq -r '.[0].draft')" = true
+          test "$(printf '%s' "$candidate_prs" | jq -r '.[0].head.sha')" = "$candidate_sha"
+          test "$(printf '%s' "$candidate_prs" | jq -r '.[0].base.ref')" = integration/rehearse-green-candidates-v2-20260822
+
+          finalizer_run=$(successful_run bootstrap/finalize-release-wheel-candidate-20260823 'Finalize release wheel reproducibility candidate')
+          verifier_run=$(successful_run bootstrap/verify-release-wheel-candidate-20260823 'Verify immutable release wheel candidate')
+          test -n "$finalizer_run"
+          test -n "$verifier_run"
+          prove_jobs "$finalizer_run" 4
+          prove_jobs "$verifier_run" 4
+
+          printf '%s\n' "$candidate_sha" > /tmp/candidate-sha
+          printf '%s\n' "$candidate_pr" > /tmp/candidate-pr
+          printf '%s\n' "$finalizer_run" > /tmp/finalizer-run
+          printf '%s\n' "$verifier_run" > /tmp/verifier-run
+          printf 'candidate_pr=%s\ncandidate_sha=%s\nfinalizer_run=%s\nverifier_run=%s\n' \
+            "$candidate_pr" "$candidate_sha" "$finalizer_run" "$verifier_run"
+
+      - uses: actions/checkout@v4
+        with:
+          ref: candidate/release-wheel-integrity-v1-20260823
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Independently reproduce one canonical wheel identity
+        env:
+          LC_ALL: C.UTF-8
+          LANG: C.UTF-8
+          PIP_DISABLE_PIP_VERSION_CHECK: '1'
+          PYTHONHASHSEED: '0'
+          SOURCE_DATE_EPOCH: '315532800'
+          TZ: UTC
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$(cat /tmp/candidate-sha)"
+          python -m pip install \
+            'pip==25.2' \
+            'setuptools==80.9.0' \
+            'wheel==0.45.1' \
+            'build==1.3.0'
+          python -m pip install -e '.[dev]'
+          ruff check .
+          python -m compileall -q src scripts
+          python -m pytest -q tests/test_release_wheel_integrity.py
+          python scripts/verify_release_wheel.py > /tmp/verifier.json
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          report = json.loads(Path('/tmp/verifier.json').read_text(encoding='utf-8'))
+          for key in ('reproducible', 'byte_reproducible', 'semantic_reproducible'):
+              if report.get(key) is not True:
+                  raise SystemExit(f'missing reproducibility proof: {key}')
+          PY
+          rm -rf dist build *.egg-info src/*.egg-info
+          python -m build --wheel --no-isolation --outdir dist
+          test "$(find dist -maxdepth 1 -type f -name '*.whl' | wc -l)" -eq 1
+          wheel=$(find dist -maxdepth 1 -type f -name '*.whl')
+          jq -n \
+            --arg candidate_sha "$(cat /tmp/candidate-sha)" \
+            --arg filename "$(basename "$wheel")" \
+            --arg sha256 "$(sha256sum "$wheel" | awk '{print $1}')" \
+            --argjson size "$(stat -c '%s' "$wheel")" \
+            '{candidate_sha:$candidate_sha,filename:$filename,sha256:$sha256,size_bytes:$size}' \
+            > /tmp/wheel-evidence.json
+          cat /tmp/wheel-evidence.json
+
+      - name: Update canonical PR and publish blind Sol packet
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          pr=$(cat /tmp/candidate-pr)
+          sha=$(cat /tmp/candidate-sha)
+          finalizer=$(cat /tmp/finalizer-run)
+          verifier=$(cat /tmp/verifier-run)
+          filename=$(jq -r '.filename' /tmp/wheel-evidence.json)
+          wheel_sha=$(jq -r '.sha256' /tmp/wheel-evidence.json)
+          size=$(jq -r '.size_bytes' /tmp/wheel-evidence.json)
+
+          body=$(cat <<EOF
+          ## Status
+
+          **GREEN / draft / review_pending / unmerged.** Exact immutable candidate SHA: \`$sha\`.
+
+          Base: \`integration/rehearse-green-candidates-v2-20260822\`.
+          Immutable branch: \`candidate/release-wheel-integrity-v1-20260823\`.
+
+          ## Exact surface
+
+          Packaging/release verification only. Required candidate files include \`pyproject.toml\`, \`scripts/verify_release_wheel.py\`, \`tests/test_release_wheel_integrity.py\`, release-wheel workflows and documentation. No runtime \`src/\` file, migration or database behavior is changed.
+
+          ## Verification
+
+          - finalizer run \`$finalizer\`: exact PR #61 head, bounded packaging-only diff, Ruff, compileall, focused/full tests, candidate verifier, fixed-toolchain Python 3.12/3.13 builds and byte comparison all succeeded before immutable branch publication;
+          - independent raw-candidate run \`$verifier\`: exact SHA/surface, Ruff, compileall, focused/full tests and independent fixed-toolchain Python 3.12/3.13 byte comparison all succeeded;
+          - independently rebuilt wheel during evidence consolidation:
+            - filename: \`$filename\`;
+            - SHA-256: \`$wheel_sha\`;
+            - size: \`$size\` bytes;
+          - candidate verifier reports semantic and byte reproducibility true;
+          - no release publication or merge occurred.
+
+          ## Safety
+
+          - no runtime source or migration change;
+          - no corrective-retrieval/Codex source change;
+          - no database access;
+          - no stubs or test weakening;
+          - no fabricated Sol verdict.
+
+          ## Merge rule
+
+          Do not merge until a genuinely independent GPT-5.6 Sol review returns \`APPROVE\` for exact SHA \`$sha\`. Any head movement invalidates all evidence. Integrate only after the base integration candidate and prerequisite stack are approved in order.
+          EOF
+          )
+          gh api --method PATCH "repos/$REPO/pulls/$pr" -f body="$body" >/dev/null
+
+          packet=$(cat <<EOF
+          ## Blind GPT-5.6 Sol review request — byte-reproducible release wheel v1
+
+          Return exactly one verdict: \`APPROVE\`, \`CHANGES_REQUIRED\`, or \`BLOCKED_BY_EVIDENCE\`.
+
+          ### Exact boundary
+
+          - base: \`eada91750b5d577ec452c7f8d1fb72126abb6a54\`;
+          - candidate: \`$sha\`;
+          - immutable branch: \`candidate/release-wheel-integrity-v1-20260823\`;
+          - finalizer run: \`$finalizer\`;
+          - independent verifier run: \`$verifier\`;
+          - any SHA movement invalidates this request.
+
+          ### Task contract
+
+          Make the pure Python release wheel semantically and byte reproducible under a fixed build environment, verify safe archive structure and installation behavior, and add no runtime/migration semantics.
+
+          ### Acceptance criteria
+
+          1. Candidate diff is packaging/workflow/test/documentation only; no \`src/\` or migration changes.
+          2. Fixed \`SOURCE_DATE_EPOCH\`, locale, timezone, hash seed and build toolchain are explicit.
+          3. Independent builds produce identical filename, size, SHA-256 and raw wheel bytes.
+          4. Cross-Python 3.12/3.13 builds are byte-identical under that fixed toolchain.
+          5. METADATA, WHEEL, RECORD and package payload semantics are equal.
+          6. Archive paths are safe, entries unique and exactly one METADATA/WHEEL/RECORD exists.
+          7. Built wheel installs in an isolated environment and exposes the expected package API.
+          8. Verifier report is deterministic/privacy-safe and fails on byte or semantic drift.
+          9. Ruff, compileall, focused/full tests and diff integrity are green.
+          10. No release publication, database access, stub or test weakening.
+
+          ### Exact evidence
+
+          - finalizer \`$finalizer\` and raw verifier \`$verifier\` each completed successfully with Python 3.12 and 3.13 matrix jobs;
+          - both matrices required exact candidate SHA/surface and byte-identical cross-Python artifacts;
+          - independent consolidation build produced \`$filename\`, SHA-256 \`$wheel_sha\`, size \`$size\`;
+          - PR #61 retains TDD/history; this immutable PR is the sole merge-review surface.
+
+          ### Review focus
+
+          - whether timestamps, RECORD ordering, compression metadata, build-tool versions or environment variables remain under-specified;
+          - cross-platform limitations beyond Linux/Python 3.12/3.13;
+          - whether semantic comparison could mask executable payload drift;
+          - wheel install/import checks and package-data coverage;
+          - workflow artifact integrity and candidate-head race protection;
+          - whether pyproject changes alter runtime dependency or compatibility semantics.
+
+          Do not rely on this comment or PR prose as proof. Inspect the exact diff, script, tests, workflows and run logs before issuing a verdict.
+          EOF
+          )
+          gh api "repos/$REPO/issues/$pr/comments" -f body="$packet"
+          gh api "repos/$REPO/issues/23/comments" -f body="$packet"
+
+      - name: Close superseded PRs and this evidence PR without merge
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SELF_PR: ${{ github.event.pull_request.number }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh api --method PATCH "repos/$REPO/pulls/61" -f state=closed >/dev/null
+          pulls=$(gh api --method GET "repos/$REPO/pulls" -f state=open -f per_page=100)
+          for head in \
+            bootstrap/finalize-release-wheel-candidate-20260823 \
+            bootstrap/verify-release-wheel-candidate-20260823; do
+            number=$(printf '%s' "$pulls" | jq -r --arg head "$head" '.[] | select(.head.ref == $head) | .number' | head -1)
+            if [ -n "$number" ]; then
+              gh api --method PATCH "repos/$REPO/pulls/$number" -f state=closed >/dev/null
+            fi
+          done
+          gh api --method PATCH "repos/$REPO/pulls/$SELF_PR" -f state=closed >/dev/null
