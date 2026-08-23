@@ -6,6 +6,7 @@ import zipfile
 from pathlib import Path
 
 import pytest
+import scripts.verify_release_wheel as release_wheel
 from scripts.verify_release_wheel import (
     WheelInspectionReport,
     WheelValidationError,
@@ -159,11 +160,9 @@ def test_inspector_rejects_wrong_metadata_identity(
         "nextgen_memory\\windows.py",
         "nextgen_memory//double.py",
         "nextgen_memory/./dot.py",
-        "nextgen_memory/nul\x00.py",
-        "",
     ],
 )
-def test_inspector_rejects_noncanonical_archive_names(
+def test_inspector_rejects_representable_noncanonical_archive_names(
     tmp_path: Path,
     unsafe_name: str,
 ) -> None:
@@ -176,11 +175,33 @@ def test_inspector_rejects_noncanonical_archive_names(
         inspect(wheel)
 
 
-def test_inspector_rejects_duplicate_archive_members(tmp_path: Path) -> None:
+@pytest.mark.parametrize("unsafe_name", ["", "nextgen_memory/nul\x00.py"])
+def test_member_name_validator_rejects_empty_or_nul_name(unsafe_name: str) -> None:
+    with pytest.raises(WheelValidationError, match="archive member name"):
+        release_wheel._validate_archive_name(unsafe_name)
+
+
+def test_inspector_rejects_raw_nul_archive_name(tmp_path: Path) -> None:
     wheel = write_wheel(
-        tmp_path / "duplicate.whl",
-        duplicate=("nextgen_memory/domain.py", "SECOND = True\n"),
+        tmp_path / "raw-nul.whl",
+        members={"nextgen_memory/nulX.py": "unsafe"},
     )
+    source_name = b"nextgen_memory/nulX.py"
+    target_name = b"nextgen_memory/nul\x00.py"
+    raw = wheel.read_bytes()
+    assert raw.count(source_name) == 2
+    wheel.write_bytes(raw.replace(source_name, target_name))
+
+    with pytest.raises(WheelValidationError, match="archive member name"):
+        inspect(wheel)
+
+
+def test_inspector_rejects_duplicate_archive_members(tmp_path: Path) -> None:
+    with pytest.warns(UserWarning, match="Duplicate name"):
+        wheel = write_wheel(
+            tmp_path / "duplicate.whl",
+            duplicate=("nextgen_memory/domain.py", "SECOND = True\n"),
+        )
 
     with pytest.raises(WheelValidationError, match="duplicate"):
         inspect(wheel)
@@ -373,17 +394,31 @@ def test_required_module_does_not_accept_unrelated_prefix(tmp_path: Path) -> Non
         inspect(wheel, "nextgen_memory.domain")
 
 
-def test_inspector_rejects_missing_input(tmp_path: Path) -> None:
-    with pytest.raises(WheelValidationError, match="regular wheel file"):
-        inspect(tmp_path / "missing.whl")
+@pytest.mark.parametrize(
+    ("kind", "message"),
+    [
+        ("missing", "regular wheel file"),
+        ("directory", "regular wheel file"),
+        ("non-wheel", r"\.whl"),
+        ("invalid-zip", "valid ZIP"),
+    ],
+)
+def test_inspector_rejects_invalid_input_boundaries(
+    tmp_path: Path,
+    kind: str,
+    message: str,
+) -> None:
+    path = tmp_path / "artifact.whl"
+    if kind == "directory":
+        path.mkdir()
+    elif kind == "non-wheel":
+        path = tmp_path / "artifact.zip"
+        path.write_bytes(b"not-a-wheel")
+    elif kind == "invalid-zip":
+        path.write_bytes(b"not-a-zip")
 
-
-def test_inspector_rejects_directory_input(tmp_path: Path) -> None:
-    directory = tmp_path / "directory.whl"
-    directory.mkdir()
-
-    with pytest.raises(WheelValidationError, match="regular wheel file"):
-        inspect(directory)
+    with pytest.raises(WheelValidationError, match=message):
+        inspect(path)
 
 
 def test_inspector_rejects_symlink_input(tmp_path: Path) -> None:
@@ -396,22 +431,6 @@ def test_inspector_rejects_symlink_input(tmp_path: Path) -> None:
 
     with pytest.raises(WheelValidationError, match="non-symlink"):
         inspect(link)
-
-
-def test_inspector_rejects_non_wheel_suffix(tmp_path: Path) -> None:
-    path = tmp_path / "archive.zip"
-    path.write_bytes(b"not-a-wheel")
-
-    with pytest.raises(WheelValidationError, match="\.whl"):
-        inspect(path)
-
-
-def test_inspector_rejects_invalid_zip(tmp_path: Path) -> None:
-    path = tmp_path / "invalid.whl"
-    path.write_bytes(b"not-a-zip")
-
-    with pytest.raises(WheelValidationError, match="valid ZIP"):
-        inspect(path)
 
 
 def test_report_member_evidence_is_sorted_and_bounded(tmp_path: Path) -> None:
