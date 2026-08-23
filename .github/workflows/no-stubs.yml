@@ -9,6 +9,7 @@ on:
       - "tests/test_no_stubs_workflow.py"
       - "tests/test_no_stubs_exception_shadowing.py"
       - "tests/test_no_stubs_protocol_shadowing.py"
+      - "tests/test_no_stubs_lexical_hardening.py"
       - ".github/workflows/no-stubs.yml"
 
 permissions:
@@ -30,10 +31,10 @@ jobs:
       - name: Install project and development tools
         run: python -m pip install -e '.[dev]'
       - name: Focused scanner contracts
-        run: python -m pytest -q tests/test_no_stubs.py tests/test_no_stubs_workflow.py tests/test_no_stubs_exception_shadowing.py tests/test_no_stubs_protocol_shadowing.py
+        run: python -m pytest -q tests/test_no_stubs.py tests/test_no_stubs_workflow.py tests/test_no_stubs_exception_shadowing.py tests/test_no_stubs_protocol_shadowing.py tests/test_no_stubs_lexical_hardening.py
       - name: Scan production source
         run: python scripts/verify_no_stubs.py src
       - name: Static integrity
         run: |
-          ruff check scripts/verify_no_stubs.py tests/test_no_stubs.py tests/test_no_stubs_workflow.py tests/test_no_stubs_exception_shadowing.py tests/test_no_stubs_protocol_shadowing.py
+          ruff check scripts/verify_no_stubs.py tests/test_no_stubs.py tests/test_no_stubs_workflow.py tests/test_no_stubs_exception_shadowing.py tests/test_no_stubs_protocol_shadowing.py tests/test_no_stubs_lexical_hardening.py
           python -m compileall -q src scripts
