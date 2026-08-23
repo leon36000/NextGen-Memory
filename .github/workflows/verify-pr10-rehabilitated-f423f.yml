@@ -16,11 +16,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: f423f5e441e832c4f6b8f92c32f76092daa15527
+          ref: e8b074f017b69723832650b915cf23d245d33d4c
           fetch-depth: 0
       - name: Prove exact checkout and stack
         run: |
-          test "$(git rev-parse HEAD)" = "f423f5e441e832c4f6b8f92c32f76092daa15527"
+          test "$(git rev-parse HEAD)" = "e8b074f017b69723832650b915cf23d245d33d4c"
           test "$(git merge-base HEAD 4dde625a2c8af82f5f36dc3923bf86debbb4dd5b)" = "4dde625a2c8af82f5f36dc3923bf86debbb4dd5b"
           mapfile -t changed < <(git diff --name-only 4dde625a2c8af82f5f36dc3923bf86debbb4dd5b...HEAD | sort)
           expected=(
