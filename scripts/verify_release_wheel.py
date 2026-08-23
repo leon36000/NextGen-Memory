@@ -9,11 +9,15 @@ import re
 import stat
 import zipfile
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from email.parser import BytesParser
 from pathlib import Path, PurePosixPath
 
 _DISTRIBUTION_SEPARATOR = re.compile(r"[-_.]+")
 _MODULE_COMPONENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_SOURCE_DATE_EPOCH = re.compile(r"0|[1-9][0-9]*")
+_ZIP_MINIMUM_EPOCH = 315532800
+_ZIP_MAXIMUM_YEAR = 2107
 
 _FORBIDDEN_COMPONENTS = frozenset(
     {
@@ -36,6 +40,24 @@ _FORBIDDEN_SUFFIXES = frozenset({".crt", ".der", ".key", ".p12", ".pem", ".pyc",
 
 class WheelValidationError(ValueError):
     """The wheel is malformed, unsafe, or incompatible with the expected release."""
+
+
+class WheelReproducibilityError(ValueError):
+    """Two safe wheels failed a required byte-reproducibility comparison."""
+
+    __slots__ = ("report",)
+
+    def __init__(self, report: WheelReproducibilityReport) -> None:
+        super().__init__("wheel reproducibility requirement failed")
+        self.report = report
+
+    def to_safe_dict(self) -> dict[str, object]:
+        payload = self.report.to_safe_dict()
+        payload["error_class"] = "wheel_reproducibility_error"
+        return payload
+
+    def to_json(self) -> str:
+        return _canonical_json(self.to_safe_dict())
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,6 +113,49 @@ class WheelInspectionReport:
             "wheel_metadata_sha256": self.wheel_metadata_sha256,
             "wheel_sha256": self.wheel_sha256,
             "wheel_size_bytes": self.wheel_size_bytes,
+        }
+
+    def to_json(self) -> str:
+        return _canonical_json(self.to_safe_dict())
+
+
+@dataclass(frozen=True, slots=True)
+class WheelMemberDifference:
+    """Bounded evidence for one member that differs across safe wheels."""
+
+    name: str
+    left: WheelMemberEvidence | None
+    right: WheelMemberEvidence | None
+
+    def to_safe_dict(self) -> dict[str, object]:
+        return {
+            "left": self.left.to_safe_dict() if self.left is not None else None,
+            "name": self.name,
+            "right": self.right.to_safe_dict() if self.right is not None else None,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class WheelReproducibilityReport:
+    """Separate exact-byte and semantic equality for two validated wheels."""
+
+    left_filename: str
+    right_filename: str
+    left_sha256: str
+    right_sha256: str
+    byte_reproducible: bool
+    semantic_reproducible: bool
+    differences: tuple[WheelMemberDifference, ...]
+
+    def to_safe_dict(self) -> dict[str, object]:
+        return {
+            "byte_reproducible": self.byte_reproducible,
+            "differences": [difference.to_safe_dict() for difference in self.differences],
+            "left_filename": self.left_filename,
+            "left_sha256": self.left_sha256,
+            "right_filename": self.right_filename,
+            "right_sha256": self.right_sha256,
+            "semantic_reproducible": self.semantic_reproducible,
         }
 
     def to_json(self) -> str:
@@ -162,6 +227,78 @@ def inspect_wheel(
         record_sha256=hashlib.sha256(payload_by_name[record_name]).hexdigest(),
         members=evidence,
     )
+
+
+def compare_wheels(
+    left: Path,
+    right: Path,
+    *,
+    expected_name: str,
+    expected_version: str,
+    required_modules: tuple[str, ...],
+    require_byte_reproducible: bool = True,
+) -> WheelReproducibilityReport:
+    """Compare two independently validated wheels without exposing their contents."""
+
+    if not isinstance(require_byte_reproducible, bool):
+        raise ValueError("require_byte_reproducible must be a boolean")
+    left_path = Path(left)
+    right_path = Path(right)
+    left_report = inspect_wheel(
+        left_path,
+        expected_name=expected_name,
+        expected_version=expected_version,
+        required_modules=required_modules,
+    )
+    right_report = inspect_wheel(
+        right_path,
+        expected_name=expected_name,
+        expected_version=expected_version,
+        required_modules=required_modules,
+    )
+
+    left_members = {member.name: member for member in left_report.members}
+    right_members = {member.name: member for member in right_report.members}
+    differences = tuple(
+        WheelMemberDifference(
+            name=name,
+            left=left_members.get(name),
+            right=right_members.get(name),
+        )
+        for name in sorted(left_members.keys() | right_members.keys())
+        if left_members.get(name) != right_members.get(name)
+    )
+    byte_reproducible = _files_equal(left_path, right_path)
+    semantic_reproducible = _semantic_signature(left_report) == _semantic_signature(
+        right_report
+    )
+    report = WheelReproducibilityReport(
+        left_filename=left_path.name,
+        right_filename=right_path.name,
+        left_sha256=left_report.wheel_sha256,
+        right_sha256=right_report.wheel_sha256,
+        byte_reproducible=byte_reproducible,
+        semantic_reproducible=semantic_reproducible,
+        differences=differences,
+    )
+    if require_byte_reproducible and not byte_reproducible:
+        raise WheelReproducibilityError(report)
+    return report
+
+
+def validate_source_date_epoch(value: str) -> int:
+    """Validate one canonical ZIP-compatible SOURCE_DATE_EPOCH value."""
+
+    if not isinstance(value, str) or _SOURCE_DATE_EPOCH.fullmatch(value) is None:
+        raise ValueError("source date epoch is invalid")
+    try:
+        epoch = int(value)
+        timestamp = datetime.fromtimestamp(epoch, timezone.utc)
+    except (OverflowError, OSError, ValueError) as exc:
+        raise ValueError("source date epoch is invalid") from exc
+    if epoch < _ZIP_MINIMUM_EPOCH or timestamp.year > _ZIP_MAXIMUM_YEAR:
+        raise ValueError("source date epoch is not ZIP-compatible")
+    return epoch
 
 
 def _validate_input_path(path: Path) -> None:
@@ -300,6 +437,28 @@ def _validate_required_modules(
         relative = module.replace(".", "/")
         if f"{relative}.py" not in names and f"{relative}/__init__.py" not in names:
             raise WheelValidationError("wheel is missing a required module")
+
+
+def _semantic_signature(report: WheelInspectionReport) -> tuple[object, ...]:
+    return (
+        report.distribution,
+        report.version,
+        report.required_modules,
+        tuple((member.name, member.size, member.sha256) for member in report.members),
+    )
+
+
+def _files_equal(left: Path, right: Path) -> bool:
+    if left.stat().st_size != right.stat().st_size:
+        return False
+    with left.open("rb") as left_stream, right.open("rb") as right_stream:
+        while True:
+            left_chunk = left_stream.read(1024 * 1024)
+            right_chunk = right_stream.read(1024 * 1024)
+            if left_chunk != right_chunk:
+                return False
+            if not left_chunk:
+                return True
 
 
 def _sha256_file(path: Path) -> str:
