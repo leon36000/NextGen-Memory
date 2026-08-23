@@ -75,16 +75,25 @@ jobs:
               '0005_causal_credit_feedback': ['0003_research_sources_seed'],
               '0006_action_memory_usage_events': ['0005_causal_credit_feedback'],
           }
-          actual_paths = sorted(path.as_posix() for path in Path('migrations/neon').glob('*.sql'))
+          actual_paths = sorted(
+              path.as_posix()
+              for path in Path('migrations/neon').glob('*.sql')
+          )
           manifest_paths = []
-          positions = {migration_id: index for index, migration_id in enumerate(ids)}
+          positions = {
+              migration_id: index
+              for index, migration_id in enumerate(ids)
+          }
           for index, entry in enumerate(migrations):
               if set(entry) != {'depends_on', 'id', 'path', 'sha256'}:
                   raise SystemExit('unexpected migration entry fields')
               migration_id = entry['id']
               path_text = entry['path']
               pure_path = PurePosixPath(path_text)
-              if pure_path.as_posix() != path_text or pure_path.parts[:2] != ('migrations', 'neon'):
+              if (
+                  pure_path.as_posix() != path_text
+                  or pure_path.parts[:2] != ('migrations', 'neon')
+              ):
                   raise SystemExit(f'noncanonical path: {path_text}')
               path = Path(path_text)
               if path.is_symlink() or not path.is_file():
@@ -97,12 +106,46 @@ jobs:
               dependencies = entry['depends_on']
               if dependencies != expected_dependencies[migration_id]:
                   raise SystemExit(f'unexpected dependencies: {migration_id}')
-              if any(positions[dependency] >= index for dependency in dependencies):
+              if any(
+                  positions[dependency] >= index
+                  for dependency in dependencies
+              ):
                   raise SystemExit(f'nonprior dependency: {migration_id}')
               manifest_paths.append(path_text)
           if sorted(manifest_paths) != actual_paths:
-              raise SystemExit('manifest does not cover every SQL file exactly once')
-          print(json.dumps({'ids': ids, 'hashes': [entry['sha256'] for entry in migrations]}, sort_keys=True))
+              raise SystemExit(
+                  'manifest does not cover every SQL file exactly once'
+              )
+
+          plan_payload = {
+              'manifest_path': 'migrations/neon/manifest.json',
+              'manifest_version': document['manifest_version'],
+              'migration_count': len(migrations),
+              'migrations': migrations,
+              'schema': document['schema'],
+          }
+          canonical_plan = json.dumps(
+              plan_payload,
+              ensure_ascii=False,
+              allow_nan=False,
+              sort_keys=True,
+              separators=(',', ':'),
+          ).encode('utf-8')
+          independent_plan_hash = hashlib.sha256(canonical_plan).hexdigest()
+          Path('/tmp/independent-plan-hash.txt').write_text(
+              independent_plan_hash + '\n',
+              encoding='utf-8',
+          )
+          print(
+              json.dumps(
+                  {
+                      'hashes': [entry['sha256'] for entry in migrations],
+                      'ids': ids,
+                      'independent_plan_hash': independent_plan_hash,
+                  },
+                  sort_keys=True,
+              )
+          )
           PY
       - uses: actions/setup-python@v5
         with:
@@ -113,11 +156,14 @@ jobs:
           python -m pip install -e '.[dev]'
           ruff check .
           python -m compileall -q src scripts
-      - name: Focused manifest contract
+      - name: Focused manifest contract and independent plan identity
         run: |
           python -m pytest -q tests/test_neon_migration_manifest.py
           plan="$(python scripts/neon_migration_manifest.py)"
-          test "$(printf '%s' "$plan" | python -c 'import json,sys; print(json.load(sys.stdin)["plan_hash"])')" = "3b2b22af19dd3cf7812fe2fc8548b33bbef90568567c7c0666e3253fcc4e3075"
+          parser_hash="$(printf '%s' "$plan" | python -c 'import json,sys; print(json.load(sys.stdin)["plan_hash"])')"
+          independent_hash="$(cat /tmp/independent-plan-hash.txt)"
+          test "$parser_hash" = "$independent_hash"
+          test "${#parser_hash}" -eq 64
           if printf '%s' "$plan" | grep -Eqi 'CREATE |ALTER |DROP |password|secret|token|dsn|connection'; then
             echo 'safe plan leaked SQL or connection material' >&2
             exit 1
