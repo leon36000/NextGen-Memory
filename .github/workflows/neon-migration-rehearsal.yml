@@ -24,7 +24,7 @@ jobs:
 
     services:
       postgres:
-        image: postgres:18
+        image: pgvector/pgvector:0.8.6-pg18-bookworm
         env:
           POSTGRES_DB: nextgen_migration_rehearsal
           POSTGRES_USER: postgres
