@@ -47,21 +47,40 @@ jobs:
           PY
           rm .github/workflows/fix-runner-direct-import-once.yml
 
-      - name: Prove direct script reaches main without import failure
+      - name: Prove direct CLI reaches bounded runner failure
         run: |
           set +e
           env -i PATH="$PATH" HOME="$HOME" \
+            PGDATABASE=synthetic_direct_invocation \
+            PGHOST=127.0.0.1 \
+            PGPASSWORD=synthetic-direct-password \
+            PGPORT=1 \
+            PGUSER=postgres \
             python scripts/neon_migration_runner.py \
             >/tmp/runner-direct-out.txt 2>/tmp/runner-direct-error.txt
           rc=$?
           set -e
-          test "$rc" -ne 0
+          test "$rc" -eq 1
+          test ! -s /tmp/runner-direct-out.txt
           if grep -q 'ModuleNotFoundError' /tmp/runner-direct-error.txt; then
             cat /tmp/runner-direct-error.txt >&2
             exit 1
           fi
-          grep -q 'environment is missing required PostgreSQL variables' \
-            /tmp/runner-direct-error.txt
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          payload = json.loads(
+              Path('/tmp/runner-direct-error.txt').read_text(encoding='utf-8')
+          )
+          if payload != {
+              'exit_class': 'nonzero_exit',
+              'migration_id': '0001_memory_moe_kernel',
+              'migration_path': 'migrations/neon/0001_memory_moe_kernel.sql',
+              'pass_number': 1,
+          }:
+              raise SystemExit(f'unexpected bounded direct-CLI error: {payload!r}')
+          PY
           if grep -Eqi 'password|secret|token|dsn|connection' \
             /tmp/runner-direct-out.txt /tmp/runner-direct-error.txt; then
             echo 'direct invocation error leaked forbidden connection material' >&2
