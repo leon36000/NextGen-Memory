@@ -6,7 +6,6 @@ import zipfile
 from pathlib import Path
 
 import pytest
-
 from scripts.verify_release_wheel import (
     WheelInspectionReport,
     WheelValidationError,
