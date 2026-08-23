@@ -141,8 +141,8 @@ def test_workflow_uploads_only_bounded_release_evidence_for_seven_days() -> None
     assert "if-no-files-found: error" in workflow
     assert "retention-days: 7" in workflow
     for artifact in (
-        "wheel-a.whl",
-        "wheel-b.whl",
+        "wheel-a/*.whl",
+        "wheel-b/*.whl",
         "inspection-a.json",
         "inspection-b.json",
         "same-interpreter-comparison.json",
