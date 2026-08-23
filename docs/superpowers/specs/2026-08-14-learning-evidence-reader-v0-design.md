@@ -1,7 +1,7 @@
 # Learning Evidence Reader v0 Design
 
-**Date:** 2026-08-14  
-**Status:** approved under the project owner's standing architecture delegation  
+**Date:** 2026-08-14
+**Status:** approved under the project owner's standing architecture delegation
 **Base:** `feat/inherited-credit-ledger-v0`
 
 ## 1. Goal
