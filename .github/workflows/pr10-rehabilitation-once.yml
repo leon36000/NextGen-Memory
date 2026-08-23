@@ -1,4 +1,4 @@
-name: PR 10 exact-stack rehabilitation
+name: PR 10 exact-stack root-cause repair
 
 on:
   pull_request:
@@ -7,7 +7,7 @@ permissions:
   contents: write
 
 jobs:
-  diagnose-and-repair:
+  repair-and-verify:
     if: github.event.pull_request.head.ref == 'fix/pr10-ci-rehabilitation-20260822'
     runs-on: ubuntu-latest
     steps:
@@ -15,76 +15,102 @@ jobs:
         with:
           ref: fix/pr10-ci-rehabilitation-20260822
           fetch-depth: 0
+
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
           cache: pip
-      - name: Prove exact stack
+
+      - name: Prove exact stack and unresolved root cause
         run: |
           test "$(git merge-base HEAD 4dde625a2c8af82f5f36dc3923bf86debbb4dd5b)" = "4dde625a2c8af82f5f36dc3923bf86debbb4dd5b"
-          test "$(git rev-parse HEAD^)" = "22284e3b0928f270f4e862f563dfe79fee42d434" || true
+          grep -Fx 'from collections.abc import ContextManager, Iterable, Mapping, Sequence' \
+            src/nextgen_memory/neon_execution_ledger.py
+          grep -Fx '    def transaction(self) -> ContextManager[Any]: ...' \
+            src/nextgen_memory/neon_execution_ledger.py
+          grep -Fx '    def __init__(self, connection: "FakeConnection") -> None:' \
+            tests/test_neon_execution_ledger.py
+
+      - name: Apply the two proven compatibility corrections
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          module = Path('src/nextgen_memory/neon_execution_ledger.py')
+          source = module.read_text(encoding='utf-8')
+          old_import = (
+              'from collections.abc import ContextManager, Iterable, Mapping, Sequence\n'
+          )
+          new_import = (
+              'from collections.abc import Iterable, Mapping, Sequence\n'
+              'from contextlib import AbstractContextManager\n'
+          )
+          old_protocol = '    def transaction(self) -> ContextManager[Any]: ...\n'
+          new_protocol = (
+              '    def transaction(self) -> AbstractContextManager[Any]: ...\n'
+          )
+          if source.count(old_import) != 1 or source.count(old_protocol) != 1:
+              raise SystemExit('unexpected execution-ledger adapter structure')
+          source = source.replace(old_import, new_import, 1)
+          source = source.replace(old_protocol, new_protocol, 1)
+          module.write_text(source, encoding='utf-8')
+
+          tests = Path('tests/test_neon_execution_ledger.py')
+          test_source = tests.read_text(encoding='utf-8')
+          old_annotation = (
+              '    def __init__(self, connection: "FakeConnection") -> None:\n'
+          )
+          new_annotation = (
+              '    def __init__(self, connection: FakeConnection) -> None:\n'
+          )
+          if test_source.count(old_annotation) != 1:
+              raise SystemExit('unexpected FakeTransaction annotation structure')
+          tests.write_text(
+              test_source.replace(old_annotation, new_annotation, 1),
+              encoding='utf-8',
+          )
+          PY
+
+      - name: Prove bounded repair surface and no weakening
+        run: |
+          mapfile -t changed < <(git diff --name-only | sort)
+          expected=(
+            src/nextgen_memory/neon_execution_ledger.py
+            tests/test_neon_execution_ledger.py
+          )
+          test "${#changed[@]}" -eq "${#expected[@]}"
+          diff -u <(printf '%s\n' "${expected[@]}" | sort) \
+            <(printf '%s\n' "${changed[@]}")
+          if git diff | grep -E '^[-+].*(pass$|NotImplementedError|pytest\.skip|pytest\.mark\.xfail|# noqa)'; then
+            echo 'forbidden test or implementation weakening detected' >&2
+            exit 1
+          fi
+          git diff --check
+
       - name: Install project and development tools
         run: python -m pip install -e '.[dev]'
-      - name: Capture baseline
-        id: baseline
-        shell: bash
+
+      - name: Focused execution-ledger adapter verification
         run: |
-          set +e
-          ruff check . > /tmp/ruff-before.txt 2>&1
-          ruff_rc=$?
-          python -m pytest -q > /tmp/pytest-before.txt 2>&1
-          pytest_rc=$?
-          set -e
-          echo "ruff_rc=$ruff_rc" >> "$GITHUB_OUTPUT"
-          echo "pytest_rc=$pytest_rc" >> "$GITHUB_OUTPUT"
-          printf 'baseline ruff=%s pytest=%s\n' "$ruff_rc" "$pytest_rc"
-          tail -n 160 /tmp/ruff-before.txt || true
-          tail -n 160 /tmp/pytest-before.txt || true
-      - name: Apply only Ruff-safe fixes to PR-owned Python files
-        if: steps.baseline.outputs.ruff_rc != '0'
-        shell: bash
-        run: |
-          mapfile -t files < <(git diff --name-only 4dde625a2c8af82f5f36dc3923bf86debbb4dd5b...HEAD -- '*.py')
-          test "${#files[@]}" -gt 0
-          printf '%s\n' "${files[@]}"
-          ruff check --fix -- "${files[@]}"
-          git diff --check
-      - name: Reject semantic or scope-expanding automatic edits
-        shell: bash
-        run: |
-          changed=$(git diff --name-only)
-          if [ -n "$changed" ]; then
-            printf '%s\n' "$changed"
-            while IFS= read -r path; do
-              case "$path" in
-                *.py) ;;
-                *) echo "automatic repair touched non-Python path: $path" >&2; exit 1 ;;
-              esac
-              git diff -- "$path" | grep -E '^[-+].*(pass$|NotImplementedError|pytest\.skip|pytest\.mark\.xfail|# noqa)' && {
-                echo "forbidden weakening detected in $path" >&2
-                exit 1
-              } || true
-            done <<< "$changed"
-          fi
-      - name: Verify candidate after mechanical repair
-        shell: bash
+          python -m pytest -q \
+            tests/test_neon_execution_ledger.py \
+            tests/test_neon_execution_ledger_sql_contract.py
+
+      - name: Repository-wide verification
         run: |
           ruff check .
-          python -m pytest -q
           python -m compileall -q src
+          python -m pytest -q
           git diff --check
-      - name: Remove transport workflow
-        run: rm .github/workflows/pr10-rehabilitation-once.yml
-      - name: Commit only a fully verified mechanical repair
-        shell: bash
+
+      - name: Remove one-shot workflow and commit verified repair
         run: |
-          git add -u .github/workflows
-          git add -u
-          if git diff --cached --quiet; then
-            echo 'PR 10 exact head is already green; no repair commit required.'
-            exit 0
-          fi
+          rm .github/workflows/pr10-rehabilitation-once.yml
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git commit -m 'fix: rehabilitate Neon ledger adapter CI mechanically'
+          git add src/nextgen_memory/neon_execution_ledger.py \
+            tests/test_neon_execution_ledger.py
+          git add -u .github/workflows
+          git diff --cached --check
+          git commit -m 'fix: use a valid execution-ledger context manager protocol'
           git push origin HEAD:fix/pr10-ci-rehabilitation-20260822
