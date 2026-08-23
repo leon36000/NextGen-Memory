@@ -1,0 +1,191 @@
+name: Finalize Neon migration runner on PostgreSQL 18
+
+on:
+  pull_request:
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+jobs:
+  finalize:
+    if: github.event.pull_request.head.ref == 'fix/neon-migration-runner-live-green-20260823'
+    runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_DB: nextgen_runner
+          POSTGRES_PASSWORD: synthetic-runner-password
+          POSTGRES_USER: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d nextgen_runner"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/neon-migration-runner-live-green-20260823
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Install PostgreSQL 18 client
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo install -d /usr/share/postgresql-common/pgdg
+          sudo curl --fail --silent --show-error \
+            -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
+            https://www.postgresql.org/media/keys/ACCC4CF8.asc
+          . /etc/os-release
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt ${VERSION_CODENAME}-pgdg main" \
+            | sudo tee /etc/apt/sources.list.d/pgdg.list >/dev/null
+          sudo apt-get update -q
+          sudo apt-get install -y --no-install-recommends postgresql-client-18
+          sudo ln -sf /usr/lib/postgresql/18/bin/psql /usr/bin/psql
+          sudo ln -sf /usr/lib/postgresql/18/bin/pg_dump /usr/bin/pg_dump
+          psql --version | grep -E '^psql \(PostgreSQL\) 18\.'
+          pg_dump --version | grep -E '^pg_dump \(PostgreSQL\) 18\.'
+      - name: Remove obsolete transport workflows from candidate tree
+        run: |
+          rm -f \
+            .github/workflows/normalize-runner-red-once.yml \
+            .github/workflows/runner-strenum-and-test-once.yml
+      - name: Install project and development tools
+        run: python -m pip install -e '.[dev]'
+      - name: Focused pure runner and manifest contracts
+        run: |
+          ruff check \
+            scripts/neon_migration_manifest.py \
+            scripts/neon_migration_runner.py \
+            tests/test_neon_migration_manifest.py \
+            tests/test_neon_migration_runner.py
+          python -m pytest -q \
+            tests/test_neon_migration_manifest.py \
+            tests/test_neon_migration_runner.py
+      - name: Repository verification before live database
+        run: |
+          ruff check .
+          python -m compileall -q src scripts
+          python -m pytest -q
+          git diff --check 97a537cdba2e81385088b57bb02987fedb0aff14...HEAD
+      - name: Execute deterministic two-pass rehearsal twice on PostgreSQL 18
+        env:
+          PGDATABASE: nextgen_runner
+          PGHOST: 127.0.0.1
+          PGPASSWORD: synthetic-runner-password
+          PGPORT: '5432'
+          PGUSER: postgres
+        shell: bash
+        run: |
+          set -euo pipefail
+          psql -X --no-psqlrc -v ON_ERROR_STOP=1 --command 'SELECT version();'
+          python scripts/neon_migration_runner.py > /tmp/rehearsal-1.json
+          python scripts/neon_migration_runner.py > /tmp/rehearsal-2.json
+          cmp /tmp/rehearsal-1.json /tmp/rehearsal-2.json
+          python - <<'PY'
+          from __future__ import annotations
+
+          import json
+          from pathlib import Path
+
+          from scripts.neon_migration_manifest import load_manifest
+
+          root = Path.cwd()
+          report = json.loads(Path('/tmp/rehearsal-1.json').read_text(encoding='utf-8'))
+          manifest = load_manifest(root)
+          if report['stable'] is not True:
+              raise SystemExit('live report is not stable')
+          if report['pass_count'] != 2:
+              raise SystemExit('live report did not execute two passes')
+          if report['migration_count'] != len(manifest.migrations):
+              raise SystemExit('live report migration count differs from manifest')
+          if report['manifest_plan_hash'] != manifest.plan_hash:
+              raise SystemExit('live report plan hash differs from manifest')
+          if report['pass_one'] != report['pass_two']:
+              raise SystemExit('semantic state changed between passes')
+          if not report['pass_one']['table_counts']:
+              raise SystemExit('live report did not enumerate ngm table counts')
+          for key in ('schema_sha256', 'schema_meta_sha256'):
+              value = report['pass_one'][key]
+              if not isinstance(value, str) or len(value) != 64:
+                  raise SystemExit(f'invalid semantic digest: {key}')
+          print(json.dumps(report, sort_keys=True, separators=(',', ':')))
+          PY
+          if grep -Eqi \
+            'synthetic-runner-password|CREATE |ALTER |DROP |SELECT |postgresql://|password|secret|token|dsn|connection' \
+            /tmp/rehearsal-1.json; then
+            echo 'privacy-safe report contains forbidden runtime or SQL material' >&2
+            exit 1
+          fi
+      - name: Prove final live schema and idempotent counts
+        env:
+          PGDATABASE: nextgen_runner
+          PGHOST: 127.0.0.1
+          PGPASSWORD: synthetic-runner-password
+          PGPORT: '5432'
+          PGUSER: postgres
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(psql -X --no-psqlrc -Atq -v ON_ERROR_STOP=1 --command "SELECT count(*) FROM pg_catalog.pg_tables WHERE schemaname='ngm';")" -gt 0
+          test "$(psql -X --no-psqlrc -Atq -v ON_ERROR_STOP=1 --command "SELECT count(*) FROM ngm.schema_meta;")" -gt 0
+          psql -X --no-psqlrc -Atq -v ON_ERROR_STOP=1 --command \
+            "SELECT schema_key || ':' || schema_version FROM ngm.schema_meta ORDER BY schema_key;" \
+            > /tmp/schema-meta-safe.txt
+          if grep -Eqi 'password|secret|token|dsn|connection' /tmp/schema-meta-safe.txt; then
+            echo 'schema metadata keys/versions contain forbidden runtime material' >&2
+            exit 1
+          fi
+      - name: Remove one-shot workflow and reverify final tree
+        run: |
+          rm .github/workflows/finalize-neon-runner-postgres18-once.yml
+          ruff check .
+          python -m compileall -q src scripts
+          python -m pytest -q
+          git diff --check 97a537cdba2e81385088b57bb02987fedb0aff14...HEAD
+      - name: Commit and publish immutable candidate only after all proofs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          if git diff --cached --quiet; then
+            git commit --allow-empty -m 'chore: certify Neon runner PostgreSQL 18 rehearsal'
+          else
+            git commit -m 'fix: finalize deterministic Neon migration runner'
+          fi
+          candidate_sha=$(git rev-parse HEAD)
+          git push origin HEAD:fix/neon-migration-runner-live-green-20260823
+          if git ls-remote --exit-code --heads origin candidate/neon-migration-runner-v1-20260823; then
+            echo 'immutable candidate branch already exists; refusing overwrite' >&2
+            exit 1
+          fi
+          git push origin HEAD:refs/heads/candidate/neon-migration-runner-v1-20260823
+          body=$(cat <<EOF
+          ## PostgreSQL 18 GREEN candidate produced
+
+          - exact candidate SHA: \`$candidate_sha\`
+          - immutable candidate branch: \`candidate/neon-migration-runner-v1-20260823\`
+          - focused manifest/runner contracts: passed
+          - repository Ruff, compileall, full pytest and diff-check: passed
+          - PostgreSQL client/server: 18
+          - canonical manifest applied twice per rehearsal, two complete rehearsals byte-identical
+          - semantic schema dump hash, all ngm table counts and timestamp-free schema_meta hash stable
+          - report privacy scan: passed
+          - production database writes: none
+
+          Exact-SHA Python 3.12/3.13 verification and blind GPT-5.6 Sol review remain required before merge.
+          EOF
+          )
+          gh api repos/${{ github.repository }}/issues/82/comments -f body="$body"
+          gh api repos/${{ github.repository }}/issues/71/comments -f body="$body"
