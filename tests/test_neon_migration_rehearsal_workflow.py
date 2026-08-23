@@ -42,10 +42,11 @@ def test_workflow_exists_with_read_only_permissions_and_exact_path_filters() -> 
     assert paths == EXPECTED_PATH_FILTERS
 
 
-def test_workflow_uses_synthetic_postgresql_18_and_no_repository_secret() -> None:
+def test_workflow_uses_pinned_pgvector_postgresql_18_without_repository_secret() -> None:
     text = _workflow_text()
 
-    assert "image: postgres:18" in text
+    assert "image: pgvector/pgvector:0.8.6-pg18-bookworm" in text
+    assert "image: postgres:18" not in text
     assert "POSTGRES_DB: nextgen_migration_rehearsal" in text
     assert "POSTGRES_USER: postgres" in text
     assert "POSTGRES_PASSWORD: synthetic-local-postgres-password" in text
