@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import ContextManager, Iterable, Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
+from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from typing import Any, Protocol
 from uuid import UUID
@@ -38,7 +39,7 @@ class CursorProtocol(Protocol):
 
 
 class ConnectionProtocol(Protocol):
-    def transaction(self) -> ContextManager[Any]: ...
+    def transaction(self) -> AbstractContextManager[Any]: ...
 
     def execute(self, sql: str, params: dict[str, Any]) -> CursorProtocol: ...
 
