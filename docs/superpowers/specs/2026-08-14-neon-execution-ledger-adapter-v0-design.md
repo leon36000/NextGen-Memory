@@ -1,7 +1,7 @@
 # Neon Execution Ledger Adapter v0 — Design
 
-**Date:** 2026-08-14  
-**Status:** implementation candidate  
+**Date:** 2026-08-14
+**Status:** implementation candidate
 **Depends on:** Router v0, State Replay v0, Execution Ledger v0
 
 ## Objective
