@@ -1,0 +1,54 @@
+name: Verify release-wheel inspector RED exact SHA
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify-red:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: f14ba7a359504120e904dc7234bb816938c95cc8
+          fetch-depth: 0
+      - name: Prove exact checkout and RED surface
+        run: |
+          test "$(git rev-parse HEAD)" = "f14ba7a359504120e904dc7234bb816938c95cc8"
+          test "$(git merge-base HEAD 937385e4d9235841a38fb28d079fcc0c7c3abe79)" = "937385e4d9235841a38fb28d079fcc0c7c3abe79"
+          mapfile -t changed < <(git diff --name-only 937385e4d9235841a38fb28d079fcc0c7c3abe79...HEAD | sort)
+          expected=(
+            docs/superpowers/plans/2026-08-23-release-wheel-integrity-v1.md
+            docs/superpowers/specs/2026-08-23-release-wheel-integrity-v1-design.md
+            tests/test_release_wheel_integrity.py
+          )
+          test "${#changed[@]}" -eq "${#expected[@]}"
+          diff -u <(printf '%s\n' "${expected[@]}" | sort) <(printf '%s\n' "${changed[@]}")
+          test ! -e scripts/verify_release_wheel.py
+          git diff --check 937385e4d9235841a38fb28d079fcc0c7c3abe79...HEAD
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Install project and development tools
+        run: python -m pip install -e '.[dev]'
+      - name: Prove Ruff is clean before pytest
+        run: ruff check tests/test_release_wheel_integrity.py
+      - name: Prove the only collection blocker is the absent inspector module
+        shell: bash
+        run: |
+          set +e
+          python -m pytest -q tests/test_release_wheel_integrity.py \
+            >/tmp/release-red-out.txt 2>/tmp/release-red-err.txt
+          rc=$?
+          set -e
+          test "$rc" -ne 0
+          combined=$(cat /tmp/release-red-out.txt /tmp/release-red-err.txt)
+          printf '%s\n' "$combined"
+          printf '%s' "$combined" | grep -F "ModuleNotFoundError: No module named 'scripts.verify_release_wheel'"
+          if printf '%s' "$combined" | grep -E 'SyntaxError|IndentationError|E[0-9]{3}|F[0-9]{3}'; then
+            echo 'RED contains an unintended syntax or lint failure' >&2
+            exit 1
+          fi
