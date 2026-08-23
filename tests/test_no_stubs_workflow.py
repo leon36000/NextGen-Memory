@@ -15,6 +15,7 @@ def test_no_stubs_workflow_is_path_filtered_and_cross_version() -> None:
         "tests/test_no_stubs_workflow.py",
         "tests/test_no_stubs_exception_shadowing.py",
         "tests/test_no_stubs_protocol_shadowing.py",
+        "tests/test_no_stubs_lexical_hardening.py",
         ".github/workflows/no-stubs.yml",
     ):
         assert path in source
@@ -36,7 +37,8 @@ def test_no_stubs_workflow_preserves_required_yaml_indentation() -> None:
         "          ruff check scripts/verify_no_stubs.py "
         "tests/test_no_stubs.py tests/test_no_stubs_workflow.py "
         "tests/test_no_stubs_exception_shadowing.py "
-        "tests/test_no_stubs_protocol_shadowing.py\n"
+        "tests/test_no_stubs_protocol_shadowing.py "
+        "tests/test_no_stubs_lexical_hardening.py\n"
         "          python -m compileall -q src scripts\n"
     ) in source
 
@@ -49,7 +51,8 @@ def test_no_stubs_workflow_runs_scanner_without_write_or_secret_surface() -> Non
         "python -m pytest -q tests/test_no_stubs.py "
         "tests/test_no_stubs_workflow.py "
         "tests/test_no_stubs_exception_shadowing.py "
-        "tests/test_no_stubs_protocol_shadowing.py"
+        "tests/test_no_stubs_protocol_shadowing.py "
+        "tests/test_no_stubs_lexical_hardening.py"
     ) in source
     assert "contents: read" in source
     assert "contents: write" not in source
