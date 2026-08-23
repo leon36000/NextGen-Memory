@@ -1,0 +1,36 @@
+name: Normalize release-wheel RED imports once
+
+on:
+  pull_request:
+
+permissions:
+  contents: write
+
+jobs:
+  normalize:
+    if: github.event.pull_request.head.ref == 'release/wheel-integrity-reproducibility-v1-20260823'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: release/wheel-integrity-reproducibility-v1-20260823
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Normalize only the RED test import block
+        run: |
+          python -m pip install 'ruff==0.16.4'
+          ruff check --fix tests/test_release_wheel_integrity.py
+          ruff check tests/test_release_wheel_integrity.py
+          rm .github/workflows/release-red-import-fix-once.yml
+          git diff --check
+      - name: Commit normalized RED contract
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add tests/test_release_wheel_integrity.py
+          git add -u .github/workflows
+          git diff --cached --check
+          git commit -m 'test: normalize release wheel RED imports'
+          git push origin HEAD:release/wheel-integrity-reproducibility-v1-20260823
