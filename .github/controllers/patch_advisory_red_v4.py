@@ -4,11 +4,24 @@ import sys
 from pathlib import Path
 
 
-def replace_once(source: str, old: str, new: str, label: str) -> str:
-    count = source.count(old)
-    if count != 1:
-        raise SystemExit(f"{label}: expected one match, found {count}")
-    return source.replace(old, new, 1)
+def ensure_replacement(
+    source: str,
+    old: str,
+    new: str,
+    label: str,
+) -> str:
+    """Apply one exact correction or accept the already-corrected form."""
+
+    old_count = source.count(old)
+    new_count = source.count(new)
+    if old_count == 1 and new_count == 0:
+        return source.replace(old, new, 1)
+    if old_count == 0 and new_count == 1:
+        return source
+    raise SystemExit(
+        f"{label}: expected one old or one corrected form, "
+        f"found old={old_count}, corrected={new_count}"
+    )
 
 
 def main() -> None:
@@ -17,7 +30,7 @@ def main() -> None:
     path = Path(sys.argv[1])
     source = path.read_text(encoding="utf-8")
 
-    source = replace_once(
+    source = ensure_replacement(
         source,
         '''def identity(
     *,
@@ -49,7 +62,7 @@ def main() -> None:
         "identity helper",
     )
 
-    source = replace_once(
+    source = ensure_replacement(
         source,
         "request(evaluation=paired_evidence(registry_completed_trial_count=23)),",
         '''request(
@@ -61,7 +74,7 @@ def main() -> None:
         "registry/evaluation mismatch fixture",
     )
 
-    source = replace_once(
+    source = ensure_replacement(
         source,
         "request(evaluation=paired_evidence(mean_score_effect=-0.001)),",
         '''request(
@@ -74,7 +87,7 @@ def main() -> None:
         "negative-effect fixture",
     )
 
-    source = replace_once(
+    source = ensure_replacement(
         source,
         "request(evaluation=paired_evidence(matched_pair_count=19)),",
         '''request(
