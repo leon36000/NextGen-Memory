@@ -1,0 +1,385 @@
+name: Prepare exact-SHA learning policy stack Sol review queue
+
+on:
+  pull_request:
+
+permissions:
+  actions: read
+  contents: write
+  issues: write
+  pull-requests: write
+
+jobs:
+  prepare:
+    if: github.event.pull_request.head.ref == 'bootstrap/prepare-learning-policy-stack-sol-review-20260824'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: bootstrap/prepare-learning-policy-stack-sol-review-20260824
+          fetch-depth: 0
+
+      - name: Resolve immutable attestations and live candidate graph
+        id: graph
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*'
+
+          integration_branch='evidence/learning-policy-stack-integration-chatgpt-attested-20260824'
+          integration_file='evidence/learning-policy-stack-integration-chatgpt-attested-20260824.json'
+          merge_branch='evidence/learning-policy-stack-merge-rehearsal-chatgpt-attested-20260824'
+          merge_file='evidence/learning-policy-stack-merge-rehearsal-chatgpt-attested-20260824.json'
+          git show "origin/$integration_branch:$integration_file" > /tmp/integration-attestation.json
+          git show "origin/$merge_branch:$merge_file" > /tmp/merge-attestation.json
+
+          jq -e '.attestation_key == "m-head:learning-policy-stack:integration-chatgpt-attested:20260824"' /tmp/integration-attestation.json >/dev/null
+          jq -e '.status == "green_review_pending_unmerged"' /tmp/integration-attestation.json >/dev/null
+          jq -e '.repository == "leon36000/NextGen-Memory"' /tmp/integration-attestation.json >/dev/null
+          jq -e '.graph.components | length == 6' /tmp/integration-attestation.json >/dev/null
+          jq -e '[.graph.components[].ordinal] == [1,2,3,4,5,6]' /tmp/integration-attestation.json >/dev/null
+          jq -e '[.graph.components[].sha] | unique | length == 6' /tmp/integration-attestation.json >/dev/null
+          jq -e '.review.required_model == "GPT-5.6 Sol" and .review.verdict == "pending" and .review.merge_allowed == false' /tmp/integration-attestation.json >/dev/null
+          jq -e '.safety.merged == false and .safety.policy_activated == false and .safety.production_database_contacted == false' /tmp/integration-attestation.json >/dev/null
+
+          jq -e '.attestation_key == "m-head:learning-policy-stack:merge-rehearsal-chatgpt-attested:20260824"' /tmp/merge-attestation.json >/dev/null
+          jq -e '.status == "green_review_pending_unmerged"' /tmp/merge-attestation.json >/dev/null
+          jq -e '.attested_graph == input.graph' /tmp/merge-attestation.json /tmp/integration-attestation.json >/dev/null
+          jq -e '.review.required_model == "GPT-5.6 Sol" and .review.verdict == "pending" and .review.merge_allowed == false' /tmp/merge-attestation.json >/dev/null
+          jq -e '.safety.actual_product_merge_performed == false and .safety.merged == false' /tmp/merge-attestation.json >/dev/null
+
+          branches=(
+            candidate/learning-evidence-reader-v0-20260823
+            candidate/bounded-inherited-reranker-v0-20260823
+            candidate/inherited-rerank-telemetry-v0-20260823
+            candidate/paired-rerank-policy-evaluation-v0-rebased-20260824
+            candidate/paired-replay-experiment-registry-v0-rebased-20260824
+            candidate/policy-promotion-gate-v0-20260824
+          )
+          names=(
+            learning_evidence_reader_v0
+            bounded_inherited_reranker_v0
+            inherited_rerank_telemetry_v0
+            paired_rerank_policy_evaluation_v0
+            paired_replay_experiment_registry_v0
+            policy_promotion_gate_v0
+          )
+          shas=()
+          for index in "${!branches[@]}"; do
+            live=$(git rev-parse "origin/${branches[$index]}")
+            recorded_sha=$(jq -r ".graph.components[$index].sha" /tmp/integration-attestation.json)
+            recorded_branch=$(jq -r ".graph.components[$index].branch" /tmp/integration-attestation.json)
+            recorded_name=$(jq -r ".graph.components[$index].name" /tmp/integration-attestation.json)
+            test "$live" = "$recorded_sha"
+            test "$recorded_branch" = "${branches[$index]}"
+            test "$recorded_name" = "${names[$index]}"
+            shas+=("$live")
+          done
+          test "${shas[0]}" = 'f0546ef4980239c4993baac8780c12975e91377c'
+          test "${shas[1]}" = '4d1317101800b11734d33175b1955f92a55ba3b5'
+          for index in 1 2 3 4 5; do
+            parent=$((index - 1))
+            test "$(git merge-base "${shas[$parent]}" "${shas[$index]}")" = "${shas[$parent]}"
+          done
+          test "${shas[5]}" = "$(jq -r '.top_candidate_sha' /tmp/integration-attestation.json)"
+
+          current_main=$(git rev-parse origin/main)
+          rehearsal_main=$(jq -r '.main_sha' /tmp/merge-attestation.json)
+          if [ "$current_main" = "$rehearsal_main" ]; then
+            rehearsal_current=true
+          else
+            rehearsal_current=false
+          fi
+
+          printf 'CURRENT_MAIN=%s\nREHEARSAL_MAIN=%s\nREHEARSAL_CURRENT=%s\nTOP_CANDIDATE=%s\n' \
+            "$current_main" "$rehearsal_main" "$rehearsal_current" "${shas[5]}" \
+            | tee -a "$GITHUB_ENV"
+          printf 'INTEGRATION_ATTESTATION_SHA=%s\nMERGE_ATTESTATION_SHA=%s\n' \
+            "$(git rev-parse "origin/$integration_branch")" \
+            "$(git rev-parse "origin/$merge_branch")" \
+            | tee -a "$GITHUB_ENV"
+
+      - name: Resolve canonical product PRs and publish idempotent blind review packets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          owner=${REPO%%/*}
+          branches=(
+            candidate/learning-evidence-reader-v0-20260823
+            candidate/bounded-inherited-reranker-v0-20260823
+            candidate/inherited-rerank-telemetry-v0-20260823
+            candidate/paired-rerank-policy-evaluation-v0-rebased-20260824
+            candidate/paired-replay-experiment-registry-v0-rebased-20260824
+            candidate/policy-promotion-gate-v0-20260824
+          )
+          names=(
+            learning_evidence_reader_v0
+            bounded_inherited_reranker_v0
+            inherited_rerank_telemetry_v0
+            paired_rerank_policy_evaluation_v0
+            paired_replay_experiment_registry_v0
+            policy_promotion_gate_v0
+          )
+          focuses=(
+            'provenance boundaries, direct versus inherited evidence separation, privacy, deterministic canonical reading, and absence of hidden persistence or activation'
+            'direct-score preservation, inherited-signal confidence gates and caps, deterministic ranking and identity conservation, malformed-input handling, and absence of side effects'
+            'trace/evidence membership, deterministic event and summary identities, finite bounded metrics, policy fidelity, privacy, and absence of persistence or policy action'
+            'true matched-pair construction, identity matching, estimator mathematics, confidence intervals and verdict mapping, deterministic serialization, and absence of feedback emission'
+            'experiment/plan/pair/step identity, counterbalancing, budget preflight, one-arm scheduling, retries and immutable conflicts, terminal states, matched trial construction, and privacy'
+            'hard-reject precedence, hold thresholds and exact equalities, identity drift, advisory-only promote semantics, deterministic UUID5/SHA-256 identity, and absence of activation or deployment'
+          )
+
+          rm -rf /tmp/sol-review-candidates /tmp/sol-review-packets
+          mkdir -p /tmp/sol-review-candidates /tmp/sol-review-packets
+
+          for index in "${!branches[@]}"; do
+            branch=${branches[$index]}
+            name=${names[$index]}
+            sha=$(jq -r ".graph.components[$index].sha" /tmp/integration-attestation.json)
+            pulls=$(gh api --method GET "repos/$REPO/pulls" \
+              -f state=open -f head="$owner:$branch" -f per_page=100)
+            count=$(printf '%s' "$pulls" | jq 'length')
+            test "$count" -eq 1
+            pr=$(printf '%s' "$pulls" | jq -r '.[0].number')
+            test "$(printf '%s' "$pulls" | jq -r '.[0].draft')" = true
+            test "$(printf '%s' "$pulls" | jq -r '.[0].head.ref')" = "$branch"
+            test "$(printf '%s' "$pulls" | jq -r '.[0].head.sha')" = "$sha"
+            base_branch=$(printf '%s' "$pulls" | jq -r '.[0].base.ref')
+            base_sha=$(printf '%s' "$pulls" | jq -r '.[0].base.sha')
+            pr_url=$(printf '%s' "$pulls" | jq -r '.[0].html_url')
+            git cat-file -e "$base_sha^{commit}"
+            git merge-base --is-ancestor "$base_sha" "$sha"
+
+            if [ "$index" -eq 0 ]; then
+              test "$pr" -eq 120
+            else
+              parent=$((index - 1))
+              expected_base=${branches[$parent]}
+              expected_base_sha=$(jq -r ".graph.components[$parent].sha" /tmp/integration-attestation.json)
+              test "$base_branch" = "$expected_base"
+              test "$base_sha" = "$expected_base_sha"
+            fi
+
+            mapfile -t changed_paths < <(git diff --name-only "$base_sha"..."$sha" | sort)
+            test "${#changed_paths[@]}" -gt 0
+            printf '%s\n' "${changed_paths[@]}" > "/tmp/sol-review-packets/$index-paths.txt"
+
+            marker="MHEAD_SOL_REVIEW_PACKET_V1:$sha"
+            packet="/tmp/sol-review-packets/$index-$name.md"
+            cat > "$packet" <<EOF
+          <!-- $marker -->
+          ## Blind GPT-5.6 Sol review request — $name
+
+          Return exactly one structured verdict for this unchanged candidate:
+
+          - \`APPROVE\`
+          - \`CHANGES_REQUIRED\`
+          - \`BLOCKED_BY_EVIDENCE\`
+
+          ### Exact review boundary
+
+          - repository: \`$REPO\`;
+          - pull request: #$pr;
+          - base branch: \`$base_branch\`;
+          - base SHA: \`$base_sha\`;
+          - candidate branch: \`$branch\`;
+          - candidate SHA: \`$sha\`;
+          - integration attestation: \`evidence/learning-policy-stack-integration-chatgpt-attested-20260824\`;
+          - merge-rehearsal attestation: \`evidence/learning-policy-stack-merge-rehearsal-chatgpt-attested-20260824\`.
+
+          Any movement of the base or candidate SHA invalidates the review.
+
+          ### Review focus
+
+          ${focuses[$index]}.
+
+          Inspect the exact diff, implementation, tests, workflow logs and downloaded artifacts. Do not infer approval from existing GREEN evidence or from this request. Check for false completion, hidden side effects, weakened tests, identity collisions, boundary mistakes and missing adversarial cases.
+
+          ### Required response schema
+
+          \`\`\`json
+          {
+            "reviewer_model": "GPT-5.6 Sol",
+            "candidate_sha": "$sha",
+            "verdict": "APPROVE | CHANGES_REQUIRED | BLOCKED_BY_EVIDENCE",
+            "findings": [
+              {
+                "severity": "critical | high | medium | low",
+                "path": "path/to/file",
+                "line_or_symbol": "bounded location",
+                "finding": "specific technical finding",
+                "required_change": "specific correction or null"
+              }
+            ],
+            "evidence_checked": ["exact diff", "tests", "logs", "artifacts"],
+            "merge_authorized": false
+          }
+          \`\`\`
+
+          A review response is evidence for a later separately validated latch. It does not itself merge, deploy, migrate, write feedback, activate policy or publish a release.
+          EOF
+            sed -i 's/^          //' "$packet"
+
+            comments=$(gh api --paginate "repos/$REPO/issues/$pr/comments?per_page=100" | jq -s 'add // []')
+            packet_id=$(printf '%s' "$comments" | jq -r --arg marker "$marker" '[.[] | select(.body | contains($marker))] | last | .id // empty')
+            if [ -z "$packet_id" ]; then
+              packet_id=$(gh api "repos/$REPO/issues/$pr/comments" \
+                --raw-field body="$(cat "$packet")" --jq '.id')
+            else
+              existing=$(printf '%s' "$comments" | jq -r --argjson id "$packet_id" '.[] | select(.id == $id) | .body')
+              printf '%s' "$existing" | grep -F "$sha" >/dev/null
+              printf '%s' "$existing" | grep -F 'GPT-5.6 Sol' >/dev/null
+            fi
+
+            changed_json=$(printf '%s\n' "${changed_paths[@]}" | jq -R . | jq -s .)
+            jq -n \
+              --argjson ordinal "$((index + 1))" \
+              --arg component "$name" \
+              --arg branch "$branch" \
+              --arg sha "$sha" \
+              --argjson pull_request "$pr" \
+              --arg pull_request_url "$pr_url" \
+              --arg base_branch "$base_branch" \
+              --arg base_sha "$base_sha" \
+              --argjson packet_comment_id "$packet_id" \
+              --arg packet_marker "$marker" \
+              --argjson changed_paths "$changed_json" \
+              '{ordinal:$ordinal,component:$component,branch:$branch,sha:$sha,pull_request:$pull_request,pull_request_url:$pull_request_url,base_branch:$base_branch,base_sha:$base_sha,changed_paths:$changed_paths,review_packet:{schema:"MHEAD_SOL_REVIEW_PACKET_V1",comment_id:$packet_comment_id,marker:$packet_marker,required_model:"GPT-5.6 Sol",verdict:"pending",externally_authenticated:false},merge_allowed:false}' \
+              > "/tmp/sol-review-candidates/$index.json"
+          done
+
+          jq -s 'sort_by(.ordinal)' /tmp/sol-review-candidates/*.json > /tmp/candidates.json
+          test "$(jq 'length' /tmp/candidates.json)" -eq 6
+          test "$(jq '[.[].sha] | unique | length' /tmp/candidates.json)" -eq 6
+          test "$(jq '[.[].pull_request] | unique | length' /tmp/candidates.json)" -eq 6
+          test "$(jq '[.[].review_packet.comment_id] | unique | length' /tmp/candidates.json)" -eq 6
+
+      - name: Build canonical review queue and fail-closed checkpoint
+        shell: bash
+        run: |
+          set -euo pipefail
+          jq -n \
+            --arg schema 'm-head-learning-policy-stack-sol-review-queue-v1' \
+            --arg status 'review_packets_ready_unmerged' \
+            --arg repository 'leon36000/NextGen-Memory' \
+            --arg current_main_sha "$CURRENT_MAIN" \
+            --arg merge_rehearsal_main_sha "$REHEARSAL_MAIN" \
+            --argjson merge_rehearsal_current "$REHEARSAL_CURRENT" \
+            --arg integration_attestation_branch 'evidence/learning-policy-stack-integration-chatgpt-attested-20260824' \
+            --arg integration_attestation_sha "$INTEGRATION_ATTESTATION_SHA" \
+            --arg merge_attestation_branch 'evidence/learning-policy-stack-merge-rehearsal-chatgpt-attested-20260824' \
+            --arg merge_attestation_sha "$MERGE_ATTESTATION_SHA" \
+            --argjson candidates "$(cat /tmp/candidates.json)" \
+            '{schema:$schema,status:$status,repository:$repository,current_main_sha:$current_main_sha,merge_rehearsal:{attested_main_sha:$merge_rehearsal_main_sha,current:$merge_rehearsal_current},source_attestations:{integration:{branch:$integration_attestation_branch,sha:$integration_attestation_sha},merge_rehearsal:{branch:$merge_attestation_branch,sha:$merge_attestation_sha}},candidates:$candidates,review:{required_model:"GPT-5.6 Sol",packet_count:($candidates|length),all_verdicts:"pending",external_authentication_required:true,merge_allowed:false},safety:{actual_product_merge_performed:false,merged:false,production_database_contacted:false,production_migration_applied:false,production_application_data_written:false,feedback_written:false,policy_activated:false,release_published:false,tests_weakened:false,stubs_added:false,sol_verdict_fabricated:false},next_action:"Obtain six genuine exact-SHA GPT-5.6 Sol responses, authenticate their provenance outside this workflow, and run a separate fail-closed verdict latch. Re-run merge rehearsal if main or a candidate SHA moves."}' \
+            > /tmp/sol-review-queue.json
+
+          python - <<'PY'
+          import hashlib
+          import json
+          from pathlib import Path
+
+          source = Path('/tmp/sol-review-queue.json')
+          raw = source.read_bytes()
+          queue = json.loads(raw)
+          checkpoint = {
+              'checkpoint_key': 'm-head:learning-policy-stack:sol-review-queue-ready:20260824',
+              'status': queue['status'],
+              'repository': queue['repository'],
+              'queue_sha256': hashlib.sha256(raw).hexdigest(),
+              'current_main_sha': queue['current_main_sha'],
+              'merge_rehearsal': queue['merge_rehearsal'],
+              'source_attestations': queue['source_attestations'],
+              'candidates': queue['candidates'],
+              'review': queue['review'],
+              'safety': queue['safety'],
+              'next_action': queue['next_action'],
+          }
+          Path('/tmp/sol-review-checkpoint.json').write_text(
+              json.dumps(
+                  checkpoint,
+                  ensure_ascii=False,
+                  allow_nan=False,
+                  sort_keys=True,
+                  separators=(',', ':'),
+              ) + '\n',
+              encoding='utf-8',
+          )
+          print(Path('/tmp/sol-review-checkpoint.json').read_text(encoding='utf-8'), end='')
+          PY
+
+      - name: Publish immutable review queue and checkpoint branches
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git fetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*'
+
+          publish_immutable() {
+            local branch=$1 source=$2 destination=$3 message=$4 base=$5
+            if git ls-remote --exit-code --heads origin "$branch"; then
+              git switch --detach "origin/$branch"
+              cmp "$source" "$destination"
+            else
+              git switch -C "$branch" "$base"
+              mkdir -p "$(dirname "$destination")"
+              cp "$source" "$destination"
+              git add "$destination"
+              git diff --cached --check
+              git commit -m "$message"
+              git push origin HEAD:"refs/heads/$branch"
+            fi
+          }
+
+          publish_immutable \
+            evidence/learning-policy-stack-sol-review-queue-20260824 \
+            /tmp/sol-review-queue.json \
+            evidence/learning-policy-stack-sol-review-queue-20260824.json \
+            'evidence: prepare exact-SHA learning policy Sol review queue' \
+            "$TOP_CANDIDATE"
+          git fetch --no-tags origin \
+            'refs/heads/evidence/learning-policy-stack-sol-review-queue-20260824:refs/remotes/origin/evidence/learning-policy-stack-sol-review-queue-20260824'
+          publish_immutable \
+            evidence/learning-policy-stack-sol-review-checkpoint-20260824 \
+            /tmp/sol-review-checkpoint.json \
+            evidence/learning-policy-stack-sol-review-checkpoint-20260824.json \
+            'evidence: checkpoint exact-SHA learning policy Sol review queue' \
+            origin/evidence/learning-policy-stack-sol-review-queue-20260824
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: learning-policy-stack-sol-review-queue
+          path: |
+            /tmp/sol-review-queue.json
+            /tmp/sol-review-checkpoint.json
+            /tmp/sol-review-packets/*.md
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Publish durable status and close transport without merge
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SELF_PR: ${{ github.event.pull_request.number }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          body=$(cat <<EOF
+          ## Exact-SHA GPT-5.6 Sol review queue prepared
+
+          Six canonical draft product PRs were reconciled against the immutable integration and merge-rehearsal attestations. Each now has one idempotent blind review packet bound to its exact base and candidate SHA.
+
+          Immutable records:
+
+          - \`evidence/learning-policy-stack-sol-review-queue-20260824\`;
+          - \`evidence/learning-policy-stack-sol-review-checkpoint-20260824\`.
+
+          All verdicts remain \`pending\`; external reviewer authentication is still required; \`merge_allowed=false\`. No product merge, deployment, database operation, migration application, feedback write, policy activation, or release occurred.
+          EOF
+          )
+          gh api "repos/$REPO/issues/23/comments" --raw-field body="$body" >/dev/null
+          gh api --method PATCH "repos/$REPO/pulls/$SELF_PR" -f state=closed >/dev/null
