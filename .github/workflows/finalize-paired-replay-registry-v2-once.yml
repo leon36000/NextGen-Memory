@@ -1,0 +1,309 @@
+name: Finalize paired replay registry v0 with indexed scope
+
+on:
+  pull_request:
+
+permissions:
+  contents: write
+
+jobs:
+  finalize:
+    if: github.event.pull_request.head.ref == 'feat/paired-replay-experiment-registry-v0-20260824'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/paired-replay-experiment-registry-v0-20260824
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install project and development tools
+        run: python -m pip install -e '.[dev]'
+
+      - name: Add or verify exact package-root exports idempotently
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from __future__ import annotations
+
+          import ast
+          from pathlib import Path
+
+          path = Path('src/nextgen_memory/__init__.py')
+          source = path.read_text(encoding='utf-8')
+          required = {
+              'BalancedPairedReplayPlanner',
+              'InMemoryPairedReplayExperimentRegistry',
+              'PairedReplayArmResult',
+              'PairedReplayAssignment',
+              'PairedReplayExperimentSpec',
+              'PairedReplayExperimentSummary',
+              'PairedReplayFailureRecord',
+              'PairedReplayPairSnapshot',
+              'PairedReplayPlan',
+              'PairedReplayPlanSummary',
+              'PairedReplayRegistryConflictError',
+              'PairedReplayRegistryStateError',
+              'PairedReplayRegistryValidationError',
+              'PairedReplayStep',
+              'ReplayArm',
+              'ReplayArmOrder',
+              'ReplayFailureCode',
+              'ReplayPairStatus',
+          }
+          import_block = '''from .paired_replay_experiment_registry import (
+              BalancedPairedReplayPlanner,
+              InMemoryPairedReplayExperimentRegistry,
+              PairedReplayArmResult,
+              PairedReplayAssignment,
+              PairedReplayExperimentSpec,
+              PairedReplayExperimentSummary,
+              PairedReplayFailureRecord,
+              PairedReplayPairSnapshot,
+              PairedReplayPlan,
+              PairedReplayPlanSummary,
+              PairedReplayRegistryConflictError,
+              PairedReplayRegistryStateError,
+              PairedReplayRegistryValidationError,
+              PairedReplayStep,
+              ReplayArm,
+              ReplayArmOrder,
+              ReplayFailureCode,
+              ReplayPairStatus,
+          )
+          '''
+          import_block = '\n'.join(
+              line[10:] if line.startswith('          ') else line
+              for line in import_block.splitlines()
+          ).lstrip('\n')
+          if 'from .paired_replay_experiment_registry import (' not in source:
+              marker = 'from .paired_rerank_policy_evaluation import ('
+              if source.count(marker) != 1:
+                  raise SystemExit('paired evaluation import marker is missing or ambiguous')
+              source = source.replace(marker, import_block + marker, 1)
+
+          tree = ast.parse(source)
+          all_values: list[str] | None = None
+          for statement in tree.body:
+              if (
+                  isinstance(statement, ast.Assign)
+                  and any(
+                      isinstance(target, ast.Name) and target.id == '__all__'
+                      for target in statement.targets
+                  )
+                  and isinstance(statement.value, (ast.List, ast.Tuple))
+              ):
+                  all_values = [
+                      element.value
+                      for element in statement.value.elts
+                      if isinstance(element, ast.Constant)
+                      and isinstance(element.value, str)
+                  ]
+                  break
+          if all_values is None:
+              raise SystemExit('package __all__ must be a literal list or tuple')
+          start = source.index('__all__ = [')
+          end = source.index('\n]', start) + 2
+          replacement = '__all__ = [\n' + ''.join(
+              f'    "{name}",\n' for name in sorted(set(all_values).union(required))
+          ) + ']'
+          source = source[:start] + replacement + source[end:]
+          path.write_text(source, encoding='utf-8')
+          PY
+
+      - name: Restore approved design and exact execution plan
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*'
+          git cat-file -e 'bdc7c43b3ed85821b025e2e9b25d35199ddd30fd^{commit}'
+          mkdir -p docs/superpowers/specs docs/superpowers/plans
+          git show bdc7c43b3ed85821b025e2e9b25d35199ddd30fd:docs/superpowers/specs/2026-08-15-paired-replay-experiment-registry-v0-design.md \
+            > docs/superpowers/specs/2026-08-15-paired-replay-experiment-registry-v0-design.md
+          cat > docs/superpowers/plans/2026-08-24-paired-replay-experiment-registry-v0.md <<'EOF'
+          # Paired Replay Experiment Registry v0 — Implementation Plan
+
+          **Date:** 2026-08-24
+          **Base:** `candidate/paired-rerank-policy-evaluation-v0-20260824`
+          **Issue:** #132
+
+          ## Goal
+
+          Implement the approved deterministic in-memory registry that turns bounded replay plans into complete matched `PairedRerankPolicyTrial` values without executing models, persisting state, activating policy or emitting feedback.
+
+          ## TDD and verification sequence
+
+          1. Record a tests-only module-absence RED with Ruff clean.
+          2. Validate immutable experiment specifications and canonical context hashes.
+          3. Preflight worst-case token and latency reservations before registration.
+          4. Generate stable pair IDs independent of the order seed and balanced arm orders dependent on the seed.
+          5. Register exact plans idempotently and reject immutable experiment conflicts.
+          6. Expose only one currently schedulable arm per non-terminal pair.
+          7. Validate step, pair, experiment, space, policy, router-decision and per-arm budget identity before mutation.
+          8. Construct a complete evaluator trial only after two truly matched arms validate together.
+          9. Preserve terminal failed and cancelled states with bounded failure codes and exact retry semantics.
+          10. Prove deterministic snapshots, summaries, completed-trial ordering, 5,000 generated traces and process-hash-seed invariance.
+          11. Export the API explicitly, install the wheel outside the checkout, run Python 3.12/3.13 exact-SHA verification and request blind GPT-5.6 Sol review.
+
+          ## Safety constraints
+
+          The candidate contains no persistence adapter, migration, database/network dependency, Temporal/lease/worker behavior, model execution, feedback write, policy activation, raw content, arbitrary error text, stub, skipped test or automatic merge.
+          EOF
+          sed -i 's/^          //' docs/superpowers/plans/2026-08-24-paired-replay-experiment-registry-v0.md
+
+      - name: Verify telemetry batch field assumptions before tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from dataclasses import fields
+          from nextgen_memory.inherited_rerank_telemetry import InheritedRerankTelemetryBatch
+
+          names = {item.name for item in fields(InheritedRerankTelemetryBatch)}
+          required = {
+              'id',
+              'space_id',
+              'router_decision_id',
+              'policy_version',
+              'policy_fingerprint',
+              'content_hash',
+          }
+          missing = sorted(required - names)
+          if missing:
+              raise SystemExit(f'telemetry batch contract drift: {missing}')
+          PY
+
+      - name: Normalize bounded candidate files
+        run: |
+          ruff format \
+            src/nextgen_memory/__init__.py \
+            src/nextgen_memory/paired_replay_experiment_registry.py \
+            tests/test_paired_replay_experiment_registry.py \
+            tests/test_paired_replay_experiment_registry_properties.py \
+            tests/test_paired_replay_experiment_registry_public_api.py
+          ruff check --fix \
+            src/nextgen_memory/__init__.py \
+            src/nextgen_memory/paired_replay_experiment_registry.py \
+            tests/test_paired_replay_experiment_registry.py \
+            tests/test_paired_replay_experiment_registry_properties.py \
+            tests/test_paired_replay_experiment_registry_public_api.py
+          ruff check \
+            src/nextgen_memory/__init__.py \
+            src/nextgen_memory/paired_replay_experiment_registry.py \
+            tests/test_paired_replay_experiment_registry.py \
+            tests/test_paired_replay_experiment_registry_properties.py \
+            tests/test_paired_replay_experiment_registry_public_api.py
+          git diff --check
+
+      - name: Focused registry contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pytest -q \
+            tests/test_paired_replay_experiment_registry.py \
+            tests/test_paired_replay_experiment_registry_properties.py \
+            tests/test_paired_replay_experiment_registry_public_api.py \
+            | tee /tmp/paired-registry-focused.txt
+
+      - name: Strict side-effect, privacy and stub audit
+        run: |
+          python - <<'PY'
+          from __future__ import annotations
+
+          import ast
+          from pathlib import Path
+
+          path = Path('src/nextgen_memory/paired_replay_experiment_registry.py')
+          source = path.read_text(encoding='utf-8')
+          tree = ast.parse(source, filename=str(path))
+          forbidden_import_roots = {
+              'asyncio', 'datetime', 'httpx', 'os', 'pathlib', 'psycopg',
+              'pymongo', 'random', 'requests', 'socket', 'sqlalchemy',
+              'subprocess', 'temporalio', 'time', 'urllib',
+          }
+          forbidden_calls = {
+              'eval', 'exec', 'open', 'sleep', 'system', 'urlopen',
+              'uuid1', 'uuid4', 'write_bytes', 'write_text',
+          }
+          violations: list[str] = []
+          for node in ast.walk(tree):
+              if isinstance(node, ast.Pass):
+                  violations.append(f'{node.lineno}:pass')
+              elif isinstance(node, ast.Raise):
+                  exc = node.exc.func if isinstance(node.exc, ast.Call) else node.exc
+                  if (
+                      isinstance(exc, ast.Name) and exc.id == 'NotImplementedError'
+                  ) or (
+                      isinstance(exc, ast.Attribute) and exc.attr == 'NotImplementedError'
+                  ):
+                      violations.append(f'{node.lineno}:NotImplementedError')
+              elif isinstance(node, ast.Import):
+                  for alias in node.names:
+                      if alias.name.split('.', 1)[0] in forbidden_import_roots:
+                          violations.append(f'{node.lineno}:import:{alias.name}')
+              elif isinstance(node, ast.ImportFrom):
+                  if (node.module or '').split('.', 1)[0] in forbidden_import_roots:
+                      violations.append(f'{node.lineno}:import:{node.module}')
+              elif isinstance(node, ast.Call):
+                  name = node.func.id if isinstance(node.func, ast.Name) else node.func.attr if isinstance(node.func, ast.Attribute) else None
+                  if name in forbidden_calls:
+                      violations.append(f'{node.lineno}:call:{name}')
+          lowered = source.lower()
+          for marker in (
+              'postgresql://', 'mongodb://', 'http://', 'https://',
+              'password', 'credential', '# todo', '# fixme', 'raw_query',
+              'raw_prompt', 'response_text', 'memory_body', 'lease_timestamp',
+              'worker_identity', 'activate_policy', 'write_feedback',
+          ):
+              if marker in lowered:
+                  violations.append(f'text:{marker}')
+          if violations:
+              raise SystemExit('\n'.join(violations))
+          print('paired_registry_side_effect_or_privacy_findings=0')
+          PY
+
+      - name: Repository-wide verification
+        run: |
+          ruff check .
+          python -m compileall -q src scripts
+          python -m pytest -q
+          git diff --check 847ea08e9e9a0d9193adac6d465557270da6ef7d...HEAD
+
+      - name: Remove all transports, stage, and prove exact seven-path product scope
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -f \
+            .github/workflows/finalize-paired-replay-registry-once.yml \
+            .github/workflows/finalize-paired-replay-registry-v2-once.yml
+          git add -A
+          mapfile -t changed < <(git diff --cached --name-only 847ea08e9e9a0d9193adac6d465557270da6ef7d | sort)
+          expected=(
+            docs/superpowers/plans/2026-08-24-paired-replay-experiment-registry-v0.md
+            docs/superpowers/specs/2026-08-15-paired-replay-experiment-registry-v0-design.md
+            src/nextgen_memory/__init__.py
+            src/nextgen_memory/paired_replay_experiment_registry.py
+            tests/test_paired_replay_experiment_registry.py
+            tests/test_paired_replay_experiment_registry_properties.py
+            tests/test_paired_replay_experiment_registry_public_api.py
+          )
+          printf 'final_product_path_count=%s\n' "${#changed[@]}"
+          printf '%s\n' "${changed[@]}"
+          test "${#changed[@]}" -eq "${#expected[@]}"
+          diff -u <(printf '%s\n' "${expected[@]}" | sort) <(printf '%s\n' "${changed[@]}")
+          test -z "$(git diff --cached --name-only 847ea08e9e9a0d9193adac6d465557270da6ef7d -- 'migrations/**' '.github/workflows/**' pyproject.toml 'src/nextgen_memory/corrective_retrieval_*')"
+          git diff --cached --check
+
+      - name: Commit only the fully verified product candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'feat: add paired replay experiment registry v0'
+          git push origin HEAD:feat/paired-replay-experiment-registry-v0-20260824
