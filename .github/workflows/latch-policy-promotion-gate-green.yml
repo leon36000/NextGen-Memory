@@ -1,0 +1,365 @@
+name: Latch advisory policy promotion gate exact evidence
+
+on:
+  pull_request:
+
+permissions:
+  actions: read
+  contents: write
+  issues: write
+  pull-requests: write
+
+jobs:
+  latch:
+    if: github.event.pull_request.head.ref == 'bootstrap/latch-policy-promotion-gate-green-20260824'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: candidate/paired-replay-experiment-registry-v0-20260824
+          fetch-depth: 0
+
+      - name: Resolve exact candidate, successful verifier, and canonical PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          encode() {
+            python -c 'import sys,urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$1"
+          }
+          base_branch='candidate/paired-replay-experiment-registry-v0-20260824'
+          candidate_branch='candidate/advisory-policy-promotion-gate-v0-20260824'
+          verifier_branch='bootstrap/verify-policy-promotion-gate-exact-20260824'
+          workflow_name='Verify advisory policy promotion gate exact SHA'
+
+          base_sha=$(gh api "repos/$REPO/branches/$(encode "$base_branch")" --jq '.commit.sha')
+          candidate_sha=$(gh api "repos/$REPO/branches/$(encode "$candidate_branch")" --jq '.commit.sha')
+          test -n "$base_sha"
+          test -n "$candidate_sha"
+          test "$candidate_sha" != "$base_sha"
+
+          run=$(gh api --method GET "repos/$REPO/actions/runs" \
+            -f branch="$verifier_branch" -f event=pull_request -f per_page=100 \
+            --jq ".workflow_runs | map(select(.name == \"$workflow_name\" and .status == \"completed\" and .conclusion == \"success\")) | sort_by(.created_at) | last // empty")
+          test -n "$run"
+          run_id=$(printf '%s' "$run" | jq -r '.id')
+          jobs=$(gh api --method GET "repos/$REPO/actions/runs/$run_id/jobs" -f per_page=100)
+          test "$(printf '%s' "$jobs" | jq '[.jobs[] | select(.conclusion != "success")] | length')" -eq 0
+          test "$(printf '%s' "$jobs" | jq '[.jobs[] | select(.status == "completed" and .conclusion == "success")] | length')" -ge 4
+
+          pulls=$(gh api --method GET "repos/$REPO/pulls" \
+            -f state=all -f head="leon36000:$candidate_branch" -f per_page=100)
+          count=$(printf '%s' "$pulls" | jq 'length')
+          if [ "$count" -eq 0 ]; then
+            pr_url=$(gh pr create --repo "$REPO" \
+              --base "$base_branch" \
+              --head "$candidate_branch" \
+              --title 'feat: advisory policy promotion gate v0' \
+              --draft \
+              --body "verification_pending for exact SHA $candidate_sha")
+            product_pr=${pr_url##*/}
+          else
+            test "$count" -eq 1
+            product_pr=$(printf '%s' "$pulls" | jq -r '.[0].number')
+            test "$(printf '%s' "$pulls" | jq -r '.[0].state')" = open
+            test "$(printf '%s' "$pulls" | jq -r '.[0].draft')" = true
+            test "$(printf '%s' "$pulls" | jq -r '.[0].head.sha')" = "$candidate_sha"
+            test "$(printf '%s' "$pulls" | jq -r '.[0].base.ref')" = "$base_branch"
+          fi
+
+          git fetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*'
+          git switch --detach "$candidate_sha"
+          test "$(git merge-base HEAD "$base_sha")" = "$base_sha"
+          mapfile -t changed < <(git diff --name-only "$base_sha"...HEAD | sort)
+          expected=(
+            docs/policy-promotion-gate-v0-red.md
+            docs/superpowers/plans/2026-08-24-advisory-policy-promotion-gate-v0.md
+            docs/superpowers/specs/2026-08-24-advisory-policy-promotion-gate-v0-design.md
+            src/nextgen_memory/__init__.py
+            src/nextgen_memory/policy_promotion_gate.py
+            tests/test_policy_promotion_gate.py
+            tests/test_policy_promotion_gate_properties.py
+            tests/test_policy_promotion_gate_public_api.py
+          )
+          test "${#changed[@]}" -eq "${#expected[@]}"
+          diff -u <(printf '%s\n' "${expected[@]}" | sort) <(printf '%s\n' "${changed[@]}")
+          test -z "$(git diff --name-only "$base_sha"...HEAD -- 'migrations/**' '.github/workflows/**' pyproject.toml 'src/nextgen_memory/corrective_retrieval_*')"
+          git diff --check "$base_sha"...HEAD
+
+          jq -n \
+            --arg base_branch "$base_branch" \
+            --arg base_sha "$base_sha" \
+            --arg candidate_branch "$candidate_branch" \
+            --arg candidate_sha "$candidate_sha" \
+            --arg verifier_branch "$verifier_branch" \
+            --argjson verifier_run "$run_id" \
+            --argjson product_pr "$product_pr" \
+            '{base_branch:$base_branch,base_sha:$base_sha,candidate_branch:$candidate_branch,candidate_sha:$candidate_sha,verifier_branch:$verifier_branch,verifier_run:$verifier_run,product_pr:$product_pr}' \
+            > /tmp/resolved.json
+          cat /tmp/resolved.json
+
+      - name: Download and independently validate verifier artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          run_id=$(jq -r '.verifier_run' /tmp/resolved.json)
+          candidate_sha=$(jq -r '.candidate_sha' /tmp/resolved.json)
+          rm -rf /tmp/promotion-artifacts
+          mkdir -p /tmp/promotion-artifacts
+          gh run download "$run_id" --repo "$REPO" --dir /tmp/promotion-artifacts
+          gh api --method GET "repos/$REPO/actions/runs/$run_id/artifacts" -f per_page=100 \
+            --jq '[.artifacts[] | {id,name,digest,expired,size_in_bytes}]' \
+            > /tmp/artifact-metadata.json
+          test "$(jq '[.[] | select(.expired == true)] | length' /tmp/artifact-metadata.json)" -eq 0
+          test "$(jq 'length' /tmp/artifact-metadata.json)" -ge 3
+
+          CANDIDATE_SHA="$candidate_sha" python - <<'PY'
+          from __future__ import annotations
+
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+
+          root = Path('/tmp/promotion-artifacts')
+          reports = sorted(root.rglob('verification.json'))
+          decisions = sorted(root.rglob('decisions.json'))
+          summaries = sorted(root.rglob('cross-python-summary.json'))
+          if tuple(map(len, (reports, decisions, summaries))) != (2, 2, 1):
+              raise SystemExit('incomplete policy-promotion artifact set')
+
+          documents = [json.loads(path.read_text(encoding='utf-8')) for path in reports]
+          decision_documents = [json.loads(path.read_text(encoding='utf-8')) for path in decisions]
+          summary = json.loads(summaries[0].read_text(encoding='utf-8'))
+          candidate_sha = os.environ['CANDIDATE_SHA']
+
+          if {document['candidate_sha'] for document in documents} != {candidate_sha}:
+              raise SystemExit('per-Python candidate SHA drift')
+          if {'.'.join(document['python_version'].split('.')[:2]) for document in documents} != {'3.12', '3.13'}:
+              raise SystemExit('unexpected Python evidence set')
+          if any(document['focused_test_count'] <= 0 for document in documents):
+              raise SystemExit('focused test count is not positive')
+          if any(document['full_test_count'] <= 351 for document in documents):
+              raise SystemExit('full suite did not include the gate tests')
+          if any(document['hash_seed_invariant'] is not True for document in documents):
+              raise SystemExit('hash-seed invariance is missing')
+          if decisions[0].read_bytes() != decisions[1].read_bytes():
+              raise SystemExit('decision matrix differs across Python versions')
+          decision_hash = hashlib.sha256(decisions[0].read_bytes()).hexdigest()
+          if {document['decision_matrix_sha256'] for document in documents} != {decision_hash}:
+              raise SystemExit('decision matrix digest differs from manifests')
+          if summary['candidate_sha'] != candidate_sha:
+              raise SystemExit('cross-Python summary candidate SHA drift')
+          if summary['cross_python_decisions_identical'] is not True:
+              raise SystemExit('cross-Python decision identity was not proved')
+          if summary['decision_matrix_sha256'] != decision_hash:
+              raise SystemExit('cross-Python summary decision digest drift')
+
+          first = decision_documents[0]
+          records = first['records']
+          if [record['decision'] for record in records] != ['promote', 'hold', 'reject']:
+              raise SystemExit('decision sequence differs')
+          if any(record['advisory_only'] is not True for record in records):
+              raise SystemExit('a record is not advisory-only')
+          if len({record['id'] for record in records}) != 3:
+              raise SystemExit('decision identities are not distinct')
+          if len({record['content_hash'] for record in records}) != 3:
+              raise SystemExit('decision content hashes are not distinct')
+
+          evidence = {
+              'candidate_sha': candidate_sha,
+              'cross_python_decisions_identical': True,
+              'decision_matrix_sha256': decision_hash,
+              'focused_test_count_each': summary['focused_test_count_each'],
+              'full_test_count_each': summary['full_test_count_each'],
+              'python_versions': summary['python_versions'],
+              'wheel_sha256_by_python': summary['wheel_sha256_by_python'],
+          }
+          Path('/tmp/validated-evidence.json').write_text(
+              json.dumps(evidence, ensure_ascii=False, allow_nan=False, sort_keys=True, separators=(',', ':')) + '\n',
+              encoding='utf-8',
+          )
+          print(Path('/tmp/validated-evidence.json').read_text(), end='')
+          PY
+
+      - name: Build canonical evidence and checkpoint envelopes
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from __future__ import annotations
+
+          import hashlib
+          import json
+          from pathlib import Path
+
+          resolved = json.loads(Path('/tmp/resolved.json').read_text(encoding='utf-8'))
+          validated = json.loads(Path('/tmp/validated-evidence.json').read_text(encoding='utf-8'))
+          artifacts = json.loads(Path('/tmp/artifact-metadata.json').read_text(encoding='utf-8'))
+          evidence = {
+              'status': 'green_review_pending_unmerged',
+              'repository': 'leon36000/NextGen-Memory',
+              'base': {
+                  'branch': resolved['base_branch'],
+                  'sha': resolved['base_sha'],
+              },
+              'promotion_gate': {
+                  'pull_request': resolved['product_pr'],
+                  'branch': resolved['candidate_branch'],
+                  'sha': resolved['candidate_sha'],
+                  'verifier_branch': resolved['verifier_branch'],
+                  'verifier_run': resolved['verifier_run'],
+                  'focused_test_count_each': validated['focused_test_count_each'],
+                  'full_test_count_each': validated['full_test_count_each'],
+                  'python_versions': validated['python_versions'],
+                  'decision_matrix_sha256': validated['decision_matrix_sha256'],
+                  'wheel_sha256_by_python': validated['wheel_sha256_by_python'],
+                  'artifacts': artifacts,
+                  'sol_verdict': 'pending',
+                  'merge_allowed': False,
+              },
+              'contract': {
+                  'decisions': ['promote', 'hold', 'reject'],
+                  'advisory_only': True,
+                  'hard_reject_precedence': True,
+                  'identity_drift_rejected': True,
+                  'operational_gaps_hold': True,
+                  'promote_requires_promising_and_all_gates': True,
+                  'threshold_equality_and_ulp_covered': True,
+                  'generated_request_count': 5000,
+                  'canonical_uuid5_sha256_identity': True,
+                  'cross_python_decision_matrix_identical': True,
+                  'activation_or_persistence_surface': False,
+              },
+              'safety': {
+                  'merged': False,
+                  'production_database_contacted': False,
+                  'production_migration_applied': False,
+                  'production_application_data_written': False,
+                  'policy_activated': False,
+                  'feedback_written': False,
+                  'telemetry_emitted': False,
+                  'model_or_agent_executed': False,
+                  'release_published': False,
+                  'corrective_retrieval_changed': False,
+                  'tests_weakened': False,
+                  'stubs_added': False,
+                  'sol_verdict_fabricated': False,
+              },
+          }
+          raw = json.dumps(evidence, ensure_ascii=False, allow_nan=False, sort_keys=True, separators=(',', ':')) + '\n'
+          Path('/tmp/evidence.json').write_text(raw, encoding='utf-8')
+          checkpoint = {
+              'checkpoint_key': 'm-head:advisory-policy-promotion-gate-v0:green-readback:20260824',
+              'status': evidence['status'],
+              'repository': evidence['repository'],
+              'evidence_sha256': hashlib.sha256(raw.encode('utf-8')).hexdigest(),
+              'base': evidence['base'],
+              'promotion_gate': evidence['promotion_gate'],
+              'contract': evidence['contract'],
+              'safety': evidence['safety'],
+              'next_action': (
+                  'Obtain a genuine exact-SHA GPT-5.6 Sol verdict. Integrate only '
+                  'after the paired replay registry and every prerequisite. A '
+                  'promote record remains advisory and does not authorize activation.'
+              ),
+          }
+          Path('/tmp/checkpoint.json').write_text(
+              json.dumps(checkpoint, ensure_ascii=False, allow_nan=False, sort_keys=True, separators=(',', ':')) + '\n',
+              encoding='utf-8',
+          )
+          print(Path('/tmp/checkpoint.json').read_text(), end='')
+          PY
+
+      - name: Publish immutable evidence and checkpoint branches
+        shell: bash
+        run: |
+          set -euo pipefail
+          base_sha=$(jq -r '.base_sha' /tmp/resolved.json)
+          evidence_branch='evidence/advisory-policy-promotion-gate-green-20260824'
+          checkpoint_branch='evidence/advisory-policy-promotion-gate-checkpoint-20260824'
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git fetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*'
+
+          if git ls-remote --exit-code --heads origin "$evidence_branch"; then
+            git switch --detach "origin/$evidence_branch"
+            cmp /tmp/evidence.json evidence/advisory-policy-promotion-gate-green-20260824.json
+          else
+            git switch -c "$evidence_branch" "$base_sha"
+            mkdir -p evidence
+            cp /tmp/evidence.json evidence/advisory-policy-promotion-gate-green-20260824.json
+            git add evidence/advisory-policy-promotion-gate-green-20260824.json
+            git diff --cached --check
+            git commit -m 'evidence: certify advisory policy promotion gate exact SHA'
+            git push origin HEAD:"refs/heads/$evidence_branch"
+          fi
+
+          if git ls-remote --exit-code --heads origin "$checkpoint_branch"; then
+            git switch --detach "origin/$checkpoint_branch"
+            cmp /tmp/checkpoint.json evidence/advisory-policy-promotion-gate-checkpoint-20260824.json
+          else
+            git switch -c "$checkpoint_branch" "origin/$evidence_branch"
+            cp /tmp/checkpoint.json evidence/advisory-policy-promotion-gate-checkpoint-20260824.json
+            git add evidence/advisory-policy-promotion-gate-checkpoint-20260824.json
+            git diff --cached --check
+            git commit -m 'evidence: checkpoint advisory policy promotion gate exact SHA'
+            git push origin HEAD:"refs/heads/$checkpoint_branch"
+          fi
+
+      - name: Update canonical PR and publish blind Sol packet
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          pr=$(jq -r '.product_pr' /tmp/resolved.json)
+          sha=$(jq -r '.candidate_sha' /tmp/resolved.json)
+          base_sha=$(jq -r '.base_sha' /tmp/resolved.json)
+          run=$(jq -r '.verifier_run' /tmp/resolved.json)
+          focused=$(jq -r '.focused_test_count_each' /tmp/validated-evidence.json)
+          full=$(jq -r '.full_test_count_each' /tmp/validated-evidence.json)
+          matrix_sha=$(jq -r '.decision_matrix_sha256' /tmp/validated-evidence.json)
+
+          cat > /tmp/pr-body.md <<EOF
+          ## Status
+
+          **GREEN / draft / review_pending / unmerged.** Exact immutable candidate SHA: \`$sha\`.
+
+          Base paired-replay registry SHA: \`$base_sha\`. Exact verifier run: \`$run\`.
+
+          The candidate adds a pure deterministic advisory policy-promotion gate. It validates current/candidate/evaluation/registry identity, finite matched-pair statistics, cost/harm thresholds, operational readiness, rollback, reviewers, evidence age, and artifact integrity. Hard rejection takes precedence over every hold condition; promotion is possible only for a fully qualified \`promising\` evaluator verdict. Every record is canonical SHA-256/UUID5, contains only bounded reason codes and component hashes, and has \`advisory_only=true\`.
+
+          Python 3.12/3.13 exact verification passed Ruff, compileall, \`$focused\` focused and \`$full\` full tests per version, 5,000 generated valid requests, threshold equality/one-ULP properties, hash-seed invariance, strict dependency/privacy/stub audit, isolated wheel imports, and cross-Python byte-identical promote/hold/reject records. Decision-matrix SHA-256: \`$matrix_sha\`.
+
+          No activation, persistence, feedback, database, migration, telemetry emission, model execution, merge, or release occurred. A genuine independent GPT-5.6 Sol \`APPROVE\` on this unchanged SHA is required before merge.
+          EOF
+          gh api --method PATCH "repos/$REPO/pulls/$pr" --raw-field body="$(cat /tmp/pr-body.md)" >/dev/null
+
+          packet=$(cat <<EOF
+          ## Blind GPT-5.6 Sol review request — Advisory Policy Promotion Gate v0
+
+          Return exactly one verdict: \`APPROVE\`, \`CHANGES_REQUIRED\`, or \`BLOCKED_BY_EVIDENCE\`.
+
+          Exact boundary: base \`$base_sha\`, candidate \`$sha\`, branch \`candidate/advisory-policy-promotion-gate-v0-20260824\`, PR #$pr, verifier run \`$run\`. Any SHA movement invalidates this request.
+
+          Review strict input validation, identity matching, registry/evaluation consistency, hard-reject precedence, exact threshold semantics, one-ULP behavior, hold completeness, promote exclusivity, reason ordering, material-input hash coverage, UUID5 domain separation, canonical JSON, privacy, and absence of hidden activation/persistence/network/clock/random/model effects.
+
+          Evidence: Python 3.12/3.13 exact matrices passed \`$focused\` focused and \`$full\` full tests per version, 5,000 generated requests, hash-seed invariance, strict audit, isolated wheel imports, and cross-Python identical promote/hold/reject matrix SHA-256 \`$matrix_sha\`. Inspect the exact eight-path diff, module, tests, logs, and artifacts; do not rely on this prose as proof.
+          EOF
+          )
+          gh api "repos/$REPO/issues/$pr/comments" -f body="$packet"
+          gh api "repos/$REPO/issues/23/comments" -f body="$packet"
+
+      - name: Close this latch without merge
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SELF_PR: ${{ github.event.pull_request.number }}
+        run: gh api --method PATCH "repos/$REPO/pulls/$SELF_PR" -f state=closed >/dev/null
