@@ -1,0 +1,548 @@
+name: Harden paired registry canonical identities r4
+
+on:
+  pull_request:
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  resolve:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    outputs:
+      r3_sha: ${{ steps.resolve.outputs.r3_sha }}
+    steps:
+      - name: Resolve verified-shape r3 producer candidate
+        id: resolve
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          encode() { python -c 'import sys,urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$1"; }
+          branch='candidate/paired-replay-experiment-registry-v0-r3-20260824'
+          base='847ea08e9e9a0d9193adac6d465557270da6ef7d'
+          for attempt in $(seq 1 100); do
+            if gh api "repos/$REPO/branches/$(encode "$branch")" >/tmp/r3.json 2>/dev/null; then
+              sha=$(jq -r '.commit.sha' /tmp/r3.json)
+              comparison=$(gh api "repos/$REPO/compare/$base...$sha")
+              count=$(printf '%s' "$comparison" | jq '.files | length')
+              workflow_count=$(printf '%s' "$comparison" | jq '[.files[].filename | select(startswith(".github/workflows/"))] | length')
+              if [ "$(printf '%s' "$comparison" | jq -r '.status')" = ahead ] && [ "$count" -eq 8 ] && [ "$workflow_count" -eq 0 ]; then
+                echo "r3_sha=$sha" >> "$GITHUB_OUTPUT"
+                exit 0
+              fi
+            fi
+            sleep 15
+          done
+          echo 'r3 producer candidate was not available with its exact eight-path tree' >&2
+          exit 1
+
+  harden:
+    needs: resolve
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.r3_sha }}
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install project and development tools
+        run: python -m pip install -e '.[dev]'
+
+      - name: Replace ambiguous pair UUID names and bound iterable consumption
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('src/nextgen_memory/paired_replay_experiment_registry.py')
+          source = path.read_text(encoding='utf-8')
+          if 'from itertools import islice\n' not in source:
+              marker = 'from enum import StrEnum\n'
+              if source.count(marker) != 1:
+                  raise SystemExit('enum import marker is missing')
+              source = source.replace(marker, marker + 'from itertools import islice\n', 1)
+
+          old_call = 'contexts = _normalize_context_hashes(context_hashes)'
+          new_call = '''contexts = _normalize_context_hashes(
+              context_hashes,
+              maximum_pairs=spec.maximum_pairs,
+          )'''
+          new_call = '\n'.join(
+              line[10:] if line.startswith('          ') else line
+              for line in new_call.splitlines()
+          )
+          if old_call in source:
+              source = source.replace(old_call, new_call, 1)
+          elif 'maximum_pairs=spec.maximum_pairs' not in source:
+              raise SystemExit('planner context-normalization call is missing')
+
+          start = source.index('def _normalize_context_hashes(')
+          end = source.index('\ndef _pair_uuid(', start)
+          normalize = '''def _normalize_context_hashes(
+              context_hashes: Iterable[str],
+              *,
+              maximum_pairs: int,
+          ) -> tuple[str, ...]:
+              if isinstance(context_hashes, (str, bytes, Mapping)):
+                  raise PairedReplayRegistryValidationError(
+                      "context hashes must be a bounded collection"
+                  )
+              try:
+                  iterator = iter(context_hashes)
+              except TypeError as exc:
+                  raise PairedReplayRegistryValidationError(
+                      "context hashes must be iterable"
+                  ) from exc
+              values = tuple(islice(iterator, maximum_pairs + 1))
+              if not values:
+                  raise PairedReplayRegistryValidationError(
+                      "at least one context_set_hash is required"
+                  )
+              if len(values) > maximum_pairs:
+                  raise PairedReplayRegistryValidationError(
+                      "context count exceeds maximum_pairs"
+                  )
+              for value in values:
+                  _require_hash("context_set_hash", value)
+              if len(values) != len(set(values)):
+                  raise PairedReplayRegistryValidationError(
+                      "duplicate context_set_hash values are not allowed"
+                  )
+              return tuple(sorted(values))
+          '''
+          normalize = '\n'.join(
+              line[10:] if line.startswith('          ') else line
+              for line in normalize.splitlines()
+          ).lstrip('\n')
+          source = source[:start] + normalize + source[end:]
+
+          start = source.index('def _pair_uuid(')
+          end = source.index('\ndef _policy_identity(', start)
+          pair_uuid = '''def _pair_uuid(
+              spec: PairedReplayExperimentSpec,
+              context_set_hash: str,
+          ) -> UUID:
+              name = _canonical_json(
+                  {
+                      "schema": _SCHEMA,
+                      "kind": "pair",
+                      "space_id": str(spec.space_id),
+                      "context_set_hash": context_set_hash,
+                      "continuation_set_hash": spec.continuation_set_hash,
+                      "control_policy_version": spec.control_policy_version,
+                      "control_policy_fingerprint": spec.control_policy_fingerprint,
+                      "treatment_policy_version": spec.treatment_policy_version,
+                      "treatment_policy_fingerprint": spec.treatment_policy_fingerprint,
+                      "registry_policy_version": spec.registry_policy_version,
+                  }
+              ).rstrip("\\n")
+              return uuid5(spec.experiment_id, name)
+          '''
+          pair_uuid = '\n'.join(
+              line[10:] if line.startswith('          ') else line
+              for line in pair_uuid.splitlines()
+          ).lstrip('\n')
+          source = source[:start] + pair_uuid + source[end:]
+          path.write_text(source, encoding='utf-8')
+          PY
+
+      - name: Replace pair snapshot validation with fully linked status invariants
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('src/nextgen_memory/paired_replay_experiment_registry.py')
+          source = path.read_text(encoding='utf-8')
+          class_start = source.index('class PairedReplayPairSnapshot:')
+          method_start = source.index('    def __post_init__(self) -> None:', class_start)
+          method_end = source.index('\n    def to_dict(self)', method_start)
+          method = '''    def __post_init__(self) -> None:
+              _require_uuid("pair_id", self.pair_id)
+              _require_uuid("experiment_id", self.experiment_id)
+              ordinal = _positive_integer("ordinal", self.ordinal)
+              if not isinstance(self.arm_order, ReplayArmOrder):
+                  raise PairedReplayRegistryValidationError(
+                      "arm_order must be a ReplayArmOrder"
+                  )
+              if not isinstance(self.status, ReplayPairStatus):
+                  raise PairedReplayRegistryValidationError(
+                      "status must be a ReplayPairStatus"
+                  )
+              arms = tuple(self.recorded_arms)
+              if any(not isinstance(arm, ReplayArm) for arm in arms):
+                  raise PairedReplayRegistryValidationError(
+                      "recorded_arms must contain ReplayArm values"
+                  )
+              if len(arms) != len(set(arms)) or len(arms) > 2:
+                  raise PairedReplayRegistryValidationError(
+                      "recorded_arms must be unique and bounded"
+                  )
+              if self.next_step is not None and not isinstance(
+                  self.next_step, PairedReplayStep
+              ):
+                  raise PairedReplayRegistryValidationError(
+                      "next_step must be a PairedReplayStep or null"
+                  )
+              if self.failure_code is not None and not isinstance(
+                  self.failure_code, ReplayFailureCode
+              ):
+                  raise PairedReplayRegistryValidationError(
+                      "failure_code must be a ReplayFailureCode or null"
+                  )
+              if self.completed_trial_id is not None:
+                  _require_uuid("completed_trial_id", self.completed_trial_id)
+              if self.next_step is not None and (
+                  self.next_step.pair_id != self.pair_id
+                  or self.next_step.experiment_id != self.experiment_id
+              ):
+                  raise PairedReplayRegistryValidationError(
+                      "next_step must belong to the snapshot pair and experiment"
+                  )
+
+              if self.status is ReplayPairStatus.PLANNED:
+                  valid_state = (
+                      not arms
+                      and self.next_step is not None
+                      and self.next_step.arm is self.arm_order.first_arm
+                      and self.next_step.order_position == 1
+                      and self.failure_code is None
+                      and self.completed_trial_id is None
+                  )
+              elif self.status is ReplayPairStatus.FIRST_ARM_RECORDED:
+                  valid_state = (
+                      arms == (self.arm_order.first_arm,)
+                      and self.next_step is not None
+                      and self.next_step.arm is self.arm_order.second_arm
+                      and self.next_step.order_position == 2
+                      and self.failure_code is None
+                      and self.completed_trial_id is None
+                  )
+              elif self.status is ReplayPairStatus.COMPLETE:
+                  valid_state = (
+                      set(arms) == {ReplayArm.CONTROL, ReplayArm.TREATMENT}
+                      and self.next_step is None
+                      and self.failure_code is None
+                      and self.completed_trial_id
+                      == _stable_uuid("trial", str(self.pair_id))
+                  )
+              elif self.status is ReplayPairStatus.CANCELLED:
+                  valid_state = (
+                      len(arms) <= 1
+                      and self.next_step is None
+                      and self.failure_code is ReplayFailureCode.CANCELLED
+                      and self.completed_trial_id is None
+                  )
+              else:
+                  valid_state = (
+                      len(arms) <= 1
+                      and self.next_step is None
+                      and self.failure_code
+                      in {
+                          ReplayFailureCode.EXECUTION_FAILED,
+                          ReplayFailureCode.BUDGET_EXCEEDED,
+                      }
+                      and self.completed_trial_id is None
+                  )
+              if not valid_state:
+                  raise PairedReplayRegistryValidationError(
+                      "pair snapshot fields do not match the declared status"
+                  )
+              object.__setattr__(self, "ordinal", ordinal)
+              object.__setattr__(self, "recorded_arms", arms)
+              object.__setattr__(self, "content_hash", _hash_payload(self.to_dict()))
+          '''
+          method = '\n'.join(
+              line[10:] if line.startswith('          ') else line
+              for line in method.splitlines()
+          ).lstrip('\n')
+          source = source[:method_start] + method + source[method_end:]
+          path.write_text(source, encoding='utf-8')
+          PY
+
+      - name: Add delimiter-collision, bounded-iterator and linked-snapshot adversarial tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > tests/test_paired_replay_experiment_registry_identity_adversarial.py <<'PY'
+          from __future__ import annotations
+
+          import hashlib
+          from dataclasses import replace
+          from uuid import UUID
+
+          import pytest
+
+          from nextgen_memory.bounded_inherited_reranker import BoundedInheritedRerankerConfig
+          from nextgen_memory.causal_credit import OutcomeMeasurement
+          from nextgen_memory.inherited_rerank_telemetry import (
+              build_inherited_rerank_telemetry,
+              fingerprint_bounded_inherited_policy,
+          )
+          from nextgen_memory.paired_replay_experiment_registry import (
+              BalancedPairedReplayPlanner,
+              InMemoryPairedReplayExperimentRegistry,
+              PairedReplayArmResult,
+              PairedReplayExperimentSpec,
+              PairedReplayRegistryValidationError,
+              ReplayArm,
+          )
+
+          EXPERIMENT_ID = UUID("00000000-0000-5000-8000-000000001001")
+          SPACE_ID = UUID("00000000-0000-5000-8000-000000001002")
+          ROUTER_ID = UUID("00000000-0000-5000-8000-000000001003")
+
+
+          def digest(value: str) -> str:
+              return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+          def config(arm: ReplayArm) -> BoundedInheritedRerankerConfig:
+              return BoundedInheritedRerankerConfig(
+                  policy_version="control-v1" if arm is ReplayArm.CONTROL else "treatment-v1"
+              )
+
+
+          def make_spec(**overrides: object) -> PairedReplayExperimentSpec:
+              control = config(ReplayArm.CONTROL)
+              treatment = config(ReplayArm.TREATMENT)
+              values: dict[str, object] = {
+                  "experiment_id": EXPERIMENT_ID,
+                  "space_id": SPACE_ID,
+                  "control_policy_version": control.policy_version,
+                  "control_policy_fingerprint": fingerprint_bounded_inherited_policy(control),
+                  "treatment_policy_version": treatment.policy_version,
+                  "treatment_policy_fingerprint": fingerprint_bounded_inherited_policy(treatment),
+                  "continuation_set_hash": digest("continuation"),
+                  "order_seed_hash": digest("seed"),
+                  "maximum_pairs": 4,
+                  "maximum_tokens_per_arm": 100,
+                  "maximum_latency_ms_per_arm": 50.0,
+                  "maximum_total_tokens": 800,
+                  "maximum_total_latency_ms": 400.0,
+              }
+              values.update(overrides)
+              return PairedReplayExperimentSpec(**values)  # type: ignore[arg-type]
+
+
+          def test_pair_uuid_name_is_unambiguous_across_delimiter_shift() -> None:
+              x, y, z, w = (character * 64 for character in "1234")
+              first = make_spec(
+                  control_policy_version=f"control:{x}",
+                  control_policy_fingerprint=y,
+                  treatment_policy_version=z,
+                  treatment_policy_fingerprint=w,
+                  registry_policy_version="r",
+              )
+              second = make_spec(
+                  control_policy_version="control",
+                  control_policy_fingerprint=x,
+                  treatment_policy_version=y,
+                  treatment_policy_fingerprint=z,
+                  registry_policy_version=f"{w}:r",
+              )
+              context = digest("same-context")
+
+              first_pair = BalancedPairedReplayPlanner().plan(first, (context,)).assignments[0]
+              second_pair = BalancedPairedReplayPlanner().plan(second, (context,)).assignments[0]
+
+              assert first_pair.id != second_pair.id
+              assert first_pair.content_hash != second_pair.content_hash
+
+
+          def test_unbounded_iterable_is_consumed_only_through_maximum_plus_one() -> None:
+              class GuardedContexts:
+                  def __init__(self) -> None:
+                      self.pulls = 0
+
+                  def __iter__(self):
+                      return self
+
+                  def __next__(self) -> str:
+                      self.pulls += 1
+                      if self.pulls <= 3:
+                          return digest(f"context:{self.pulls}")
+                      raise AssertionError("planner over-consumed an unbounded iterable")
+
+              contexts = GuardedContexts()
+              with pytest.raises(PairedReplayRegistryValidationError, match="maximum_pairs"):
+                  BalancedPairedReplayPlanner().plan(
+                      make_spec(maximum_pairs=2),
+                      contexts,
+                  )
+              assert contexts.pulls == 3
+
+
+          def test_snapshot_rejects_next_step_from_another_pair() -> None:
+              plan = BalancedPairedReplayPlanner().plan(
+                  make_spec(),
+                  (digest("a"), digest("b")),
+              )
+              registry = InMemoryPairedReplayExperimentRegistry()
+              registry.register_plan(plan)
+              snapshots = registry.pair_snapshots(EXPERIMENT_ID)
+              assert snapshots[0].next_step is not None
+              assert snapshots[1].next_step is not None
+
+              with pytest.raises(PairedReplayRegistryValidationError, match="snapshot pair"):
+                  replace(snapshots[0], next_step=snapshots[1].next_step)
+
+
+          def test_snapshot_rejects_wrong_order_position_and_forged_trial_id() -> None:
+              plan = BalancedPairedReplayPlanner().plan(make_spec(), (digest("a"),))
+              registry = InMemoryPairedReplayExperimentRegistry()
+              registry.register_plan(plan)
+              planned = registry.pair_snapshots(EXPERIMENT_ID)[0]
+              assert planned.next_step is not None
+
+              with pytest.raises(PairedReplayRegistryValidationError, match="status"):
+                  replace(
+                      planned,
+                      next_step=replace(planned.next_step, order_position=2),
+                  )
+
+              def result(step) -> PairedReplayArmResult:
+                  return PairedReplayArmResult(
+                      step_id=step.id,
+                      pair_id=step.pair_id,
+                      experiment_id=step.experiment_id,
+                      arm=step.arm,
+                      telemetry_batch=build_inherited_rerank_telemetry(
+                          space_id=SPACE_ID,
+                          router_decision_id=ROUTER_ID,
+                          config=config(step.arm),
+                          results=(),
+                      ),
+                      outcome=OutcomeMeasurement(
+                          score=0.4 if step.arm is ReplayArm.CONTROL else 0.5,
+                          task_success=True,
+                          tokens=10,
+                          latency_ms=5.0,
+                      ),
+                  )
+
+              first = registry.next_steps(EXPERIMENT_ID)[0]
+              registry.record_arm_result(result(first))
+              second = registry.next_steps(EXPERIMENT_ID)[0]
+              registry.record_arm_result(result(second))
+              complete = registry.pair_snapshots(EXPERIMENT_ID)[0]
+
+              with pytest.raises(PairedReplayRegistryValidationError, match="status"):
+                  replace(
+                      complete,
+                      completed_trial_id=UUID(
+                          "00000000-0000-5000-8000-000000001099"
+                      ),
+                  )
+          PY
+          sed -i 's/^          //' tests/test_paired_replay_experiment_registry_identity_adversarial.py
+
+      - name: Normalize, verify full suite, audit and isolated wheel
+        shell: bash
+        run: |
+          set -euo pipefail
+          ruff format \
+            src/nextgen_memory/paired_replay_experiment_registry.py \
+            tests/test_paired_replay_experiment_registry_identity_adversarial.py
+          ruff check --fix \
+            src/nextgen_memory/paired_replay_experiment_registry.py \
+            tests/test_paired_replay_experiment_registry_identity_adversarial.py
+          ruff check .
+          python -m compileall -q src scripts
+          python -m pytest -q \
+            tests/test_paired_replay_experiment_registry.py \
+            tests/test_paired_replay_experiment_registry_adversarial.py \
+            tests/test_paired_replay_experiment_registry_identity_adversarial.py \
+            tests/test_paired_replay_experiment_registry_properties.py \
+            tests/test_paired_replay_experiment_registry_public_api.py \
+            | tee /tmp/focused-tests.txt
+          python -m pytest -q | tee /tmp/full-tests.txt
+          python - <<'PY'
+          import ast
+          from pathlib import Path
+          source = Path('src/nextgen_memory/paired_replay_experiment_registry.py').read_text(encoding='utf-8')
+          tree = ast.parse(source)
+          forbidden_imports = {'asyncio','datetime','httpx','os','pathlib','psycopg','pymongo','random','requests','socket','sqlalchemy','subprocess','temporalio','time','urllib'}
+          forbidden_calls = {'eval','exec','open','sleep','system','urlopen','uuid1','uuid4','write_bytes','write_text'}
+          findings=[]
+          for node in ast.walk(tree):
+              if isinstance(node, ast.Pass): findings.append(f'{node.lineno}:pass')
+              elif isinstance(node, ast.Raise):
+                  target=node.exc.func if isinstance(node.exc, ast.Call) else node.exc
+                  if (isinstance(target,ast.Name) and target.id=='NotImplementedError') or (isinstance(target,ast.Attribute) and target.attr=='NotImplementedError'):
+                      findings.append(f'{node.lineno}:NotImplementedError')
+              elif isinstance(node, ast.Import):
+                  for alias in node.names:
+                      if alias.name.split('.',1)[0] in forbidden_imports: findings.append(f'{node.lineno}:import:{alias.name}')
+              elif isinstance(node, ast.ImportFrom):
+                  if (node.module or '').split('.',1)[0] in forbidden_imports: findings.append(f'{node.lineno}:import:{node.module}')
+              elif isinstance(node, ast.Call):
+                  name=node.func.id if isinstance(node.func,ast.Name) else node.func.attr if isinstance(node.func,ast.Attribute) else None
+                  if name in forbidden_calls: findings.append(f'{node.lineno}:call:{name}')
+          if findings: raise SystemExit('\n'.join(findings))
+          PY
+          rm -rf wheelhouse "$RUNNER_TEMP/paired-registry-r4-wheel-venv"
+          python -m pip wheel --no-deps . -w wheelhouse
+          wheel=$(find wheelhouse -maxdepth 1 -type f -name '*.whl')
+          test -n "$wheel"
+          python -m venv "$RUNNER_TEMP/paired-registry-r4-wheel-venv"
+          "$RUNNER_TEMP/paired-registry-r4-wheel-venv/bin/python" -m pip install --no-deps "$wheel"
+          "$RUNNER_TEMP/paired-registry-r4-wheel-venv/bin/python" - <<'PY'
+          import nextgen_memory
+          from nextgen_memory import BalancedPairedReplayPlanner, PairedReplayPlan
+          assert BalancedPairedReplayPlanner is not None
+          assert PairedReplayPlan is not None
+          assert 'BalancedPairedReplayPlanner' in nextgen_memory.__all__
+          PY
+          "$RUNNER_TEMP/paired-registry-r4-wheel-venv/bin/python" -m pip check
+
+      - name: Prove exact nine-path scope and publish immutable r4 candidate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          base='847ea08e9e9a0d9193adac6d465557270da6ef7d'
+          git add -A
+          mapfile -t changed < <(git diff --cached --name-only "$base" | sort)
+          expected=(
+            docs/superpowers/plans/2026-08-24-paired-replay-experiment-registry-v0.md
+            docs/superpowers/specs/2026-08-15-paired-replay-experiment-registry-v0-design.md
+            src/nextgen_memory/__init__.py
+            src/nextgen_memory/paired_replay_experiment_registry.py
+            tests/test_paired_replay_experiment_registry.py
+            tests/test_paired_replay_experiment_registry_adversarial.py
+            tests/test_paired_replay_experiment_registry_identity_adversarial.py
+            tests/test_paired_replay_experiment_registry_properties.py
+            tests/test_paired_replay_experiment_registry_public_api.py
+          )
+          test "${#changed[@]}" -eq "${#expected[@]}"
+          diff -u <(printf '%s\n' "${expected[@]}" | sort) <(printf '%s\n' "${changed[@]}")
+          test -z "$(git diff --cached --name-only "$base" -- 'migrations/**' '.github/workflows/**' pyproject.toml 'src/nextgen_memory/corrective_retrieval_*')"
+          git diff --cached --check
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'fix: canonicalize paired registry identities'
+          candidate='candidate/paired-replay-experiment-registry-v0-r4-20260824'
+          sha=$(git rev-parse HEAD)
+          existing=$(git ls-remote --heads origin "$candidate" | awk '{print $1}')
+          if [ -n "$existing" ]; then
+            test "$existing" = "$sha"
+          else
+            git push origin "$sha:refs/heads/$candidate"
+          fi
+          gh api "repos/$REPO/issues/132/comments" -f body="Identity-hardening producer r4 GREEN at exact SHA \`$sha\` on \`$candidate\`. Pair UUID names now use canonical JSON rather than delimiter concatenation; iterables are bounded to maximum_pairs+1; snapshot steps and completed-trial IDs are cross-linked. Independent Python 3.12/3.13 verification remains mandatory."
