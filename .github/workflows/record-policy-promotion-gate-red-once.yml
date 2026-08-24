@@ -1,7 +1,11 @@
-name: Record advisory policy promotion gate RED once
+name: Record advisory policy promotion gate RED v2 once
 
 on:
   pull_request:
+
+concurrency:
+  group: advisory-policy-promotion-gate-v0-red
+  cancel-in-progress: true
 
 permissions:
   contents: write
@@ -10,6 +14,7 @@ jobs:
   record-red:
     if: github.event.pull_request.head.ref == 'feat/advisory-policy-promotion-gate-v0-20260824'
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
         with:
@@ -24,67 +29,240 @@ jobs:
       - name: Install project and development tools
         run: python -m pip install -e '.[dev]'
 
-      - name: Normalize and statically verify the tests-only contract
+      - name: Resolve immutable registry base
+        shell: bash
         run: |
-          ruff format \
-            tests/test_policy_promotion_gate.py \
-            tests/test_policy_promotion_gate_properties.py \
+          set -euo pipefail
+          git fetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*'
+          base_sha=$(git rev-parse origin/candidate/paired-replay-experiment-registry-v0-20260824)
+          test "$(git merge-base HEAD "$base_sha")" = "$base_sha"
+          printf 'BASE_SHA=%s\n' "$base_sha" | tee -a "$GITHUB_ENV"
+
+      - name: Normalize the complete tests-only contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('tests/test_policy_promotion_gate_properties.py')
+          source = path.read_text(encoding='utf-8')
+          start_marker = "    script = r'''"
+          start = source.index(start_marker)
+          end = source.index("\n'''", start) + len("\n'''")
+          replacement = r'''    script = r'''
+          from uuid import UUID
+
+          from nextgen_memory.paired_rerank_policy_evaluation import (
+              PairedPolicyVerdict,
+          )
+          from nextgen_memory.policy_promotion_gate import (
+              AdvisoryPolicyPromotionGate,
+              PairedPolicyEvidence,
+              PolicyIdentity,
+              PolicyOperationalReadiness,
+              PolicyPromotionGateConfig,
+              PolicyPromotionRequest,
+          )
+
+          current = PolicyIdentity(
+              policy_version="control-v1",
+              policy_fingerprint="1" * 64,
+              source_sha="3" * 40,
+          )
+          candidate = PolicyIdentity(
+              policy_version="treatment-v1",
+              policy_fingerprint="2" * 64,
+              source_sha="4" * 40,
+          )
+          evidence = PairedPolicyEvidence(
+              evaluation_id=UUID(
+                  "00000000-0000-5000-8000-000000001111"
+              ),
+              evaluation_content_hash="5" * 64,
+              control_policy_version=current.policy_version,
+              control_policy_fingerprint=current.policy_fingerprint,
+              treatment_policy_version=candidate.policy_version,
+              treatment_policy_fingerprint=candidate.policy_fingerprint,
+              evaluated_base_sha=current.source_sha,
+              evaluated_candidate_sha=candidate.source_sha,
+              verdict=PairedPolicyVerdict.PROMISING,
+              matched_pair_count=24,
+              mean_score_effect=0.08,
+              score_confidence_lower_bound=0.04,
+              score_confidence_upper_bound=0.12,
+              score_standard_error=0.02,
+              mean_token_delta=4.0,
+              mean_latency_delta_ms=8.0,
+              harm_rate=0.01,
+              registry_summary_content_hash="6" * 64,
+              registry_pair_count=24,
+              registry_completed_trial_count=24,
+              registry_failed_count=0,
+              registry_cancelled_count=0,
+              registry_active_count=0,
+          )
+          ready = PolicyOperationalReadiness(
+              tests_passed=True,
+              integration_passed=True,
+              artifact_integrity_passed=True,
+              rollback_ready=True,
+              safety_violation=False,
+              reviewer_count=2,
+              evidence_age_seconds=60.0,
+          )
+          config = PolicyPromotionGateConfig(
+              minimum_matched_pairs=20,
+              minimum_score_lower_bound=0.0,
+              maximum_score_standard_error=0.05,
+              maximum_mean_token_delta=10.0,
+              maximum_mean_latency_delta_ms=20.0,
+              maximum_harm_rate=0.05,
+              maximum_evidence_age_seconds=3600.0,
+              minimum_reviewer_count=2,
+              gate_policy_version=(
+                  "advisory-policy-promotion-gate-v0"
+              ),
+          )
+          request = PolicyPromotionRequest(
+              current_policy=current,
+              candidate_policy=candidate,
+              evaluation=evidence,
+              readiness=ready,
+          )
+          record = AdvisoryPolicyPromotionGate().evaluate(request, config)
+          print(record.render_json(), end="")
+          ''''''
+          replacement = '\n'.join(
+              line[10:] if line.startswith('          ') else line
+              for line in replacement.splitlines()
+          )
+          path.write_text(
+              source[:start] + replacement + source[end:],
+              encoding='utf-8',
+          )
+          PY
+
+          files=(
+            tests/test_policy_promotion_gate.py
+            tests/test_policy_promotion_gate_properties.py
             tests/test_policy_promotion_gate_public_api.py
-          ruff check --fix \
-            tests/test_policy_promotion_gate.py \
-            tests/test_policy_promotion_gate_properties.py \
-            tests/test_policy_promotion_gate_public_api.py
-          ruff check \
-            tests/test_policy_promotion_gate.py \
-            tests/test_policy_promotion_gate_properties.py \
-            tests/test_policy_promotion_gate_public_api.py
+          )
+          ruff check --fix "${files[@]}"
+          ruff format "${files[@]}"
+          ruff check "${files[@]}"
+          ruff format --check "${files[@]}"
+          python -m py_compile "${files[@]}"
           git diff --check
+
+      - name: Materialize isolated base-plus-tests-only workspace
+        shell: bash
+        run: |
+          set -euo pipefail
+          red_root="$RUNNER_TEMP/advisory-policy-promotion-red"
+          rm -rf "$red_root"
+          git worktree add --detach "$red_root" "$BASE_SHA"
+          mkdir -p "$red_root/tests" "$red_root/docs"
+          cp tests/test_policy_promotion_gate.py "$red_root/tests/"
+          cp tests/test_policy_promotion_gate_properties.py "$red_root/tests/"
+          cp tests/test_policy_promotion_gate_public_api.py "$red_root/tests/"
+
+          cat > "$red_root/docs/policy-promotion-gate-v0-red.md" <<EOF
+          # Advisory Policy Promotion Gate v0 — TDD RED Evidence
+
+          **Date:** 2026-08-24
+          **Base branch:** \`candidate/paired-replay-experiment-registry-v0-20260824\`
+          **Base SHA:** \`$BASE_SHA\`
+          **TDD branch:** \`tdd/advisory-policy-promotion-gate-v0-red-20260824\`
+
+          The three tests-only contract files are Ruff-clean and syntactically valid. In an isolated worktree at the immutable base SHA, pytest collection fails only because \`nextgen_memory.policy_promotion_gate\` does not exist. The implementation module and package-root exports are absent.
+
+          This RED fixes the advisory decision, hard-rejection precedence, hold conditions, identity drift, threshold-neighborhood, registry-completeness, generated-property, canonical-JSON, privacy, retry, process-hash-seed, and public-API contract before implementation qualification.
+          EOF
+          sed -i 's/^          //' "$red_root/docs/policy-promotion-gate-v0-red.md"
 
       - name: Prove precise module-absence RED
         shell: bash
         run: |
           set -euo pipefail
+          red_root="$RUNNER_TEMP/advisory-policy-promotion-red"
+          cd "$red_root"
           test ! -e src/nextgen_memory/policy_promotion_gate.py
+          if grep -F 'policy_promotion_gate' src/nextgen_memory/__init__.py; then
+            echo 'base package root unexpectedly exports the absent module' >&2
+            exit 1
+          fi
+
           set +e
-          python -m pytest -q \
+          PYTHONPATH="$PWD/src" python -m pytest -q \
             tests/test_policy_promotion_gate.py \
             tests/test_policy_promotion_gate_properties.py \
             tests/test_policy_promotion_gate_public_api.py \
-            > /tmp/policy-promotion-red.txt 2>&1
+            > /tmp/advisory-policy-promotion-red.txt 2>&1
           red_rc=$?
           set -e
           test "$red_rc" -ne 0
-          grep -F "ModuleNotFoundError: No module named 'nextgen_memory.policy_promotion_gate'" \
-            /tmp/policy-promotion-red.txt >/dev/null
-          test "$(grep -c "ModuleNotFoundError: No module named 'nextgen_memory.policy_promotion_gate'" /tmp/policy-promotion-red.txt)" -ge 3
-          if grep -E 'SyntaxError|IndentationError|NameError|ImportError:' /tmp/policy-promotion-red.txt; then
+          test "$(grep -c '^ERROR collecting ' /tmp/advisory-policy-promotion-red.txt)" -eq 3
+          test "$(grep -c "ModuleNotFoundError: No module named 'nextgen_memory.policy_promotion_gate'" /tmp/advisory-policy-promotion-red.txt)" -eq 3
+          if grep -E 'SyntaxError|IndentationError|NameError|ImportError:' \
+            /tmp/advisory-policy-promotion-red.txt; then
             echo 'RED contains an unintended failure class' >&2
             exit 1
           fi
-          tail -n 160 /tmp/policy-promotion-red.txt
+          tail -n 160 /tmp/advisory-policy-promotion-red.txt
 
-      - name: Persist bounded RED evidence and remove the transport
+      - name: Publish immutable deterministic RED branch
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p docs
-          cat > docs/policy-promotion-gate-v0-red.md <<EOF
-          # Advisory Policy Promotion Gate v0 — TDD RED Evidence
+          red_root="$RUNNER_TEMP/advisory-policy-promotion-red"
+          red_branch='tdd/advisory-policy-promotion-gate-v0-red-20260824'
+          cd "$red_root"
+          git add \
+            docs/policy-promotion-gate-v0-red.md \
+            tests/test_policy_promotion_gate.py \
+            tests/test_policy_promotion_gate_properties.py \
+            tests/test_policy_promotion_gate_public_api.py
+          git diff --cached --check
+          mapfile -t changed < <(git diff --cached --name-only | sort)
+          expected=(
+            docs/policy-promotion-gate-v0-red.md
+            tests/test_policy_promotion_gate.py
+            tests/test_policy_promotion_gate_properties.py
+            tests/test_policy_promotion_gate_public_api.py
+          )
+          test "${#changed[@]}" -eq "${#expected[@]}"
+          diff -u <(printf '%s\n' "${expected[@]}" | sort) <(printf '%s\n' "${changed[@]}")
 
-          **Date:** 2026-08-24
-          **Base branch:** \`candidate/paired-replay-experiment-registry-v0-20260824\`
-          **Development branch:** \`feat/advisory-policy-promotion-gate-v0-20260824\`
-          **Workflow run:** \`${GITHUB_RUN_ID}\`
+          proposed_tree=$(git write-tree)
+          remote_sha=$(git ls-remote --heads origin "$red_branch" | awk '{print $1}')
+          if [ -n "$remote_sha" ]; then
+            git fetch --no-tags origin "+refs/heads/$red_branch:refs/remotes/origin/$red_branch"
+            remote_tree=$(git rev-parse "origin/$red_branch^{tree}")
+            test "$remote_tree" = "$proposed_tree"
+            red_sha=$remote_sha
+          else
+            git config user.name 'github-actions[bot]'
+            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+            git commit -m 'test: record advisory policy promotion gate RED'
+            red_sha=$(git rev-parse HEAD)
+            git push origin "$red_sha:refs/heads/$red_branch"
+          fi
+          printf 'RED_SHA=%s\n' "$red_sha" | tee -a "$GITHUB_ENV"
 
-          Ruff passed for all three tests-only contract files. Pytest collection then failed specifically because \`nextgen_memory.policy_promotion_gate\` did not exist. No implementation module or package-root export was present.
-
-          This RED establishes the advisory decision, rejection precedence, hold conditions, identity drift, threshold neighborhoods, generated-property, canonical-JSON, privacy and public-API contract before implementation.
-          EOF
-          sed -i 's/^          //' docs/policy-promotion-gate-v0-red.md
+      - name: Commit normalized tests and remove this one-shot transport
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$GITHUB_WORKSPACE"
           rm .github/workflows/record-policy-promotion-gate-red-once.yml
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add -A
+          git add \
+            .github/workflows/record-policy-promotion-gate-red-once.yml \
+            tests/test_policy_promotion_gate.py \
+            tests/test_policy_promotion_gate_properties.py \
+            tests/test_policy_promotion_gate_public_api.py
           git diff --cached --check
-          git commit -m 'test: record advisory policy promotion gate RED'
+          git commit -m 'test: normalize advisory policy promotion gate contract'
           git push origin HEAD:feat/advisory-policy-promotion-gate-v0-20260824
