@@ -8,6 +8,12 @@ import sys
 from pathlib import Path
 from uuid import UUID
 
+from nextgen_memory.bounded_inherited_reranker import BoundedInheritedRerankerConfig
+from nextgen_memory.causal_credit import OutcomeMeasurement
+from nextgen_memory.inherited_rerank_telemetry import (
+    build_inherited_rerank_telemetry,
+    fingerprint_bounded_inherited_policy,
+)
 from nextgen_memory.paired_replay_experiment_registry import (
     BalancedPairedReplayPlanner,
     InMemoryPairedReplayExperimentRegistry,
@@ -17,13 +23,6 @@ from nextgen_memory.paired_replay_experiment_registry import (
     ReplayArm,
     ReplayFailureCode,
     ReplayPairStatus,
-)
-
-from nextgen_memory.bounded_inherited_reranker import BoundedInheritedRerankerConfig
-from nextgen_memory.causal_credit import OutcomeMeasurement
-from nextgen_memory.inherited_rerank_telemetry import (
-    build_inherited_rerank_telemetry,
-    fingerprint_bounded_inherited_policy,
 )
 
 ROOT = Path(__file__).resolve().parents[1]

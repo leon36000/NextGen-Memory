@@ -9,7 +9,6 @@ from collections.abc import Iterable, Mapping, Sequence, Set
 from dataclasses import dataclass, field
 from enum import StrEnum
 from math import isfinite
-from typing import Any
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 from .causal_credit import OutcomeMeasurement
@@ -102,21 +101,13 @@ class PairedReplayExperimentSpec:
     def __post_init__(self) -> None:
         _require_uuid("experiment_id", self.experiment_id)
         _require_uuid("space_id", self.space_id)
-        control_version = _required_text(
-            "control_policy_version", self.control_policy_version
-        )
+        control_version = _required_text("control_policy_version", self.control_policy_version)
         treatment_version = _required_text(
             "treatment_policy_version", self.treatment_policy_version
         )
-        registry_version = _required_text(
-            "registry_policy_version", self.registry_policy_version
-        )
-        _require_hash(
-            "control_policy_fingerprint", self.control_policy_fingerprint
-        )
-        _require_hash(
-            "treatment_policy_fingerprint", self.treatment_policy_fingerprint
-        )
+        registry_version = _required_text("registry_policy_version", self.registry_policy_version)
+        _require_hash("control_policy_fingerprint", self.control_policy_fingerprint)
+        _require_hash("treatment_policy_fingerprint", self.treatment_policy_fingerprint)
         _require_hash("continuation_set_hash", self.continuation_set_hash)
         _require_hash("order_seed_hash", self.order_seed_hash)
         if self.control_policy_fingerprint == self.treatment_policy_fingerprint:
@@ -130,9 +121,7 @@ class PairedReplayExperimentSpec:
         maximum_latency_ms_per_arm = _positive_number(
             "maximum_latency_ms_per_arm", self.maximum_latency_ms_per_arm
         )
-        maximum_total_tokens = _positive_integer(
-            "maximum_total_tokens", self.maximum_total_tokens
-        )
+        maximum_total_tokens = _positive_integer("maximum_total_tokens", self.maximum_total_tokens)
         maximum_total_latency_ms = _positive_number(
             "maximum_total_latency_ms", self.maximum_total_latency_ms
         )
@@ -149,16 +138,10 @@ class PairedReplayExperimentSpec:
         object.__setattr__(self, "treatment_policy_version", treatment_version)
         object.__setattr__(self, "registry_policy_version", registry_version)
         object.__setattr__(self, "maximum_pairs", maximum_pairs)
-        object.__setattr__(
-            self, "maximum_tokens_per_arm", maximum_tokens_per_arm
-        )
-        object.__setattr__(
-            self, "maximum_latency_ms_per_arm", maximum_latency_ms_per_arm
-        )
+        object.__setattr__(self, "maximum_tokens_per_arm", maximum_tokens_per_arm)
+        object.__setattr__(self, "maximum_latency_ms_per_arm", maximum_latency_ms_per_arm)
         object.__setattr__(self, "maximum_total_tokens", maximum_total_tokens)
-        object.__setattr__(
-            self, "maximum_total_latency_ms", maximum_total_latency_ms
-        )
+        object.__setattr__(self, "maximum_total_latency_ms", maximum_total_latency_ms)
         object.__setattr__(self, "content_hash", _hash_payload(self.to_dict()))
 
     def to_dict(self) -> dict[str, object]:
@@ -201,9 +184,7 @@ class PairedReplayAssignment:
         _require_hash("continuation_set_hash", self.continuation_set_hash)
         ordinal = _positive_integer("ordinal", self.ordinal)
         if not isinstance(self.arm_order, ReplayArmOrder):
-            raise PairedReplayRegistryValidationError(
-                "arm_order must be a ReplayArmOrder"
-            )
+            raise PairedReplayRegistryValidationError("arm_order must be a ReplayArmOrder")
         object.__setattr__(self, "ordinal", ordinal)
         object.__setattr__(self, "content_hash", _hash_payload(self.to_dict()))
 
@@ -232,26 +213,14 @@ class PairedReplayPlanSummary:
 
     def __post_init__(self) -> None:
         pair_count = _positive_integer("pair_count", self.pair_count)
-        control_count = _nonnegative_integer(
-            "control_first_count", self.control_first_count
-        )
-        treatment_count = _nonnegative_integer(
-            "treatment_first_count", self.treatment_first_count
-        )
-        tokens = _positive_integer(
-            "worst_case_total_tokens", self.worst_case_total_tokens
-        )
-        latency = _positive_number(
-            "worst_case_total_latency_ms", self.worst_case_total_latency_ms
-        )
+        control_count = _nonnegative_integer("control_first_count", self.control_first_count)
+        treatment_count = _nonnegative_integer("treatment_first_count", self.treatment_first_count)
+        tokens = _positive_integer("worst_case_total_tokens", self.worst_case_total_tokens)
+        latency = _positive_number("worst_case_total_latency_ms", self.worst_case_total_latency_ms)
         if control_count + treatment_count != pair_count:
-            raise PairedReplayRegistryValidationError(
-                "arm-order counts must partition pair_count"
-            )
+            raise PairedReplayRegistryValidationError("arm-order counts must partition pair_count")
         if abs(control_count - treatment_count) > 1:
-            raise PairedReplayRegistryValidationError(
-                "arm-order counts must differ by at most one"
-            )
+            raise PairedReplayRegistryValidationError("arm-order counts must differ by at most one")
         object.__setattr__(self, "pair_count", pair_count)
         object.__setattr__(self, "control_first_count", control_count)
         object.__setattr__(self, "treatment_first_count", treatment_count)
@@ -282,47 +251,31 @@ class PairedReplayPlan:
     def __post_init__(self) -> None:
         _require_uuid("id", self.id)
         if not isinstance(self.spec, PairedReplayExperimentSpec):
-            raise PairedReplayRegistryValidationError(
-                "spec must be a PairedReplayExperimentSpec"
-            )
+            raise PairedReplayRegistryValidationError("spec must be a PairedReplayExperimentSpec")
         assignments = tuple(self.assignments)
         if not assignments:
-            raise PairedReplayRegistryValidationError(
-                "assignments must contain at least one pair"
-            )
-        if any(
-            not isinstance(item, PairedReplayAssignment) for item in assignments
-        ):
+            raise PairedReplayRegistryValidationError("assignments must contain at least one pair")
+        if any(not isinstance(item, PairedReplayAssignment) for item in assignments):
             raise PairedReplayRegistryValidationError(
                 "assignments must contain PairedReplayAssignment values"
             )
-        if tuple(item.ordinal for item in assignments) != tuple(
-            range(1, len(assignments) + 1)
-        ):
+        if tuple(item.ordinal for item in assignments) != tuple(range(1, len(assignments) + 1)):
             raise PairedReplayRegistryValidationError(
                 "assignments must use contiguous deterministic ordinals"
             )
         if len({item.id for item in assignments}) != len(assignments):
-            raise PairedReplayRegistryValidationError(
-                "assignment pair identities must be unique"
-            )
+            raise PairedReplayRegistryValidationError("assignment pair identities must be unique")
         if any(
             item.experiment_id != self.spec.experiment_id
             or item.space_id != self.spec.space_id
             or item.continuation_set_hash != self.spec.continuation_set_hash
             for item in assignments
         ):
-            raise PairedReplayRegistryValidationError(
-                "assignments must match the experiment spec"
-            )
+            raise PairedReplayRegistryValidationError("assignments must match the experiment spec")
         if not isinstance(self.summary, PairedReplayPlanSummary):
-            raise PairedReplayRegistryValidationError(
-                "summary must be a PairedReplayPlanSummary"
-            )
+            raise PairedReplayRegistryValidationError("summary must be a PairedReplayPlanSummary")
         if self.summary.pair_count != len(assignments):
-            raise PairedReplayRegistryValidationError(
-                "summary pair_count must match assignments"
-            )
+            raise PairedReplayRegistryValidationError("summary pair_count must match assignments")
         _require_hash("content_hash", self.content_hash)
         expected_hash = _hash_payload(self._identity_payload(assignments))
         if self.content_hash != expected_hash:
@@ -331,9 +284,7 @@ class PairedReplayPlan:
             )
         expected_id = _stable_uuid("plan", self.content_hash)
         if self.id != expected_id:
-            raise PairedReplayRegistryValidationError(
-                "plan id does not match immutable content"
-            )
+            raise PairedReplayRegistryValidationError("plan id does not match immutable content")
         object.__setattr__(self, "assignments", assignments)
 
     def _identity_payload(
@@ -344,9 +295,7 @@ class PairedReplayPlan:
             "spec": self.spec.to_dict(),
             "spec_content_hash": self.spec.content_hash,
             "assignments": [item.to_dict() for item in assignments],
-            "assignment_content_hashes": [
-                item.content_hash for item in assignments
-            ],
+            "assignment_content_hashes": [item.content_hash for item in assignments],
             "summary": self.summary.to_dict(),
             "summary_content_hash": self.summary.content_hash,
         }
@@ -376,20 +325,12 @@ class BalancedPairedReplayPlanner:
         context_hashes: Iterable[str],
     ) -> PairedReplayPlan:
         if not isinstance(spec, PairedReplayExperimentSpec):
-            raise PairedReplayRegistryValidationError(
-                "spec must be a PairedReplayExperimentSpec"
-            )
+            raise PairedReplayRegistryValidationError("spec must be a PairedReplayExperimentSpec")
         contexts = _normalize_context_hashes(context_hashes)
         if len(contexts) > spec.maximum_pairs:
-            raise PairedReplayRegistryValidationError(
-                "context count exceeds maximum_pairs"
-            )
-        worst_case_tokens = (
-            len(contexts) * 2 * spec.maximum_tokens_per_arm
-        )
-        worst_case_latency = (
-            len(contexts) * 2.0 * spec.maximum_latency_ms_per_arm
-        )
+            raise PairedReplayRegistryValidationError("context count exceeds maximum_pairs")
+        worst_case_tokens = len(contexts) * 2 * spec.maximum_tokens_per_arm
+        worst_case_latency = len(contexts) * 2.0 * spec.maximum_latency_ms_per_arm
         if worst_case_tokens > spec.maximum_total_tokens:
             raise PairedReplayRegistryValidationError(
                 "worst-case token budget exceeds maximum_total_tokens"
@@ -403,9 +344,7 @@ class BalancedPairedReplayPlanner:
             sorted(
                 contexts,
                 key=lambda value: (
-                    hashlib.sha256(
-                        f"{spec.order_seed_hash}:{value}".encode("ascii")
-                    ).hexdigest(),
+                    hashlib.sha256(f"{spec.order_seed_hash}:{value}".encode("ascii")).hexdigest(),
                     value,
                 ),
             )
@@ -435,8 +374,7 @@ class BalancedPairedReplayPlanner:
             )
         frozen_assignments = tuple(assignments)
         control_count = sum(
-            item.arm_order is ReplayArmOrder.CONTROL_THEN_TREATMENT
-            for item in frozen_assignments
+            item.arm_order is ReplayArmOrder.CONTROL_THEN_TREATMENT for item in frozen_assignments
         )
         summary = PairedReplayPlanSummary(
             pair_count=len(frozen_assignments),
@@ -450,9 +388,7 @@ class BalancedPairedReplayPlanner:
             "spec": spec.to_dict(),
             "spec_content_hash": spec.content_hash,
             "assignments": [item.to_dict() for item in frozen_assignments],
-            "assignment_content_hashes": [
-                item.content_hash for item in frozen_assignments
-            ],
+            "assignment_content_hashes": [item.content_hash for item in frozen_assignments],
             "summary": summary.to_dict(),
             "summary_content_hash": summary.content_hash,
         }
@@ -489,25 +425,15 @@ class PairedReplayStep:
         _require_uuid("experiment_id", self.experiment_id)
         _require_uuid("space_id", self.space_id)
         if not isinstance(self.arm, ReplayArm):
-            raise PairedReplayRegistryValidationError(
-                "arm must be a ReplayArm"
-            )
-        if self.order_position not in (1, 2) or isinstance(
-            self.order_position, bool
-        ):
-            raise PairedReplayRegistryValidationError(
-                "order_position must be one or two"
-            )
+            raise PairedReplayRegistryValidationError("arm must be a ReplayArm")
+        if self.order_position not in (1, 2) or isinstance(self.order_position, bool):
+            raise PairedReplayRegistryValidationError("order_position must be one or two")
         _require_hash("context_set_hash", self.context_set_hash)
         _require_hash("continuation_set_hash", self.continuation_set_hash)
         policy_version = _required_text("policy_version", self.policy_version)
         _require_hash("policy_fingerprint", self.policy_fingerprint)
-        maximum_tokens = _positive_integer(
-            "maximum_tokens", self.maximum_tokens
-        )
-        maximum_latency_ms = _positive_number(
-            "maximum_latency_ms", self.maximum_latency_ms
-        )
+        maximum_tokens = _positive_integer("maximum_tokens", self.maximum_tokens)
+        maximum_latency_ms = _positive_number("maximum_latency_ms", self.maximum_latency_ms)
         object.__setattr__(self, "policy_version", policy_version)
         object.__setattr__(self, "maximum_tokens", maximum_tokens)
         object.__setattr__(self, "maximum_latency_ms", maximum_latency_ms)
@@ -552,17 +478,13 @@ class PairedReplayArmResult:
         _require_uuid("pair_id", self.pair_id)
         _require_uuid("experiment_id", self.experiment_id)
         if not isinstance(self.arm, ReplayArm):
-            raise PairedReplayRegistryValidationError(
-                "arm must be a ReplayArm"
-            )
+            raise PairedReplayRegistryValidationError("arm must be a ReplayArm")
         if not isinstance(self.telemetry_batch, InheritedRerankTelemetryBatch):
             raise PairedReplayRegistryValidationError(
                 "telemetry_batch must be an InheritedRerankTelemetryBatch"
             )
         if not isinstance(self.outcome, OutcomeMeasurement):
-            raise PairedReplayRegistryValidationError(
-                "outcome must be an OutcomeMeasurement"
-            )
+            raise PairedReplayRegistryValidationError("outcome must be an OutcomeMeasurement")
         object.__setattr__(self, "content_hash", _hash_payload(self.to_dict()))
 
     def to_dict(self) -> dict[str, object]:
@@ -574,13 +496,9 @@ class PairedReplayArmResult:
             "telemetry_batch_id": str(self.telemetry_batch.id),
             "telemetry_content_hash": self.telemetry_batch.content_hash,
             "telemetry_space_id": str(self.telemetry_batch.space_id),
-            "telemetry_router_decision_id": str(
-                self.telemetry_batch.router_decision_id
-            ),
+            "telemetry_router_decision_id": str(self.telemetry_batch.router_decision_id),
             "telemetry_policy_version": self.telemetry_batch.policy_version,
-            "telemetry_policy_fingerprint": (
-                self.telemetry_batch.policy_fingerprint
-            ),
+            "telemetry_policy_fingerprint": (self.telemetry_batch.policy_fingerprint),
             "outcome": _outcome_payload(self.outcome),
         }
 
@@ -602,13 +520,9 @@ class PairedReplayFailureRecord:
         _require_uuid("pair_id", self.pair_id)
         _require_uuid("experiment_id", self.experiment_id)
         if not isinstance(self.arm, ReplayArm):
-            raise PairedReplayRegistryValidationError(
-                "arm must be a ReplayArm"
-            )
+            raise PairedReplayRegistryValidationError("arm must be a ReplayArm")
         if not isinstance(self.code, ReplayFailureCode):
-            raise PairedReplayRegistryValidationError(
-                "code must be a ReplayFailureCode"
-            )
+            raise PairedReplayRegistryValidationError("code must be a ReplayFailureCode")
         object.__setattr__(
             self,
             "id",
@@ -647,31 +561,19 @@ class PairedReplayPairSnapshot:
         _require_uuid("experiment_id", self.experiment_id)
         ordinal = _positive_integer("ordinal", self.ordinal)
         if not isinstance(self.arm_order, ReplayArmOrder):
-            raise PairedReplayRegistryValidationError(
-                "arm_order must be a ReplayArmOrder"
-            )
+            raise PairedReplayRegistryValidationError("arm_order must be a ReplayArmOrder")
         if not isinstance(self.status, ReplayPairStatus):
-            raise PairedReplayRegistryValidationError(
-                "status must be a ReplayPairStatus"
-            )
+            raise PairedReplayRegistryValidationError("status must be a ReplayPairStatus")
         arms = tuple(self.recorded_arms)
         if any(not isinstance(arm, ReplayArm) for arm in arms):
-            raise PairedReplayRegistryValidationError(
-                "recorded_arms must contain ReplayArm values"
-            )
+            raise PairedReplayRegistryValidationError("recorded_arms must contain ReplayArm values")
         if len(arms) != len(set(arms)) or len(arms) > 2:
-            raise PairedReplayRegistryValidationError(
-                "recorded_arms must be unique and bounded"
-            )
-        if self.next_step is not None and not isinstance(
-            self.next_step, PairedReplayStep
-        ):
+            raise PairedReplayRegistryValidationError("recorded_arms must be unique and bounded")
+        if self.next_step is not None and not isinstance(self.next_step, PairedReplayStep):
             raise PairedReplayRegistryValidationError(
                 "next_step must be a PairedReplayStep or null"
             )
-        if self.failure_code is not None and not isinstance(
-            self.failure_code, ReplayFailureCode
-        ):
+        if self.failure_code is not None and not isinstance(self.failure_code, ReplayFailureCode):
             raise PairedReplayRegistryValidationError(
                 "failure_code must be a ReplayFailureCode or null"
             )
@@ -689,18 +591,10 @@ class PairedReplayPairSnapshot:
             "arm_order": self.arm_order.value,
             "status": self.status.value,
             "recorded_arms": [arm.value for arm in self.recorded_arms],
-            "next_step": (
-                self.next_step.to_dict() if self.next_step is not None else None
-            ),
-            "failure_code": (
-                self.failure_code.value
-                if self.failure_code is not None
-                else None
-            ),
+            "next_step": (self.next_step.to_dict() if self.next_step is not None else None),
+            "failure_code": (self.failure_code.value if self.failure_code is not None else None),
             "completed_trial_id": (
-                str(self.completed_trial_id)
-                if self.completed_trial_id is not None
-                else None
+                str(self.completed_trial_id) if self.completed_trial_id is not None else None
             ),
         }
 
@@ -735,14 +629,9 @@ class PairedReplayExperimentSummary:
             "completed_trial_count",
             "actual_tokens",
         )
-        normalized = {
-            name: _nonnegative_integer(name, getattr(self, name))
-            for name in fields
-        }
+        normalized = {name: _nonnegative_integer(name, getattr(self, name)) for name in fields}
         if normalized["pair_count"] <= 0:
-            raise PairedReplayRegistryValidationError(
-                "pair_count must be positive"
-            )
+            raise PairedReplayRegistryValidationError("pair_count must be positive")
         if (
             normalized["planned_count"]
             + normalized["first_arm_recorded_count"]
@@ -751,20 +640,14 @@ class PairedReplayExperimentSummary:
             + normalized["cancelled_count"]
             != normalized["pair_count"]
         ):
-            raise PairedReplayRegistryValidationError(
-                "status counts must partition pair_count"
-            )
+            raise PairedReplayRegistryValidationError("status counts must partition pair_count")
         if normalized["completed_trial_count"] != normalized["complete_count"]:
             raise PairedReplayRegistryValidationError(
                 "completed_trial_count must equal complete_count"
             )
         if normalized["recorded_arm_count"] > normalized["pair_count"] * 2:
-            raise PairedReplayRegistryValidationError(
-                "recorded_arm_count exceeds pair capacity"
-            )
-        latency = _nonnegative_number(
-            "actual_latency_ms", self.actual_latency_ms
-        )
+            raise PairedReplayRegistryValidationError("recorded_arm_count exceeds pair capacity")
+        latency = _nonnegative_number("actual_latency_ms", self.actual_latency_ms)
         for name, value in normalized.items():
             object.__setattr__(self, name, value)
         object.__setattr__(self, "actual_latency_ms", latency)
@@ -790,9 +673,7 @@ class PairedReplayExperimentSummary:
 class _PairState:
     assignment: PairedReplayAssignment
     status: ReplayPairStatus = ReplayPairStatus.PLANNED
-    results: dict[ReplayArm, PairedReplayArmResult] = field(
-        default_factory=dict
-    )
+    results: dict[ReplayArm, PairedReplayArmResult] = field(default_factory=dict)
     failure: PairedReplayFailureRecord | None = None
     trial: PairedRerankPolicyTrial | None = None
 
@@ -808,9 +689,7 @@ class InMemoryPairedReplayExperimentRegistry:
 
     def register_plan(self, plan: PairedReplayPlan) -> None:
         if not isinstance(plan, PairedReplayPlan):
-            raise PairedReplayRegistryValidationError(
-                "plan must be a PairedReplayPlan"
-            )
+            raise PairedReplayRegistryValidationError("plan must be a PairedReplayPlan")
         existing = self._plans.get(plan.spec.experiment_id)
         if existing is not None:
             if existing.content_hash == plan.content_hash and existing == plan:
@@ -820,8 +699,7 @@ class InMemoryPairedReplayExperimentRegistry:
             )
         self._plans[plan.spec.experiment_id] = plan
         self._states[plan.spec.experiment_id] = {
-            assignment.id: _PairState(assignment=assignment)
-            for assignment in plan.assignments
+            assignment.id: _PairState(assignment=assignment) for assignment in plan.assignments
         }
 
     def next_steps(self, experiment_id: UUID) -> tuple[PairedReplayStep, ...]:
@@ -836,9 +714,7 @@ class InMemoryPairedReplayExperimentRegistry:
 
     def record_arm_result(self, result: PairedReplayArmResult) -> None:
         if not isinstance(result, PairedReplayArmResult):
-            raise PairedReplayRegistryValidationError(
-                "result must be a PairedReplayArmResult"
-            )
+            raise PairedReplayRegistryValidationError("result must be a PairedReplayArmResult")
         plan, states = self._experiment(result.experiment_id)
         state = self._pair_state(states, result.pair_id)
         prior = state.results.get(result.arm)
@@ -876,20 +752,13 @@ class InMemoryPairedReplayExperimentRegistry:
 
     def record_failure(self, failure: PairedReplayFailureRecord) -> None:
         if not isinstance(failure, PairedReplayFailureRecord):
-            raise PairedReplayRegistryValidationError(
-                "failure must be a PairedReplayFailureRecord"
-            )
+            raise PairedReplayRegistryValidationError("failure must be a PairedReplayFailureRecord")
         plan, states = self._experiment(failure.experiment_id)
         state = self._pair_state(states, failure.pair_id)
         if state.failure is not None:
-            if (
-                state.failure.content_hash == failure.content_hash
-                and state.failure == failure
-            ):
+            if state.failure.content_hash == failure.content_hash and state.failure == failure:
                 return
-            raise PairedReplayRegistryConflictError(
-                "failure conflict for immutable step identity"
-            )
+            raise PairedReplayRegistryConflictError("failure conflict for immutable step identity")
         if state.status in {
             ReplayPairStatus.COMPLETE,
             ReplayPairStatus.FAILED,
@@ -910,17 +779,13 @@ class InMemoryPairedReplayExperimentRegistry:
             else ReplayPairStatus.FAILED
         )
 
-    def pair_snapshots(
-        self, experiment_id: UUID
-    ) -> tuple[PairedReplayPairSnapshot, ...]:
+    def pair_snapshots(self, experiment_id: UUID) -> tuple[PairedReplayPairSnapshot, ...]:
         plan, states = self._experiment(experiment_id)
         snapshots: list[PairedReplayPairSnapshot] = []
         for assignment in plan.assignments:
             state = states[assignment.id]
             arms = tuple(
-                arm
-                for arm in (ReplayArm.CONTROL, ReplayArm.TREATMENT)
-                if arm in state.results
+                arm for arm in (ReplayArm.CONTROL, ReplayArm.TREATMENT) if arm in state.results
             )
             snapshots.append(
                 PairedReplayPairSnapshot(
@@ -931,23 +796,13 @@ class InMemoryPairedReplayExperimentRegistry:
                     status=state.status,
                     recorded_arms=arms,
                     next_step=self._next_step(plan, state),
-                    failure_code=(
-                        state.failure.code
-                        if state.failure is not None
-                        else None
-                    ),
-                    completed_trial_id=(
-                        state.trial.trial_id
-                        if state.trial is not None
-                        else None
-                    ),
+                    failure_code=(state.failure.code if state.failure is not None else None),
+                    completed_trial_id=(state.trial.trial_id if state.trial is not None else None),
                 )
             )
         return tuple(snapshots)
 
-    def completed_trials(
-        self, experiment_id: UUID
-    ) -> tuple[PairedRerankPolicyTrial, ...]:
+    def completed_trials(self, experiment_id: UUID) -> tuple[PairedRerankPolicyTrial, ...]:
         plan, states = self._experiment(experiment_id)
         return tuple(
             states[assignment.id].trial
@@ -966,21 +821,14 @@ class InMemoryPairedReplayExperimentRegistry:
             state = states[assignment.id]
             counts[state.status] += 1
             recorded_arm_count += len(state.results)
-            actual_tokens += sum(
-                result.outcome.tokens for result in state.results.values()
-            )
-            actual_latency_ms += sum(
-                result.outcome.latency_ms
-                for result in state.results.values()
-            )
+            actual_tokens += sum(result.outcome.tokens for result in state.results.values())
+            actual_latency_ms += sum(result.outcome.latency_ms for result in state.results.values())
             completed_trial_count += int(state.trial is not None)
         return PairedReplayExperimentSummary(
             experiment_id=experiment_id,
             pair_count=len(plan.assignments),
             planned_count=counts[ReplayPairStatus.PLANNED],
-            first_arm_recorded_count=counts[
-                ReplayPairStatus.FIRST_ARM_RECORDED
-            ],
+            first_arm_recorded_count=counts[ReplayPairStatus.FIRST_ARM_RECORDED],
             complete_count=counts[ReplayPairStatus.COMPLETE],
             failed_count=counts[ReplayPairStatus.FAILED],
             cancelled_count=counts[ReplayPairStatus.CANCELLED],
@@ -990,32 +838,22 @@ class InMemoryPairedReplayExperimentRegistry:
             actual_latency_ms=actual_latency_ms,
         )
 
-    def _experiment(
-        self, experiment_id: UUID
-    ) -> tuple[PairedReplayPlan, dict[UUID, _PairState]]:
+    def _experiment(self, experiment_id: UUID) -> tuple[PairedReplayPlan, dict[UUID, _PairState]]:
         _require_uuid("experiment_id", experiment_id)
         plan = self._plans.get(experiment_id)
         if plan is None:
-            raise PairedReplayRegistryStateError(
-                "experiment is not registered"
-            )
+            raise PairedReplayRegistryStateError("experiment is not registered")
         return plan, self._states[experiment_id]
 
     @staticmethod
-    def _pair_state(
-        states: Mapping[UUID, _PairState], pair_id: UUID
-    ) -> _PairState:
+    def _pair_state(states: Mapping[UUID, _PairState], pair_id: UUID) -> _PairState:
         _require_uuid("pair_id", pair_id)
         state = states.get(pair_id)
         if state is None:
-            raise PairedReplayRegistryStateError(
-                "pair is not registered in the experiment"
-            )
+            raise PairedReplayRegistryStateError("pair is not registered in the experiment")
         return state
 
-    def _next_step(
-        self, plan: PairedReplayPlan, state: _PairState
-    ) -> PairedReplayStep | None:
+    def _next_step(self, plan: PairedReplayPlan, state: _PairState) -> PairedReplayStep | None:
         if state.status is ReplayPairStatus.PLANNED:
             arm = state.assignment.arm_order.first_arm
             order_position = 1
@@ -1059,19 +897,12 @@ class InMemoryPairedReplayExperimentRegistry:
                 "telemetry policy identity does not match the replay step"
             )
         if result.outcome.tokens > step.maximum_tokens:
-            raise PairedReplayRegistryValidationError(
-                "outcome exceeds the per-arm token limit"
-            )
+            raise PairedReplayRegistryValidationError("outcome exceeds the per-arm token limit")
         if result.outcome.latency_ms > step.maximum_latency_ms:
-            raise PairedReplayRegistryValidationError(
-                "outcome exceeds the per-arm latency limit"
-            )
+            raise PairedReplayRegistryValidationError("outcome exceeds the per-arm latency limit")
         if state.results:
             first = next(iter(state.results.values()))
-            if (
-                first.telemetry_batch.router_decision_id
-                != batch.router_decision_id
-            ):
+            if first.telemetry_batch.router_decision_id != batch.router_decision_id:
                 raise PairedReplayRegistryValidationError(
                     "control and treatment must share one router decision"
                 )
@@ -1103,22 +934,16 @@ class InMemoryPairedReplayExperimentRegistry:
 
 def _normalize_context_hashes(context_hashes: Iterable[str]) -> tuple[str, ...]:
     if isinstance(context_hashes, (str, bytes, Mapping)):
-        raise PairedReplayRegistryValidationError(
-            "context hashes must be a bounded collection"
-        )
+        raise PairedReplayRegistryValidationError("context hashes must be a bounded collection")
     if not isinstance(context_hashes, (Sequence, Set)):
         try:
             values = tuple(context_hashes)
         except TypeError as exc:
-            raise PairedReplayRegistryValidationError(
-                "context hashes must be iterable"
-            ) from exc
+            raise PairedReplayRegistryValidationError("context hashes must be iterable") from exc
     else:
         values = tuple(context_hashes)
     if not values:
-        raise PairedReplayRegistryValidationError(
-            "at least one context_set_hash is required"
-        )
+        raise PairedReplayRegistryValidationError("at least one context_set_hash is required")
     for value in values:
         _require_hash("context_set_hash", value)
     if len(values) != len(set(values)):
@@ -1128,9 +953,7 @@ def _normalize_context_hashes(context_hashes: Iterable[str]) -> tuple[str, ...]:
     return tuple(sorted(values))
 
 
-def _pair_uuid(
-    spec: PairedReplayExperimentSpec, context_set_hash: str
-) -> UUID:
+def _pair_uuid(spec: PairedReplayExperimentSpec, context_set_hash: str) -> UUID:
     return uuid5(
         spec.experiment_id,
         ":".join(
@@ -1150,17 +973,13 @@ def _pair_uuid(
     )
 
 
-def _policy_identity(
-    spec: PairedReplayExperimentSpec, arm: ReplayArm
-) -> tuple[str, str]:
+def _policy_identity(spec: PairedReplayExperimentSpec, arm: ReplayArm) -> tuple[str, str]:
     if arm is ReplayArm.CONTROL:
         return spec.control_policy_version, spec.control_policy_fingerprint
     return spec.treatment_policy_version, spec.treatment_policy_fingerprint
 
 
-def _step_matches_result(
-    step: PairedReplayStep, result: PairedReplayArmResult
-) -> bool:
+def _step_matches_result(step: PairedReplayStep, result: PairedReplayArmResult) -> bool:
     return (
         result.step_id == step.id
         and result.pair_id == step.pair_id
@@ -1169,9 +988,7 @@ def _step_matches_result(
     )
 
 
-def _step_matches_failure(
-    step: PairedReplayStep, failure: PairedReplayFailureRecord
-) -> bool:
+def _step_matches_failure(step: PairedReplayStep, failure: PairedReplayFailureRecord) -> bool:
     return (
         failure.step_id == step.id
         and failure.pair_id == step.pair_id
@@ -1218,9 +1035,7 @@ def _require_uuid(name: str, value: object) -> UUID:
 
 def _require_hash(name: str, value: object) -> str:
     if not isinstance(value, str) or _HASH_RE.fullmatch(value) is None:
-        raise PairedReplayRegistryValidationError(
-            f"{name} must be a lowercase SHA-256 value"
-        )
+        raise PairedReplayRegistryValidationError(f"{name} must be a lowercase SHA-256 value")
     return value
 
 
@@ -1229,55 +1044,39 @@ def _required_text(name: str, value: object) -> str:
         raise PairedReplayRegistryValidationError(f"{name} must be text")
     normalized = value.strip()
     if not normalized:
-        raise PairedReplayRegistryValidationError(
-            f"{name} must not be empty"
-        )
+        raise PairedReplayRegistryValidationError(f"{name} must not be empty")
     if len(normalized) > 128:
-        raise PairedReplayRegistryValidationError(
-            f"{name} exceeds the bounded length"
-        )
+        raise PairedReplayRegistryValidationError(f"{name} exceeds the bounded length")
     return normalized
 
 
 def _positive_integer(name: str, value: object) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
-        raise PairedReplayRegistryValidationError(
-            f"{name} must be a positive integer"
-        )
+        raise PairedReplayRegistryValidationError(f"{name} must be a positive integer")
     return value
 
 
 def _nonnegative_integer(name: str, value: object) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-        raise PairedReplayRegistryValidationError(
-            f"{name} must be a non-negative integer"
-        )
+        raise PairedReplayRegistryValidationError(f"{name} must be a non-negative integer")
     return value
 
 
 def _positive_number(name: str, value: object) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise PairedReplayRegistryValidationError(
-            f"{name} must be a positive finite number"
-        )
+        raise PairedReplayRegistryValidationError(f"{name} must be a positive finite number")
     normalized = float(value)
     if not isfinite(normalized) or normalized <= 0.0:
-        raise PairedReplayRegistryValidationError(
-            f"{name} must be a positive finite number"
-        )
+        raise PairedReplayRegistryValidationError(f"{name} must be a positive finite number")
     return normalized
 
 
 def _nonnegative_number(name: str, value: object) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise PairedReplayRegistryValidationError(
-            f"{name} must be a non-negative finite number"
-        )
+        raise PairedReplayRegistryValidationError(f"{name} must be a non-negative finite number")
     normalized = float(value)
     if not isfinite(normalized) or normalized < 0.0:
-        raise PairedReplayRegistryValidationError(
-            f"{name} must be a non-negative finite number"
-        )
+        raise PairedReplayRegistryValidationError(f"{name} must be a non-negative finite number")
     return normalized
 
 

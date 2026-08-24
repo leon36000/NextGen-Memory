@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import nextgen_memory
 from nextgen_memory.paired_replay_experiment_registry import (
     BalancedPairedReplayPlanner,
     InMemoryPairedReplayExperimentRegistry,
@@ -20,8 +21,6 @@ from nextgen_memory.paired_replay_experiment_registry import (
     ReplayFailureCode,
     ReplayPairStatus,
 )
-
-import nextgen_memory
 
 
 def test_paired_replay_registry_contract_is_exported_from_package_root() -> None:
