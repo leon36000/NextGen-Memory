@@ -57,6 +57,7 @@ jobs:
           )
           python -m compileall -q "${files[@]}"
           test ! -e src/nextgen_memory/policy_promotion.py
+          exact="ModuleNotFoundError: No module named 'nextgen_memory.policy_promotion'"
           for file in "${files[@]}"; do
             output="/tmp/$(basename "$file" .py).txt"
             set +e
@@ -64,11 +65,18 @@ jobs:
             rc=$?
             set -e
             test "$rc" -ne 0
-            test "$(grep -c "ModuleNotFoundError: No module named 'nextgen_memory.policy_promotion'" "$output")" -eq 1
-            if grep -Eq 'SyntaxError|IndentationError|NameError|ImportError:' "$output"; then
+            grep -Fq "$exact" "$output"
+            if grep -F 'ModuleNotFoundError:' "$output" | grep -Fv "$exact"; then
+              echo "unexpected missing module in $file" >&2
               cat "$output" >&2
               exit 1
             fi
+            if grep -Eq 'SyntaxError|IndentationError|NameError|ImportError:' "$output"; then
+              echo "unexpected RED class in $file" >&2
+              cat "$output" >&2
+              exit 1
+            fi
+            printf '%s\trc=%s\tpolicy_promotion_module_absent\n' "$file" "$rc"
           done
 
       - name: Remove transport and commit the normalized RED candidate
