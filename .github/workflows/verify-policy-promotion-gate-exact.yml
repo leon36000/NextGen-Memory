@@ -1,0 +1,576 @@
+name: Verify policy promotion gate exact SHA
+
+on:
+  pull_request:
+
+permissions:
+  actions: read
+  contents: write
+  issues: write
+  pull-requests: write
+
+jobs:
+  resolve:
+    runs-on: ubuntu-24.04
+    outputs:
+      base_sha: ${{ steps.resolve.outputs.base_sha }}
+      candidate_sha: ${{ steps.resolve.outputs.candidate_sha }}
+    steps:
+      - name: Wait for the cleaned seven-path development head
+        id: resolve
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          encode() {
+            python -c 'import sys,urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$1"
+          }
+          base_sha=$(gh api "repos/$REPO/branches/$(encode candidate/paired-replay-experiment-registry-v0-20260824)" --jq '.commit.sha')
+          expected=$(cat <<'EOF'
+          [
+            "docs/superpowers/plans/2026-08-24-policy-promotion-gate-v0.md",
+            "docs/superpowers/specs/2026-08-24-policy-promotion-gate-v0-design.md",
+            "src/nextgen_memory/__init__.py",
+            "src/nextgen_memory/policy_promotion_gate.py",
+            "tests/test_policy_promotion_gate.py",
+            "tests/test_policy_promotion_gate_properties.py",
+            "tests/test_policy_promotion_gate_public_api.py"
+          ]
+          EOF
+          )
+          expected=$(printf '%s' "$expected" | jq -c 'sort')
+          candidate_sha=''
+          for attempt in $(seq 1 48); do
+            current=$(gh api "repos/$REPO/branches/$(encode feat/policy-promotion-gate-v0-20260824)" --jq '.commit.sha')
+            comparison=$(gh api "repos/$REPO/compare/$base_sha...$current")
+            status=$(printf '%s' "$comparison" | jq -r '.status')
+            files=$(printf '%s' "$comparison" | jq -c '[.files[].filename] | sort')
+            printf 'attempt=%s head=%s status=%s files=%s\n' "$attempt" "$current" "$status" "$files"
+            if [ "$status" = ahead ] && [ "$files" = "$expected" ]; then
+              candidate_sha=$current
+              break
+            fi
+            sleep 15
+          done
+          test -n "$candidate_sha"
+          test "$candidate_sha" != "$base_sha"
+          echo "base_sha=$base_sha" >> "$GITHUB_OUTPUT"
+          echo "candidate_sha=$candidate_sha" >> "$GITHUB_OUTPUT"
+
+  verify:
+    needs: resolve
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.candidate_sha }}
+          fetch-depth: 0
+
+      - name: Prove exact checkout, ancestry, and seven-path scope
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${{ needs.resolve.outputs.candidate_sha }}"
+          test "$(git merge-base HEAD "${{ needs.resolve.outputs.base_sha }}")" = "${{ needs.resolve.outputs.base_sha }}"
+          mapfile -t changed < <(git diff --name-only "${{ needs.resolve.outputs.base_sha }}"...HEAD | sort)
+          expected=(
+            docs/superpowers/plans/2026-08-24-policy-promotion-gate-v0.md
+            docs/superpowers/specs/2026-08-24-policy-promotion-gate-v0-design.md
+            src/nextgen_memory/__init__.py
+            src/nextgen_memory/policy_promotion_gate.py
+            tests/test_policy_promotion_gate.py
+            tests/test_policy_promotion_gate_properties.py
+            tests/test_policy_promotion_gate_public_api.py
+          )
+          test "${#changed[@]}" -eq "${#expected[@]}"
+          diff -u <(printf '%s\n' "${expected[@]}" | sort) <(printf '%s\n' "${changed[@]}")
+          test -z "$(git diff --name-only "${{ needs.resolve.outputs.base_sha }}"...HEAD -- 'migrations/**' '.github/workflows/**' pyproject.toml 'src/nextgen_memory/corrective_retrieval_*')"
+          git diff --check "${{ needs.resolve.outputs.base_sha }}"...HEAD
+          test -z "$(git status --porcelain)"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install project and development tools
+        run: python -m pip install -e '.[dev]'
+
+      - name: Static, focused, and complete verification
+        shell: bash
+        run: |
+          set -euo pipefail
+          ruff check .
+          python -m compileall -q src scripts
+          python -m pytest -q \
+            tests/test_policy_promotion_gate.py \
+            tests/test_policy_promotion_gate_properties.py \
+            tests/test_policy_promotion_gate_public_api.py \
+            | tee /tmp/focused-tests.txt
+          python -m pytest -q | tee /tmp/full-tests.txt
+          git diff --check "${{ needs.resolve.outputs.base_sha }}"...HEAD
+
+      - name: Generate deterministic promote, hold, and reject evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          evidence="$RUNNER_TEMP/policy-promotion-${{ matrix.python-version }}"
+          mkdir -p "$evidence"
+          cat > /tmp/generate_policy_promotion_evidence.py <<'PY'
+          from __future__ import annotations
+
+          import hashlib
+          import json
+          import sys
+          from pathlib import Path
+          from uuid import UUID
+
+          from nextgen_memory.paired_rerank_policy_evaluation import PairedPolicyVerdict
+          from nextgen_memory.policy_promotion_gate import (
+              PolicyPromotionEvidence,
+              PolicyPromotionGate,
+              PolicyPromotionGateConfig,
+          )
+
+          digest = lambda value: hashlib.sha256(value.encode("utf-8")).hexdigest()
+          config = PolicyPromotionGateConfig(
+              minimum_pairs=32,
+              minimum_score_lower_bound=0.01,
+              maximum_score_interval_width=0.20,
+              maximum_harm_rate=0.05,
+              maximum_token_delta=50.0,
+              maximum_latency_delta_ms=100.0,
+              maximum_evidence_age_seconds=86_400,
+              minimum_independent_reviewers=2,
+          )
+
+          def evidence(**overrides):
+              values = {
+                  "evaluation_id": UUID("00000000-0000-5000-8000-00000000f001"),
+                  "evaluation_content_hash": digest("evaluation"),
+                  "control_policy_version": "control-v1",
+                  "control_policy_fingerprint": digest("control"),
+                  "treatment_policy_version": "treatment-v1",
+                  "treatment_policy_fingerprint": digest("treatment"),
+                  "current_control_policy_fingerprint": digest("control"),
+                  "current_treatment_policy_fingerprint": digest("treatment"),
+                  "verdict": PairedPolicyVerdict.PROMISING,
+                  "pair_count": 64,
+                  "mean_score_effect": 0.08,
+                  "score_confidence_low": 0.04,
+                  "score_confidence_high": 0.12,
+                  "harm_rate": 0.01,
+                  "mean_token_delta": 10.0,
+                  "mean_latency_delta_ms": 20.0,
+                  "evidence_age_seconds": 3_600,
+                  "security_violation": False,
+                  "rollback_ready": True,
+                  "focused_tests_green": True,
+                  "full_tests_green": True,
+                  "integration_green": True,
+                  "artifact_integrity_verified": True,
+                  "independent_review_ids": {
+                      UUID("00000000-0000-5000-9000-00000000f101"),
+                      UUID("00000000-0000-5000-9000-00000000f102"),
+                  },
+              }
+              values.update(overrides)
+              return PolicyPromotionEvidence(**values)
+
+          gate = PolicyPromotionGate(config)
+          decisions = {
+              "promote": gate.decide(evidence()),
+              "hold": gate.decide(evidence(rollback_ready=False)),
+              "reject": gate.decide(
+                  evidence(
+                      security_violation=True,
+                      pair_count=1,
+                      full_tests_green=False,
+                  )
+              ),
+          }
+          payload = {
+              "candidate_sha": sys.argv[2],
+              "config_content_hash": config.content_hash,
+              "decisions": {
+                  name: json.loads(value.render_json())
+                  for name, value in sorted(decisions.items())
+              },
+          }
+          Path(sys.argv[1]).write_text(
+              json.dumps(
+                  payload,
+                  ensure_ascii=False,
+                  allow_nan=False,
+                  sort_keys=True,
+                  separators=(",", ":"),
+              ) + "\n",
+              encoding="utf-8",
+          )
+          PY
+          PYTHONHASHSEED=1 python /tmp/generate_policy_promotion_evidence.py \
+            "$evidence/decisions.json" "${{ needs.resolve.outputs.candidate_sha }}"
+          PYTHONHASHSEED=999 python /tmp/generate_policy_promotion_evidence.py \
+            /tmp/decisions-seed-999.json "${{ needs.resolve.outputs.candidate_sha }}"
+          cmp "$evidence/decisions.json" /tmp/decisions-seed-999.json
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          path = Path(os.environ["RUNNER_TEMP"]) / "policy-promotion-${{ matrix.python-version }}" / "decisions.json"
+          payload = json.loads(path.read_text(encoding="utf-8"))
+          decisions = payload["decisions"]
+          if decisions["promote"]["disposition"] != "promote":
+              raise SystemExit("promote evidence did not promote")
+          if decisions["promote"]["promotion_allowed"] is not True:
+              raise SystemExit("promote evidence is not allowed")
+          if decisions["hold"]["disposition"] != "hold":
+              raise SystemExit("readiness gap did not hold")
+          if decisions["reject"]["disposition"] != "reject":
+              raise SystemExit("hard safety evidence did not reject")
+          if decisions["reject"]["reasons"][0] != "security_violation":
+              raise SystemExit("hard rejection precedence differs")
+          PY
+          echo "EVIDENCE_ROOT=$evidence" >> "$GITHUB_ENV"
+
+      - name: Audit dependency, privacy, stub, and side-effect surface
+        run: |
+          python - <<'PY'
+          from __future__ import annotations
+
+          import ast
+          from pathlib import Path
+
+          path = Path("src/nextgen_memory/policy_promotion_gate.py")
+          source = path.read_text(encoding="utf-8")
+          tree = ast.parse(source, filename=str(path))
+          forbidden_roots = {
+              "asyncio", "datetime", "httpx", "os", "pathlib", "psycopg",
+              "pymongo", "random", "requests", "socket", "sqlalchemy",
+              "subprocess", "temporalio", "time", "urllib",
+          }
+          forbidden_calls = {
+              "eval", "exec", "open", "sleep", "system", "urlopen",
+              "uuid1", "uuid4", "write_bytes", "write_text",
+          }
+          violations = []
+          for node in ast.walk(tree):
+              if isinstance(node, ast.Pass):
+                  violations.append(f"{node.lineno}:pass")
+              elif isinstance(node, ast.Raise):
+                  exc = node.exc.func if isinstance(node.exc, ast.Call) else node.exc
+                  if (
+                      isinstance(exc, ast.Name)
+                      and exc.id == "NotImplementedError"
+                  ) or (
+                      isinstance(exc, ast.Attribute)
+                      and exc.attr == "NotImplementedError"
+                  ):
+                      violations.append(f"{node.lineno}:NotImplementedError")
+              elif isinstance(node, ast.Import):
+                  for alias in node.names:
+                      if alias.name.split(".", 1)[0] in forbidden_roots:
+                          violations.append(f"{node.lineno}:import:{alias.name}")
+              elif isinstance(node, ast.ImportFrom):
+                  if (node.module or "").split(".", 1)[0] in forbidden_roots:
+                      violations.append(f"{node.lineno}:import:{node.module}")
+              elif isinstance(node, ast.Call):
+                  name = node.func.id if isinstance(node.func, ast.Name) else node.func.attr if isinstance(node.func, ast.Attribute) else None
+                  if name in forbidden_calls:
+                      violations.append(f"{node.lineno}:call:{name}")
+          lowered = source.lower()
+          for marker in (
+              "postgresql://", "mongodb://", "http://", "https://", "password",
+              "credential", "# todo", "# fixme", "raw_query", "raw_prompt",
+              "response_text", "memory_body", "review_text", "error_message",
+              "activate_policy", "write_feedback",
+          ):
+              if marker in lowered:
+                  violations.append(f"text:{marker}")
+          if violations:
+              raise SystemExit("\n".join(violations))
+          print("policy_promotion_gate_audit_findings=0")
+          PY
+
+      - name: Build and install exact wheel outside checkout
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf wheelhouse "$RUNNER_TEMP/policy-promotion-wheel-venv"
+          python -m pip wheel --no-deps . -w wheelhouse
+          test "$(find wheelhouse -maxdepth 1 -type f -name '*.whl' | wc -l)" -eq 1
+          wheel=$(find wheelhouse -maxdepth 1 -type f -name '*.whl')
+          python -m venv "$RUNNER_TEMP/policy-promotion-wheel-venv"
+          "$RUNNER_TEMP/policy-promotion-wheel-venv/bin/python" -m pip install --no-deps "$wheel"
+          "$RUNNER_TEMP/policy-promotion-wheel-venv/bin/python" - <<'PY'
+          import nextgen_memory
+          from nextgen_memory import (
+              PolicyPromotionDisposition,
+              PolicyPromotionGate,
+              PolicyPromotionGateConfig,
+          )
+          assert PolicyPromotionGate is not None
+          assert PolicyPromotionGateConfig is not None
+          assert PolicyPromotionDisposition.PROMOTE.value == "promote"
+          assert "PolicyPromotionGate" in nextgen_memory.__all__
+          PY
+          "$RUNNER_TEMP/policy-promotion-wheel-venv/bin/python" -m pip check
+          sha256sum "$wheel" | awk '{print $1}' > "$EVIDENCE_ROOT/wheel.sha256"
+
+      - name: Write bounded exact-candidate evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import hashlib
+          import json
+          import os
+          import re
+          import sys
+          from pathlib import Path
+
+          def count(path: str) -> int:
+              matches = re.findall(r"(\d+) passed", Path(path).read_text(encoding="utf-8"))
+              if not matches:
+                  raise SystemExit(f"test count missing: {path}")
+              return int(matches[-1])
+
+          root = Path(os.environ["EVIDENCE_ROOT"])
+          decisions = root / "decisions.json"
+          report = {
+              "candidate_sha": "${{ needs.resolve.outputs.candidate_sha }}",
+              "decisions_sha256": hashlib.sha256(decisions.read_bytes()).hexdigest(),
+              "focused_test_count": count("/tmp/focused-tests.txt"),
+              "full_test_count": count("/tmp/full-tests.txt"),
+              "hash_seed_invariant": True,
+              "python_version": ".".join(map(str, sys.version_info[:3])),
+              "wheel_sha256": (root / "wheel.sha256").read_text().strip(),
+          }
+          (root / "verification.json").write_text(
+              json.dumps(
+                  report,
+                  ensure_ascii=False,
+                  allow_nan=False,
+                  sort_keys=True,
+                  separators=(",", ":"),
+              ) + "\n",
+              encoding="utf-8",
+          )
+          print((root / "verification.json").read_text(), end="")
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: policy-promotion-python-${{ matrix.python-version }}
+          path: |
+            ${{ runner.temp }}/policy-promotion-${{ matrix.python-version }}/decisions.json
+            ${{ runner.temp }}/policy-promotion-${{ matrix.python-version }}/verification.json
+          if-no-files-found: error
+          retention-days: 7
+
+  compare-and-publish:
+    needs: [resolve, verify]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.candidate_sha }}
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: policy-promotion-python-*
+          path: ${{ runner.temp }}/policy-promotion-matrix
+
+      - name: Require cross-Python identical decision evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+
+          root = Path(os.environ["RUNNER_TEMP"]) / "policy-promotion-matrix"
+          decisions = sorted(root.rglob("decisions.json"))
+          reports = sorted(root.rglob("verification.json"))
+          if len(decisions) != 2 or len(reports) != 2:
+              raise SystemExit("incomplete policy-promotion matrix")
+          if decisions[0].read_bytes() != decisions[1].read_bytes():
+              raise SystemExit("decision evidence differs across Python versions")
+          documents = [json.loads(path.read_text(encoding="utf-8")) for path in reports]
+          if {".".join(item["python_version"].split(".")[:2]) for item in documents} != {"3.12", "3.13"}:
+              raise SystemExit("unexpected Python evidence set")
+          candidate = "${{ needs.resolve.outputs.candidate_sha }}"
+          if {item["candidate_sha"] for item in documents} != {candidate}:
+              raise SystemExit("candidate SHA drift")
+          decisions_sha = hashlib.sha256(decisions[0].read_bytes()).hexdigest()
+          if {item["decisions_sha256"] for item in documents} != {decisions_sha}:
+              raise SystemExit("decision evidence hash drift")
+          for key in ("focused_test_count", "full_test_count"):
+              if len({item[key] for item in documents}) != 1:
+                  raise SystemExit(f"cross-Python {key} differs")
+          if not all(item["hash_seed_invariant"] is True for item in documents):
+              raise SystemExit("hash-seed invariance missing")
+          summary = {
+              "status": "green_review_pending_unmerged",
+              "base_branch": "candidate/paired-replay-experiment-registry-v0-20260824",
+              "base_sha": "${{ needs.resolve.outputs.base_sha }}",
+              "candidate_branch": "candidate/policy-promotion-gate-v0-20260824",
+              "candidate_sha": candidate,
+              "cross_python_decisions_identical": True,
+              "decisions_sha256": decisions_sha,
+              "focused_test_count_each": documents[0]["focused_test_count"],
+              "full_test_count_each": documents[0]["full_test_count"],
+              "python_versions": ["3.12", "3.13"],
+              "wheel_sha256_by_python": {
+                  ".".join(item["python_version"].split(".")[:2]): item["wheel_sha256"]
+                  for item in documents
+              },
+              "review": {
+                  "required_model": "GPT-5.6 Sol",
+                  "verdict": "pending",
+                  "merge_allowed": False,
+              },
+              "safety": {
+                  "merged": False,
+                  "production_database_contacted": False,
+                  "production_migration_applied": False,
+                  "production_application_data_written": False,
+                  "feedback_written": False,
+                  "policy_activated": False,
+                  "release_published": False,
+                  "corrective_retrieval_changed": False,
+                  "sol_verdict_fabricated": False,
+              },
+          }
+          raw = json.dumps(
+              summary,
+              ensure_ascii=False,
+              allow_nan=False,
+              sort_keys=True,
+              separators=(",", ":"),
+          ) + "\n"
+          (root / "policy-promotion-gate-green-20260824.json").write_text(raw, encoding="utf-8")
+          (root / "policy-promotion-gate-green-20260824.sha256").write_text(
+              hashlib.sha256(raw.encode("utf-8")).hexdigest()
+              + "  policy-promotion-gate-green-20260824.json\n",
+              encoding="utf-8",
+          )
+          print(raw, end="")
+          PY
+
+      - name: Publish immutable product and evidence branches
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          candidate_branch='candidate/policy-promotion-gate-v0-20260824'
+          evidence_branch='evidence/policy-promotion-gate-green-20260824'
+          candidate_sha='${{ needs.resolve.outputs.candidate_sha }}'
+          if git ls-remote --exit-code --heads origin "$candidate_branch"; then
+            test "$(git ls-remote --heads origin "$candidate_branch" | awk '{print $1}')" = "$candidate_sha"
+          else
+            git push origin "$candidate_sha:refs/heads/$candidate_branch"
+          fi
+          root="$RUNNER_TEMP/policy-promotion-matrix"
+          if git ls-remote --exit-code --heads origin "$evidence_branch"; then
+            git switch --detach "origin/$evidence_branch"
+            cmp "$root/policy-promotion-gate-green-20260824.json" evidence/policy-promotion-gate-green-20260824.json
+            cmp "$root/policy-promotion-gate-green-20260824.sha256" evidence/policy-promotion-gate-green-20260824.sha256
+          else
+            git switch -c "$evidence_branch" "$candidate_sha"
+            mkdir -p evidence
+            cp "$root/policy-promotion-gate-green-20260824.json" evidence/
+            cp "$root/policy-promotion-gate-green-20260824.sha256" evidence/
+            git config user.name 'github-actions[bot]'
+            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+            git add evidence/policy-promotion-gate-green-20260824.json evidence/policy-promotion-gate-green-20260824.sha256
+            git diff --cached --check
+            git commit -m 'evidence: certify policy promotion gate exact SHA'
+            git push origin HEAD:"refs/heads/$evidence_branch"
+          fi
+
+      - name: Create or update canonical product PR and blind-review packet
+        id: product
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          branch='candidate/policy-promotion-gate-v0-20260824'
+          base='candidate/paired-replay-experiment-registry-v0-20260824'
+          sha='${{ needs.resolve.outputs.candidate_sha }}'
+          root="$RUNNER_TEMP/policy-promotion-matrix"
+          focused=$(jq -r '.focused_test_count_each' "$root/policy-promotion-gate-green-20260824.json")
+          full=$(jq -r '.full_test_count_each' "$root/policy-promotion-gate-green-20260824.json")
+          decisions_sha=$(jq -r '.decisions_sha256' "$root/policy-promotion-gate-green-20260824.json")
+          pulls=$(gh api --method GET "repos/$REPO/pulls" -f state=all -f head="leon36000:$branch" -f per_page=100)
+          if [ "$(printf '%s' "$pulls" | jq 'length')" -eq 0 ]; then
+            url=$(gh pr create --repo "$REPO" --head "$branch" --base "$base" --title 'feat: policy promotion gate v0' --draft --body 'exact evidence is being attached')
+            pr=${url##*/}
+          else
+            test "$(printf '%s' "$pulls" | jq 'length')" -eq 1
+            pr=$(printf '%s' "$pulls" | jq -r '.[0].number')
+            test "$(printf '%s' "$pulls" | jq -r '.[0].state')" = open
+            test "$(printf '%s' "$pulls" | jq -r '.[0].draft')" = true
+            test "$(printf '%s' "$pulls" | jq -r '.[0].head.sha')" = "$sha"
+            test "$(printf '%s' "$pulls" | jq -r '.[0].base.ref')" = "$base"
+          fi
+          body=$(cat <<EOF
+          ## Status
+
+          **GREEN / draft / review_pending / unmerged.** Exact candidate SHA: \`$sha\`.
+
+          Base paired-replay registry SHA: \`${{ needs.resolve.outputs.base_sha }}\`.
+          Exact verifier run: \`${{ github.run_id }}\`.
+
+          The seven-path candidate implements a pure advisory \`promote/hold/reject\` gate. Hard security, identity, harmful verdict, negative effect, harm, token, and latency conditions deterministically reject. Statistical or operational readiness gaps hold. Promotion is possible only when no bounded reason remains.
+
+          Python 3.12/3.13 exact matrices passed Ruff, compileall, \`$focused\` focused and \`$full\` full tests per version, 5,000 generated decisions, reviewer-order and hash-seed invariance, strict privacy/stub/side-effect audit, isolated wheel imports, and cross-Python byte-identical decision evidence SHA-256 \`$decisions_sha\`.
+
+          This module cannot activate a policy, persist state, contact a database or network, write feedback, inspect a clock, generate random UUIDs, deploy a migration, or publish a release. Merge is forbidden until all prerequisite candidates are integrated in order and a genuine independent GPT-5.6 Sol review returns \`APPROVE\` for this unchanged SHA.
+          EOF
+          )
+          gh api --method PATCH "repos/$REPO/pulls/$pr" --raw-field body="$body" >/dev/null
+          packet=$(cat <<EOF
+          ## Blind GPT-5.6 Sol review request — Policy Promotion Gate v0
+
+          Return exactly one verdict: \`APPROVE\`, \`CHANGES_REQUIRED\`, or \`BLOCKED_BY_EVIDENCE\`.
+
+          Exact boundary: base \`${{ needs.resolve.outputs.base_sha }}\`, candidate \`$sha\`, branch \`candidate/policy-promotion-gate-v0-20260824\`, verifier run \`${{ github.run_id }}\`. Any SHA movement invalidates this request.
+
+          Review strict hard-reject precedence, threshold equality, finite/bool/hash/UUID validation, policy-fingerprint drift, confidence-interval containment and width, harm/cost sign conventions, evidence age supplied without clock access, unique reviewer normalization, canonical reason order, SHA-256/UUID5 identity coverage, serialization privacy, and complete absence of activation/persistence/network/feedback behavior.
+
+          Evidence: Python 3.12/3.13 exact scope, Ruff, compileall, \`$focused\` focused and \`$full\` full tests each, 5,000 generated decisions, reviewer-order/process-hash determinism, cross-Python decision SHA-256 \`$decisions_sha\`, strict AST audit, and isolated wheel import. Inspect the exact seven-file diff and logs; do not rely on this prose as proof.
+          EOF
+          )
+          gh api "repos/$REPO/issues/$pr/comments" -f body="$packet"
+          gh api "repos/$REPO/issues/23/comments" -f body="$packet"
+          echo "pr=$pr" >> "$GITHUB_OUTPUT"
+
+      - name: Close development and verifier PRs without merge
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SELF_PR: ${{ github.event.pull_request.number }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          pulls=$(gh api --method GET "repos/$REPO/pulls" -f state=open -f per_page=100)
+          dev=$(printf '%s' "$pulls" | jq -r '.[] | select(.head.ref == "feat/policy-promotion-gate-v0-20260824") | .number' | head -1)
+          if [ -n "$dev" ]; then
+            gh api --method PATCH "repos/$REPO/pulls/$dev" -f state=closed >/dev/null
+          fi
+          gh api --method PATCH "repos/$REPO/pulls/$SELF_PR" -f state=closed >/dev/null
