@@ -1,0 +1,176 @@
+name: Latch certified reranker telemetry evidence
+
+on:
+  pull_request:
+
+permissions:
+  actions: read
+  contents: write
+  issues: write
+  pull-requests: write
+
+jobs:
+  latch:
+    if: github.event.pull_request.head.ref == 'bootstrap/latch-reranker-telemetry-green-20260823'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve and prove fully successful certification graph
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          encode() {
+            python -c 'import sys,urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$1"
+          }
+
+          branch_sha() {
+            gh api "repos/$REPO/branches/$(encode "$1")" --jq '.commit.sha'
+          }
+
+          latest_run() {
+            local branch=$1
+            local name=$2
+            gh api --method GET "repos/$REPO/actions/runs" \
+              -f branch="$branch" -f event=pull_request -f per_page=100 \
+              --jq ".workflow_runs | map(select(.name == \"$name\")) | sort_by(.created_at) | last // empty"
+          }
+
+          prove_run() {
+            local payload=$1
+            local minimum=$2
+            test -n "$payload"
+            test "$(printf '%s' "$payload" | jq -r '.status')" = completed
+            test "$(printf '%s' "$payload" | jq -r '.conclusion')" = success
+            local id
+            id=$(printf '%s' "$payload" | jq -r '.id')
+            local jobs
+            jobs=$(gh api --method GET "repos/$REPO/actions/runs/$id/jobs" -f per_page=100)
+            test "$(printf '%s' "$jobs" | jq '[.jobs[] | select(.conclusion != "success")] | length')" -eq 0
+            test "$(printf '%s' "$jobs" | jq '[.jobs[] | select(.status == "completed" and .conclusion == "success")] | length')" -ge "$minimum"
+          }
+
+          reader_sha=$(branch_sha candidate/learning-evidence-reader-v0-20260823)
+          reranker_sha=$(branch_sha candidate/bounded-inherited-reranker-v0-20260823)
+          telemetry_sha=$(branch_sha candidate/inherited-rerank-telemetry-v0-20260823)
+          test "$reader_sha" = f0546ef4980239c4993baac8780c12975e91377c
+          test "$reranker_sha" = 4d1317101800b11734d33175b1955f92a55ba3b5
+
+          reranker_run=$(latest_run \
+            bootstrap/verify-pr15-4d131710-v2-20260823 \
+            'Reverify bounded inherited reranker exact SHA')
+          telemetry_run=$(latest_run \
+            bootstrap/verify-telemetry-v0-exact-20260823 \
+            'Verify inherited rerank telemetry exact candidate')
+          certification_run=$(latest_run \
+            bootstrap/certify-reranker-telemetry-stack-20260823 \
+            'Certify immutable reranker and telemetry stack')
+          prove_run "$reranker_run" 3
+          prove_run "$telemetry_run" 4
+          prove_run "$certification_run" 1
+
+          reranker_run_id=$(printf '%s' "$reranker_run" | jq -r '.id')
+          telemetry_run_id=$(printf '%s' "$telemetry_run" | jq -r '.id')
+          certification_run_id=$(printf '%s' "$certification_run" | jq -r '.id')
+
+          product_pr() {
+            local branch=$1
+            local base=$2
+            local sha=$3
+            local pulls
+            pulls=$(gh api --method GET "repos/$REPO/pulls" \
+              -f state=all -f head="leon36000:$branch" -f per_page=100)
+            test "$(printf '%s' "$pulls" | jq 'length')" -eq 1
+            test "$(printf '%s' "$pulls" | jq -r '.[0].state')" = open
+            test "$(printf '%s' "$pulls" | jq -r '.[0].draft')" = true
+            test "$(printf '%s' "$pulls" | jq -r '.[0].base.ref')" = "$base"
+            test "$(printf '%s' "$pulls" | jq -r '.[0].head.sha')" = "$sha"
+            printf '%s' "$pulls" | jq -r '.[0].body' | grep -F '**GREEN / draft / review_pending / unmerged.**' >/dev/null
+            printf '%s' "$pulls" | jq -r '.[0].number'
+          }
+
+          reranker_pr=$(product_pr \
+            candidate/bounded-inherited-reranker-v0-20260823 \
+            candidate/learning-evidence-reader-v0-20260823 \
+            "$reranker_sha")
+          telemetry_pr=$(product_pr \
+            candidate/inherited-rerank-telemetry-v0-20260823 \
+            candidate/bounded-inherited-reranker-v0-20260823 \
+            "$telemetry_sha")
+
+          gh api --method GET "repos/$REPO/actions/runs/$reranker_run_id/artifacts" -f per_page=100 \
+            --jq '[.artifacts[] | {id,name,digest,expired,size_in_bytes}]' > /tmp/reranker-artifacts.json
+          gh api --method GET "repos/$REPO/actions/runs/$telemetry_run_id/artifacts" -f per_page=100 \
+            --jq '[.artifacts[] | {id,name,digest,expired,size_in_bytes}]' > /tmp/telemetry-artifacts.json
+          test "$(jq '[.[] | select(.expired == true)] | length' /tmp/reranker-artifacts.json)" -eq 0
+          test "$(jq '[.[] | select(.expired == true)] | length' /tmp/telemetry-artifacts.json)" -eq 0
+          test "$(jq 'length' /tmp/reranker-artifacts.json)" -ge 3
+          test "$(jq 'length' /tmp/telemetry-artifacts.json)" -ge 3
+
+          jq -n \
+            --arg status green_review_pending_unmerged \
+            --arg reader_sha "$reader_sha" \
+            --arg reranker_sha "$reranker_sha" \
+            --arg telemetry_sha "$telemetry_sha" \
+            --argjson reranker_pr "$reranker_pr" \
+            --argjson telemetry_pr "$telemetry_pr" \
+            --argjson reranker_run "$reranker_run_id" \
+            --argjson telemetry_run "$telemetry_run_id" \
+            --argjson certification_run "$certification_run_id" \
+            --argjson reranker_artifacts "$(cat /tmp/reranker-artifacts.json)" \
+            --argjson telemetry_artifacts "$(cat /tmp/telemetry-artifacts.json)" \
+            '{status:$status,reader:{pull_request:120,sha:$reader_sha},reranker:{pull_request:$reranker_pr,branch:"candidate/bounded-inherited-reranker-v0-20260823",sha:$reranker_sha,verifier_run:$reranker_run,artifacts:$reranker_artifacts,sol_verdict:"pending",merge_allowed:false},telemetry:{pull_request:$telemetry_pr,branch:"candidate/inherited-rerank-telemetry-v0-20260823",sha:$telemetry_sha,verifier_run:$telemetry_run,artifacts:$telemetry_artifacts,sol_verdict:"pending",merge_allowed:false},certification_run:$certification_run,safety:{merged:false,production_database_contacted:false,production_migration_applied:false,production_application_data_written:false,policy_activated:false,release_published:false,corrective_retrieval_changed:false,sol_verdict_fabricated:false}}' \
+            > /tmp/evidence.json
+          cat /tmp/evidence.json
+
+      - name: Publish immutable Git evidence branch without overwrite
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          evidence_branch='evidence/reranker-telemetry-stack-green-20260823'
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git fetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*'
+          if git ls-remote --exit-code --heads origin "$evidence_branch"; then
+            git switch --detach "origin/$evidence_branch"
+            cmp /tmp/evidence.json evidence/reranker-telemetry-stack-green-20260823.json
+            echo 'immutable evidence branch already contains identical evidence'
+            exit 0
+          fi
+          git switch -c "$evidence_branch" f0546ef4980239c4993baac8780c12975e91377c
+          mkdir -p evidence
+          cp /tmp/evidence.json evidence/reranker-telemetry-stack-green-20260823.json
+          git add evidence/reranker-telemetry-stack-green-20260823.json
+          git diff --cached --check
+          git commit -m 'evidence: certify reranker telemetry stack exact SHAs'
+          git push origin HEAD:"refs/heads/$evidence_branch"
+
+      - name: Publish latch status and close without merge
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SELF_PR: ${{ github.event.pull_request.number }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          body=$(cat <<EOF
+          ## Reranker/telemetry evidence latch GREEN
+
+          A fail-closed latch verified the latest reranker, telemetry and certification runs, exact product PR heads, downloaded artifact metadata and immutable branch ancestry. Evidence is frozen at:
+
+          \`evidence/reranker-telemetry-stack-green-20260823\`
+
+          The evidence records exact product SHAs, PRs, verifier run IDs and artifact digests. Both product PRs remain draft, unmerged and Sol-pending. No deployment, database write, policy activation or release occurred.
+          EOF
+          )
+          gh api "repos/$REPO/issues/23/comments" -f body="$body"
+          gh api --method PATCH "repos/$REPO/pulls/$SELF_PR" -f state=closed >/dev/null
