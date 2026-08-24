@@ -1,0 +1,647 @@
+name: Rehearse dependency-ordered learning policy stack merges
+
+on:
+  pull_request:
+
+permissions:
+  actions: read
+  contents: write
+  issues: write
+  pull-requests: write
+
+jobs:
+  resolve:
+    if: github.event.pull_request.head.ref == 'bootstrap/learning-policy-stack-merge-rehearsal-20260824'
+    runs-on: ubuntu-24.04
+    outputs:
+      main_sha: ${{ steps.graph.outputs.main_sha }}
+      reader_sha: ${{ steps.graph.outputs.reader_sha }}
+      reranker_sha: ${{ steps.graph.outputs.reranker_sha }}
+      telemetry_sha: ${{ steps.graph.outputs.telemetry_sha }}
+      evaluation_sha: ${{ steps.graph.outputs.evaluation_sha }}
+      registry_sha: ${{ steps.graph.outputs.registry_sha }}
+      promotion_sha: ${{ steps.graph.outputs.promotion_sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve current main and immutable attested candidate graph
+        id: graph
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*'
+          main_sha=$(git rev-parse origin/main)
+          attestation_ref='origin/evidence/learning-policy-stack-integration-chatgpt-attested-20260824'
+          attestation_path='evidence/learning-policy-stack-integration-chatgpt-attested-20260824.json'
+          git show "$attestation_ref:$attestation_path" > /tmp/integration-attestation.json
+
+          jq -e '.attestation_key == "m-head:learning-policy-stack:integration-chatgpt-attested:20260824"' /tmp/integration-attestation.json >/dev/null
+          jq -e '.status == "green_review_pending_unmerged"' /tmp/integration-attestation.json >/dev/null
+          jq -e '.repository == "leon36000/NextGen-Memory"' /tmp/integration-attestation.json >/dev/null
+          jq -e '.graph.components | length == 6' /tmp/integration-attestation.json >/dev/null
+          jq -e '[.graph.components[].ordinal] == [1,2,3,4,5,6]' /tmp/integration-attestation.json >/dev/null
+          jq -e '.cross_python_semantic_evidence_identical == true' /tmp/integration-attestation.json >/dev/null
+          jq -e '.postgres_major == 18 and .migration_passes == 2' /tmp/integration-attestation.json >/dev/null
+          jq -e '.review.required_model == "GPT-5.6 Sol" and .review.verdict == "pending" and .review.merge_allowed == false' /tmp/integration-attestation.json >/dev/null
+          jq -e '.safety.merged == false and .safety.production_database_contacted == false and .safety.policy_activated == false' /tmp/integration-attestation.json >/dev/null
+
+          branches=(
+            candidate/learning-evidence-reader-v0-20260823
+            candidate/bounded-inherited-reranker-v0-20260823
+            candidate/inherited-rerank-telemetry-v0-20260823
+            candidate/paired-rerank-policy-evaluation-v0-rebased-20260824
+            candidate/paired-replay-experiment-registry-v0-rebased-20260824
+            candidate/policy-promotion-gate-v0-20260824
+          )
+          names=(
+            learning_evidence_reader_v0
+            bounded_inherited_reranker_v0
+            inherited_rerank_telemetry_v0
+            paired_rerank_policy_evaluation_v0
+            paired_replay_experiment_registry_v0
+            policy_promotion_gate_v0
+          )
+          shas=()
+          for index in "${!branches[@]}"; do
+            live=$(git rev-parse "origin/${branches[$index]}")
+            recorded=$(jq -r ".graph.components[$index].sha" /tmp/integration-attestation.json)
+            recorded_branch=$(jq -r ".graph.components[$index].branch" /tmp/integration-attestation.json)
+            recorded_name=$(jq -r ".graph.components[$index].name" /tmp/integration-attestation.json)
+            test "$live" = "$recorded"
+            test "$recorded_branch" = "${branches[$index]}"
+            test "$recorded_name" = "${names[$index]}"
+            shas+=("$live")
+          done
+          test "${shas[0]}" = 'f0546ef4980239c4993baac8780c12975e91377c'
+          test "${shas[1]}" = '4d1317101800b11734d33175b1955f92a55ba3b5'
+          for index in 1 2 3 4 5; do
+            parent=$((index - 1))
+            test "$(git merge-base "${shas[$parent]}" "${shas[$index]}")" = "${shas[$parent]}"
+          done
+          test "$(printf '%s\n' "${shas[@]}" | sort -u | wc -l)" -eq 6
+          test "${shas[5]}" = "$(jq -r '.top_candidate_sha' /tmp/integration-attestation.json)"
+
+          printf 'main_sha=%s\nreader_sha=%s\nreranker_sha=%s\ntelemetry_sha=%s\nevaluation_sha=%s\nregistry_sha=%s\npromotion_sha=%s\n' \
+            "$main_sha" "${shas[0]}" "${shas[1]}" "${shas[2]}" "${shas[3]}" "${shas[4]}" "${shas[5]}" \
+            | tee -a "$GITHUB_OUTPUT"
+
+          jq -n \
+            --arg main_sha "$main_sha" \
+            --argjson attested_graph "$(jq '.graph' /tmp/integration-attestation.json)" \
+            '{schema:"m-head-learning-policy-stack-merge-rehearsal-input-v1",main_sha:$main_sha,attested_graph:$attested_graph}' \
+            > /tmp/merge-input.json
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: learning-policy-stack-merge-input
+          path: /tmp/merge-input.json
+          if-no-files-found: error
+          retention-days: 7
+
+  rehearse:
+    needs: resolve
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13"]
+
+    services:
+      postgres:
+        image: pgvector/pgvector:0.8.6-pg18-bookworm
+        env:
+          POSTGRES_DB: learning_policy_merge_rehearsal
+          POSTGRES_PASSWORD: synthetic-learning-policy-merge
+          POSTGRES_USER: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d learning_policy_merge_rehearsal"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+    env:
+      PGDATABASE: learning_policy_merge_rehearsal
+      PGHOST: 127.0.0.1
+      PGPASSWORD: synthetic-learning-policy-merge
+      PGPORT: "5432"
+      PGUSER: postgres
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.main_sha }}
+          fetch-depth: 0
+
+      - name: Perform six actual merges on an isolated local branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*'
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git switch -c rehearsal/learning-policy-stack-merges '${{ needs.resolve.outputs.main_sha }}'
+          : > /tmp/merge-steps.jsonl
+
+          merge_candidate() {
+            local ordinal=$1 name=$2 branch=$3 sha=$4
+            local before after tree relation output
+            before=$(git rev-parse HEAD)
+            git cat-file -e "$sha^{commit}"
+            relation=$(git merge-base --is-ancestor "$sha" HEAD && echo already_contained || echo merge_required)
+            if ! output=$(git merge --no-ff --no-edit "$sha" 2>&1); then
+              printf '%s\n' "$output" >&2
+              git status --short >&2
+              git diff --name-only --diff-filter=U >&2
+              exit 1
+            fi
+            printf '%s\n' "$output"
+            after=$(git rev-parse HEAD)
+            tree=$(git rev-parse 'HEAD^{tree}')
+            git merge-base --is-ancestor "$sha" HEAD
+            test -z "$(git status --porcelain)"
+            jq -n \
+              --argjson ordinal "$ordinal" \
+              --arg name "$name" \
+              --arg branch "$branch" \
+              --arg candidate_sha "$sha" \
+              --arg before_sha "$before" \
+              --arg after_sha "$after" \
+              --arg tree_sha "$tree" \
+              --arg relation "$relation" \
+              '{ordinal:$ordinal,name:$name,branch:$branch,candidate_sha:$candidate_sha,before_sha:$before_sha,after_sha:$after_sha,tree_sha:$tree_sha,pre_merge_relation:$relation}' \
+              >> /tmp/merge-steps.jsonl
+          }
+
+          merge_candidate 1 learning_evidence_reader_v0 candidate/learning-evidence-reader-v0-20260823 '${{ needs.resolve.outputs.reader_sha }}'
+          merge_candidate 2 bounded_inherited_reranker_v0 candidate/bounded-inherited-reranker-v0-20260823 '${{ needs.resolve.outputs.reranker_sha }}'
+          merge_candidate 3 inherited_rerank_telemetry_v0 candidate/inherited-rerank-telemetry-v0-20260823 '${{ needs.resolve.outputs.telemetry_sha }}'
+          merge_candidate 4 paired_rerank_policy_evaluation_v0 candidate/paired-rerank-policy-evaluation-v0-rebased-20260824 '${{ needs.resolve.outputs.evaluation_sha }}'
+          merge_candidate 5 paired_replay_experiment_registry_v0 candidate/paired-replay-experiment-registry-v0-rebased-20260824 '${{ needs.resolve.outputs.registry_sha }}'
+          merge_candidate 6 policy_promotion_gate_v0 candidate/policy-promotion-gate-v0-20260824 '${{ needs.resolve.outputs.promotion_sha }}'
+
+          jq -s '.' /tmp/merge-steps.jsonl > /tmp/merge-steps.json
+          test "$(jq 'length' /tmp/merge-steps.json)" -eq 6
+          test "$(jq '[.[].ordinal] == [1,2,3,4,5,6]' /tmp/merge-steps.json)" = true
+          final_sha=$(git rev-parse HEAD)
+          final_tree=$(git rev-parse 'HEAD^{tree}')
+          test -z "$(git status --porcelain)"
+          git diff --check '${{ needs.resolve.outputs.main_sha }}'...HEAD
+          printf 'FINAL_MERGE_SHA=%s\nFINAL_TREE_SHA=%s\n' "$final_sha" "$final_tree" | tee -a "$GITHUB_ENV"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install PostgreSQL 18 client
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo install -d /usr/share/postgresql-common/pgdg
+          sudo curl --fail --silent --show-error \
+            -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
+            https://www.postgresql.org/media/keys/ACCC4CF8.asc
+          . /etc/os-release
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt ${VERSION_CODENAME}-pgdg main" \
+            | sudo tee /etc/apt/sources.list.d/pgdg.list >/dev/null
+          sudo apt-get update -q
+          sudo apt-get install -y --no-install-recommends postgresql-client-18
+          sudo ln -sf /usr/lib/postgresql/18/bin/psql /usr/bin/psql
+          sudo ln -sf /usr/lib/postgresql/18/bin/pg_dump /usr/bin/pg_dump
+          psql --version | grep -E '^psql \(PostgreSQL\) 18\.'
+          pg_dump --version | grep -E '^pg_dump \(PostgreSQL\) 18\.'
+
+      - name: Install merged rehearsal tree and development tools
+        run: python -m pip install -e '.[dev]'
+
+      - name: Run static, focused and complete merged-tree verification
+        shell: bash
+        run: |
+          set -euo pipefail
+          ruff check .
+          python -m compileall -q src scripts
+          mapfile -t focused < <(
+            find tests -maxdepth 1 -type f \( \
+              -name 'test_*learning*evidence*.py' -o \
+              -name 'test_bounded_inherited_reranker*.py' -o \
+              -name 'test_inherited_rerank_telemetry*.py' -o \
+              -name 'test_paired_rerank_policy_evaluation*.py' -o \
+              -name 'test_paired_replay_experiment_registry*.py' -o \
+              -name 'test_policy_promotion*.py' \
+            \) | sort
+          )
+          test "${#focused[@]}" -ge 15
+          python -m pytest -q "${focused[@]}" | tee /tmp/focused-tests.txt
+          python -m pytest -q | tee /tmp/full-tests.txt
+
+      - name: Prove deterministic merged-stack semantics
+        shell: bash
+        run: |
+          set -euo pipefail
+          evidence="$RUNNER_TEMP/learning-policy-merge-${{ matrix.python-version }}"
+          mkdir -p "$evidence"
+          PYTHONHASHSEED=1 python scripts/simulate_bounded_inherited_reranker_v0.py > "$evidence/reranker.json"
+          PYTHONHASHSEED=999 python scripts/simulate_bounded_inherited_reranker_v0.py > /tmp/reranker-retry.json
+          cmp "$evidence/reranker.json" /tmp/reranker-retry.json
+          PYTHONHASHSEED=1 python scripts/simulate_paired_rerank_policy_evaluation_v0.py > "$evidence/evaluation.json"
+          PYTHONHASHSEED=999 python scripts/simulate_paired_rerank_policy_evaluation_v0.py > /tmp/evaluation-retry.json
+          cmp "$evidence/evaluation.json" /tmp/evaluation-retry.json
+
+          cat > /tmp/merged_stack_semantic.py <<'PY'
+          from __future__ import annotations
+          import hashlib, json
+          from uuid import UUID
+          from nextgen_memory.bounded_inherited_reranker import BoundedInheritedRerankerConfig
+          from nextgen_memory.inherited_rerank_telemetry import fingerprint_bounded_inherited_policy
+          from nextgen_memory.paired_rerank_policy_evaluation import PairedPolicyVerdict
+          from nextgen_memory.paired_replay_experiment_registry import BalancedPairedReplayPlanner, PairedReplayExperimentSpec
+          from nextgen_memory.policy_promotion import (
+              PolicyPromotionEvidence, PolicyPromotionGate, PolicyPromotionGateConfig,
+              PolicyPromotionPolicyIdentity, PolicyPromotionSignal,
+          )
+          control=BoundedInheritedRerankerConfig(policy_version='control-v1')
+          treatment=BoundedInheritedRerankerConfig(policy_version='treatment-v1')
+          spec=PairedReplayExperimentSpec(
+              experiment_id=UUID('00000000-0000-5000-8000-00000000f001'),
+              space_id=UUID('00000000-0000-5000-8000-00000000f002'),
+              control_policy_version=control.policy_version,
+              control_policy_fingerprint=fingerprint_bounded_inherited_policy(control),
+              treatment_policy_version=treatment.policy_version,
+              treatment_policy_fingerprint=fingerprint_bounded_inherited_policy(treatment),
+              continuation_set_hash=hashlib.sha256(b'continuation').hexdigest(),
+              order_seed_hash=hashlib.sha256(b'order').hexdigest(),
+              maximum_pairs=8,
+              maximum_tokens_per_arm=64,
+              maximum_latency_ms_per_arm=32.0,
+              maximum_total_tokens=1024,
+              maximum_total_latency_ms=512.0,
+          )
+          plan=BalancedPairedReplayPlanner().plan(
+              spec,
+              {hashlib.sha256(f'context:{i}'.encode()).hexdigest() for i in range(8)},
+          )
+          current=PolicyPromotionPolicyIdentity(policy_version='control-v1',policy_fingerprint='a'*64,source_sha='1'*40)
+          candidate=PolicyPromotionPolicyIdentity(policy_version='treatment-v1',policy_fingerprint='b'*64,source_sha='2'*40)
+          config=PolicyPromotionGateConfig(
+              minimum_pairs=32,
+              minimum_effect_lower_bound=0.0,
+              maximum_confidence_interval_width=0.08,
+              maximum_harm_rate=0.02,
+              maximum_cost_effect=0.10,
+              maximum_evidence_age_generations=2,
+              minimum_independent_reviewers=2,
+          )
+          ready={PolicyPromotionSignal.TESTS_PASSED,PolicyPromotionSignal.INTEGRATION_PASSED,PolicyPromotionSignal.ARTIFACT_INTEGRITY_PASSED,PolicyPromotionSignal.ROLLBACK_READY}
+          def evidence(**overrides):
+              values={
+                  'current_policy':current,'candidate_policy':candidate,
+                  'evaluated_current_policy':current,'evaluated_candidate_policy':candidate,
+                  'verdict':PairedPolicyVerdict.PROMISING,'pair_count':64,
+                  'effect_mean':0.08,'effect_confidence_lower':0.04,
+                  'effect_confidence_upper':0.10,'cost_effect':0.03,'harm_rate':0.005,
+                  'evidence_generation':10,'current_generation':11,
+                  'independent_reviewer_count':3,'signals':ready,
+              }
+              values.update(overrides)
+              return PolicyPromotionEvidence(**values)
+          gate=PolicyPromotionGate()
+          payload={
+              'plan':plan.to_dict(),
+              'promotion':{
+                  'promote':gate.evaluate(evidence(),config).to_dict(),
+                  'hold':gate.evaluate(evidence(pair_count=4),config).to_dict(),
+                  'reject':gate.evaluate(evidence(signals=(*ready,PolicyPromotionSignal.SAFETY_VIOLATION)),config).to_dict(),
+              },
+          }
+          print(json.dumps(payload,ensure_ascii=False,allow_nan=False,sort_keys=True,separators=(',',':')))
+          PY
+          PYTHONHASHSEED=1 python /tmp/merged_stack_semantic.py > "$evidence/stack.json"
+          PYTHONHASHSEED=999 python /tmp/merged_stack_semantic.py > /tmp/stack-retry.json
+          cmp "$evidence/stack.json" /tmp/stack-retry.json
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+          root=Path(os.environ['RUNNER_TEMP'])/'learning-policy-merge-${{ matrix.python-version }}'
+          evaluation=json.loads((root/'evaluation.json').read_text(encoding='utf-8'))
+          if evaluation.get('scenario_count') != 6 or evaluation.get('memory_level_credit_emitted') is not False:
+              raise SystemExit('paired evaluation semantic contract differs')
+          stack=json.loads((root/'stack.json').read_text(encoding='utf-8'))
+          if stack['plan']['summary']['pair_count'] != 8:
+              raise SystemExit('registry pair count differs')
+          decisions={name:value['decision'] for name,value in stack['promotion'].items()}
+          if decisions != {'promote':'promote','hold':'hold','reject':'reject'}:
+              raise SystemExit('promotion decision matrix differs')
+          PY
+          echo "EVIDENCE_ROOT=$evidence" >> "$GITHUB_ENV"
+
+      - name: Replay inherited-credit schema twice on ephemeral PostgreSQL 18
+        shell: bash
+        run: |
+          set -euo pipefail
+          psql -X --no-psqlrc -v ON_ERROR_STOP=1 --quiet --file migrations/neon/0001_memory_moe_kernel.sql
+          psql -X --no-psqlrc -v ON_ERROR_STOP=1 --quiet --file migrations/neon/0002_core_idempotency.sql
+          cat > /tmp/seed.sql <<'SQL'
+          INSERT INTO ngm.memory_spaces (id,parent_id,kind,external_key,name,metadata)
+          VALUES ('279c0edc-e75d-5c7e-a857-2f461b4ba61e'::uuid,NULL,'project','synthetic:learning-policy-merge-rehearsal','Synthetic learning policy merge rehearsal',jsonb_build_object('synthetic',true))
+          ON CONFLICT DO NOTHING;
+          INSERT INTO ngm.source_principals (id,space_id,source_key,source_type,authority_class,authority_score,origin_uri,metadata)
+          VALUES ('049b6cff-c7a6-5116-a38f-5a7527ca3a21'::uuid,'279c0edc-e75d-5c7e-a857-2f461b4ba61e'::uuid,'synthetic:research-sources-seed','research_corpus','contextual',0.650,NULL,jsonb_build_object('synthetic',true))
+          ON CONFLICT DO NOTHING;
+          SQL
+          psql -X --no-psqlrc -v ON_ERROR_STOP=1 --quiet --file /tmp/seed.sql
+          migrations=(
+            migrations/neon/0001_memory_moe_kernel.sql
+            migrations/neon/0002_core_idempotency.sql
+            migrations/neon/0003_research_sources_seed.sql
+            migrations/neon/0005_causal_credit_feedback.sql
+            migrations/neon/0006_inherited_credit_ledger.sql
+          )
+          for pass in 1 2; do
+            for migration in "${migrations[@]}"; do
+              psql -X --no-psqlrc -v ON_ERROR_STOP=1 --quiet --file "$migration"
+            done
+            pg_dump --schema-only --no-owner --no-privileges --schema=ngm --format=plain \
+              --restrict-key=LearningPolicyMergeRehearsal > "/tmp/schema-$pass.sql"
+            sha256sum "/tmp/schema-$pass.sql" | awk '{print $1}' > "/tmp/schema-$pass.sha256"
+            psql -X --no-psqlrc -Atq -v ON_ERROR_STOP=1 \
+              --command "SELECT jsonb_agg(jsonb_build_object('schema_key',schema_key,'schema_version',schema_version,'metadata',metadata) ORDER BY schema_key)::text FROM ngm.schema_meta" \
+              | sha256sum | awk '{print $1}' > "/tmp/schema-meta-$pass.sha256"
+          done
+          cmp /tmp/schema-1.sha256 /tmp/schema-2.sha256
+          cmp /tmp/schema-meta-1.sha256 /tmp/schema-meta-2.sha256
+          test "$(psql -X --no-psqlrc -Atq -v ON_ERROR_STOP=1 --command "SELECT count(*) FROM ngm.memory_feedback")" -eq 0
+          cp /tmp/schema-1.sha256 "$EVIDENCE_ROOT/schema.sha256"
+          cp /tmp/schema-meta-1.sha256 "$EVIDENCE_ROOT/schema-meta.sha256"
+
+      - name: Audit merged pure modules for hidden side effects and stubs
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from __future__ import annotations
+          import ast
+          from pathlib import Path
+          paths=(
+              Path('src/nextgen_memory/bounded_inherited_reranker.py'),
+              Path('src/nextgen_memory/inherited_rerank_telemetry.py'),
+              Path('src/nextgen_memory/paired_rerank_policy_evaluation.py'),
+              Path('src/nextgen_memory/paired_replay_experiment_registry.py'),
+              Path('src/nextgen_memory/policy_promotion.py'),
+          )
+          forbidden_roots={'asyncio','httpx','os','pathlib','psycopg','pymongo','random','requests','socket','sqlalchemy','subprocess','temporalio','time','urllib'}
+          forbidden_calls={'eval','exec','open','sleep','system','urlopen','uuid1','uuid4','write_bytes','write_text'}
+          findings=[]
+          for path in paths:
+              source=path.read_text(encoding='utf-8'); tree=ast.parse(source,filename=str(path))
+              for node in ast.walk(tree):
+                  if isinstance(node,ast.Pass): findings.append(f'{path}:{node.lineno}:pass')
+                  elif isinstance(node,ast.Raise):
+                      exc=node.exc.func if isinstance(node.exc,ast.Call) else node.exc
+                      if (isinstance(exc,ast.Name) and exc.id=='NotImplementedError') or (isinstance(exc,ast.Attribute) and exc.attr=='NotImplementedError'):
+                          findings.append(f'{path}:{node.lineno}:NotImplementedError')
+                  elif isinstance(node,ast.Import):
+                      for alias in node.names:
+                          if alias.name.split('.',1)[0] in forbidden_roots: findings.append(f'{path}:{node.lineno}:import:{alias.name}')
+                  elif isinstance(node,ast.ImportFrom):
+                      if (node.module or '').split('.',1)[0] in forbidden_roots: findings.append(f'{path}:{node.lineno}:import:{node.module}')
+                  elif isinstance(node,ast.Call):
+                      name=node.func.id if isinstance(node.func,ast.Name) else node.func.attr if isinstance(node.func,ast.Attribute) else None
+                      if name in forbidden_calls: findings.append(f'{path}:{node.lineno}:call:{name}')
+              lower=source.lower()
+              for marker in ('postgresql://','mongodb://','http://','https://','password','credential','# todo','# fixme','raw_query','raw_prompt','response_text','memory_body','lease_timestamp','worker_identity','activate_policy','write_feedback'):
+                  if marker in lower: findings.append(f'{path}:text:{marker}')
+          if findings: raise SystemExit('\n'.join(findings))
+          print('learning_policy_merge_rehearsal_audit_findings=0')
+          PY
+
+      - name: Build and install merged rehearsal wheel outside checkout
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf wheelhouse "$RUNNER_TEMP/learning-policy-merge-wheel-venv"
+          python -m pip wheel --no-deps . -w wheelhouse
+          test "$(find wheelhouse -maxdepth 1 -type f -name '*.whl' | wc -l)" -eq 1
+          wheel=$(find wheelhouse -maxdepth 1 -type f -name '*.whl')
+          python -m venv "$RUNNER_TEMP/learning-policy-merge-wheel-venv"
+          "$RUNNER_TEMP/learning-policy-merge-wheel-venv/bin/python" -m pip install --no-deps "$wheel"
+          "$RUNNER_TEMP/learning-policy-merge-wheel-venv/bin/python" - <<'PY'
+          import nextgen_memory
+          from nextgen_memory import (
+              BalancedPairedReplayPlanner,
+              BoundedInheritedReranker,
+              InMemoryPairedReplayExperimentRegistry,
+              InheritedRerankTelemetryBuilder,
+              PolicyPromotionDecision,
+              PolicyPromotionGate,
+          )
+          assert BoundedInheritedReranker is not None
+          assert InheritedRerankTelemetryBuilder is not None
+          assert BalancedPairedReplayPlanner is not None
+          assert InMemoryPairedReplayExperimentRegistry is not None
+          assert PolicyPromotionGate is not None
+          assert PolicyPromotionDecision.PROMOTE.value == 'promote'
+          assert all(name in nextgen_memory.__all__ for name in (
+              'BoundedInheritedReranker','InheritedRerankTelemetryBuilder',
+              'BalancedPairedReplayPlanner','InMemoryPairedReplayExperimentRegistry',
+              'PolicyPromotionGate',
+          ))
+          PY
+          "$RUNNER_TEMP/learning-policy-merge-wheel-venv/bin/python" -m pip check
+          sha256sum "$wheel" | awk '{print $1}' > "$EVIDENCE_ROOT/wheel.sha256"
+
+      - name: Write bounded merge-rehearsal evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp /tmp/merge-steps.json "$EVIDENCE_ROOT/merge-steps.json"
+          python - <<'PY'
+          import hashlib,json,os,re,sys
+          from pathlib import Path
+          def count(path):
+              matches=re.findall(r'(\d+) passed',Path(path).read_text(encoding='utf-8'))
+              if not matches: raise SystemExit(f'test count missing: {path}')
+              return int(matches[-1])
+          root=Path(os.environ['EVIDENCE_ROOT'])
+          report={
+              'main_sha':'${{ needs.resolve.outputs.main_sha }}',
+              'candidate_shas':[
+                  '${{ needs.resolve.outputs.reader_sha }}','${{ needs.resolve.outputs.reranker_sha }}',
+                  '${{ needs.resolve.outputs.telemetry_sha }}','${{ needs.resolve.outputs.evaluation_sha }}',
+                  '${{ needs.resolve.outputs.registry_sha }}','${{ needs.resolve.outputs.promotion_sha }}',
+              ],
+              'python_version':'.'.join(map(str,sys.version_info[:3])),
+              'merge_steps':json.loads((root/'merge-steps.json').read_text(encoding='utf-8')),
+              'final_tree_sha':os.environ['FINAL_TREE_SHA'],
+              'focused_test_count':count('/tmp/focused-tests.txt'),
+              'full_test_count':count('/tmp/full-tests.txt'),
+              'semantic_sha256':{
+                  name:hashlib.sha256((root/filename).read_bytes()).hexdigest()
+                  for name,filename in {'reranker':'reranker.json','evaluation':'evaluation.json','stack':'stack.json'}.items()
+              },
+              'schema_sha256':(root/'schema.sha256').read_text().strip(),
+              'schema_meta_sha256':(root/'schema-meta.sha256').read_text().strip(),
+              'wheel_sha256':(root/'wheel.sha256').read_text().strip(),
+              'hash_seed_invariant':True,
+              'migration_passes':2,
+              'postgres_major':18,
+          }
+          (root/'verification.json').write_text(json.dumps(report,ensure_ascii=False,allow_nan=False,sort_keys=True,separators=(',',':'))+'\n',encoding='utf-8')
+          print((root/'verification.json').read_text(),end='')
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: learning-policy-merge-python-${{ matrix.python-version }}
+          path: |
+            ${{ env.EVIDENCE_ROOT }}/verification.json
+            ${{ env.EVIDENCE_ROOT }}/merge-steps.json
+            ${{ env.EVIDENCE_ROOT }}/reranker.json
+            ${{ env.EVIDENCE_ROOT }}/evaluation.json
+            ${{ env.EVIDENCE_ROOT }}/stack.json
+          if-no-files-found: error
+          retention-days: 7
+
+  compare-and-publish:
+    needs: [resolve, rehearse]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.main_sha }}
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: learning-policy-merge-*
+          path: ${{ runner.temp }}/learning-policy-merge-evidence
+
+      - name: Require cross-Python identical merge trees and semantic evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from __future__ import annotations
+          import json,os
+          from pathlib import Path
+          root=Path(os.environ['RUNNER_TEMP'])/'learning-policy-merge-evidence'
+          inputs=sorted(root.rglob('merge-input.json'))
+          reports=sorted(root.rglob('verification.json'))
+          if len(inputs)!=1 or len(reports)!=2: raise SystemExit('incomplete merge rehearsal evidence')
+          merge_input=json.loads(inputs[0].read_text(encoding='utf-8'))
+          docs=[json.loads(path.read_text(encoding='utf-8')) for path in reports]
+          if {'.'.join(doc['python_version'].split('.')[:2]) for doc in docs}!={'3.12','3.13'}: raise SystemExit('unexpected Python matrix')
+          for key in ('main_sha','candidate_shas','merge_steps','final_tree_sha','focused_test_count','full_test_count','semantic_sha256','schema_sha256','schema_meta_sha256','hash_seed_invariant','migration_passes','postgres_major'):
+              if len({json.dumps(doc[key],sort_keys=True) for doc in docs})!=1: raise SystemExit(f'cross-Python merge evidence drift: {key}')
+          if docs[0]['main_sha']!=merge_input['main_sha']: raise SystemExit('main SHA drift')
+          attested=[item['sha'] for item in merge_input['attested_graph']['components']]
+          if docs[0]['candidate_shas']!=attested: raise SystemExit('candidate graph drift')
+          if len(docs[0]['merge_steps'])!=6: raise SystemExit('merge-step count differs')
+          for filename in ('reranker.json','evaluation.json','stack.json'):
+              paths=sorted(root.rglob(filename))
+              if len(paths)!=2 or paths[0].read_bytes()!=paths[1].read_bytes(): raise SystemExit(f'cross-Python bytes differ: {filename}')
+          summary={
+              'schema':'m-head-learning-policy-stack-merge-rehearsal-v1',
+              'status':'green_review_pending_unmerged',
+              'repository':'leon36000/NextGen-Memory',
+              'main_sha':docs[0]['main_sha'],
+              'attested_graph':merge_input['attested_graph'],
+              'merge_steps':docs[0]['merge_steps'],
+              'final_tree_sha':docs[0]['final_tree_sha'],
+              'python_versions':['3.12','3.13'],
+              'focused_test_count_each':docs[0]['focused_test_count'],
+              'full_test_count_each':docs[0]['full_test_count'],
+              'semantic_sha256':docs[0]['semantic_sha256'],
+              'schema_sha256':docs[0]['schema_sha256'],
+              'schema_meta_sha256':docs[0]['schema_meta_sha256'],
+              'migration_passes':2,
+              'postgres_major':18,
+              'cross_python_merge_tree_identical':True,
+              'cross_python_semantic_evidence_identical':True,
+              'wheel_sha256_by_python':{'.'.join(doc['python_version'].split('.')[:2]):doc['wheel_sha256'] for doc in docs},
+              'review':{'required_model':'GPT-5.6 Sol','verdict':'pending','merge_allowed':False},
+              'safety':{'actual_product_merge_performed':False,'merged':False,'production_database_contacted':False,'production_migration_applied':False,'production_application_data_written':False,'feedback_written':False,'policy_activated':False,'release_published':False,'tests_weakened':False,'stubs_added':False,'sol_verdict_fabricated':False},
+          }
+          destination=root/'merge-rehearsal.json'
+          destination.write_text(json.dumps(summary,ensure_ascii=False,allow_nan=False,sort_keys=True,separators=(',',':'))+'\n',encoding='utf-8')
+          print(destination.read_text(),end='')
+          PY
+
+      - name: Publish immutable merge-rehearsal evidence and checkpoint
+        shell: bash
+        run: |
+          set -euo pipefail
+          root="$RUNNER_TEMP/learning-policy-merge-evidence"
+          evidence_file="$root/merge-rehearsal.json"
+          python - <<'PY'
+          import hashlib,json,os
+          from pathlib import Path
+          root=Path(os.environ['RUNNER_TEMP'])/'learning-policy-merge-evidence'
+          source=root/'merge-rehearsal.json'; raw=source.read_bytes(); evidence=json.loads(raw)
+          checkpoint={
+              'checkpoint_key':'m-head:learning-policy-stack:merge-rehearsal-green:20260824',
+              'status':evidence['status'],'repository':evidence['repository'],
+              'evidence_sha256':hashlib.sha256(raw).hexdigest(),
+              'main_sha':evidence['main_sha'],'attested_graph':evidence['attested_graph'],
+              'merge_steps':evidence['merge_steps'],'final_tree_sha':evidence['final_tree_sha'],
+              'python_versions':evidence['python_versions'],
+              'focused_test_count_each':evidence['focused_test_count_each'],
+              'full_test_count_each':evidence['full_test_count_each'],
+              'semantic_sha256':evidence['semantic_sha256'],'schema_sha256':evidence['schema_sha256'],
+              'review':evidence['review'],'safety':evidence['safety'],
+              'next_action':'Obtain genuine exact-SHA GPT-5.6 Sol approvals before any real dependency-ordered merge. This rehearsal performed no product merge and authorizes no migration, deployment, feedback, activation or release.',
+          }
+          Path('/tmp/merge-checkpoint.json').write_text(json.dumps(checkpoint,ensure_ascii=False,allow_nan=False,sort_keys=True,separators=(',',':'))+'\n',encoding='utf-8')
+          PY
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git fetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*'
+          publish() {
+            local branch=$1 source=$2 destination=$3 message=$4 base=$5
+            if git ls-remote --exit-code --heads origin "$branch"; then
+              git switch --detach "origin/$branch"; cmp "$source" "$destination"
+            else
+              git switch -C "$branch" "$base"; mkdir -p "$(dirname "$destination")"; cp "$source" "$destination"; git add "$destination"; git diff --cached --check; git commit -m "$message"; git push origin HEAD:"refs/heads/$branch"
+            fi
+          }
+          publish evidence/learning-policy-stack-merge-rehearsal-20260824 "$evidence_file" evidence/learning-policy-stack-merge-rehearsal-20260824.json 'evidence: certify dependency-ordered learning policy merge rehearsal' '${{ needs.resolve.outputs.promotion_sha }}'
+          git fetch --no-tags origin 'refs/heads/evidence/learning-policy-stack-merge-rehearsal-20260824:refs/remotes/origin/evidence/learning-policy-stack-merge-rehearsal-20260824'
+          publish evidence/learning-policy-stack-merge-rehearsal-checkpoint-20260824 /tmp/merge-checkpoint.json evidence/learning-policy-stack-merge-rehearsal-checkpoint-20260824.json 'evidence: checkpoint dependency-ordered learning policy merge rehearsal' origin/evidence/learning-policy-stack-merge-rehearsal-20260824
+
+      - name: Publish durable status and close without merge
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SELF_PR: ${{ github.event.pull_request.number }}
+        shell: bash
+        run: |
+          checkpoint=$(cat /tmp/merge-checkpoint.json)
+          body=$(cat <<EOF
+          ## Dependency-ordered learning-policy merge rehearsal GREEN
+
+          Six actual merges were performed only on isolated local Actions branches starting from current main \`${{ needs.resolve.outputs.main_sha }}\`. The merge trees, focused/full tests, semantics, PostgreSQL 18 schema replay, pure-module audit and isolated wheel were identical across Python 3.12/3.13.
+
+          Immutable records:
+
+          - \`evidence/learning-policy-stack-merge-rehearsal-20260824\`
+          - \`evidence/learning-policy-stack-merge-rehearsal-checkpoint-20260824\`
+
+          Checkpoint: \`$checkpoint\`
+
+          No product branch was merged or pushed. Exact-SHA GPT-5.6 Sol verdicts remain pending; no production database, migration deployment, feedback, activation, or release occurred.
+          EOF
+          )
+          gh api "repos/$REPO/issues/23/comments" --raw-field body="$body" >/dev/null
+          gh api --method PATCH "repos/$REPO/pulls/$SELF_PR" -f state=closed >/dev/null
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: learning-policy-stack-merge-rehearsal-summary
+          path: ${{ runner.temp }}/learning-policy-merge-evidence/merge-rehearsal.json
+          if-no-files-found: error
+          retention-days: 7
