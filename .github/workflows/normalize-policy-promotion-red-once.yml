@@ -1,0 +1,91 @@
+name: Normalize and prove policy promotion RED once
+
+on:
+  pull_request:
+
+permissions:
+  contents: write
+
+jobs:
+  normalize-red:
+    if: github.event.pull_request.head.ref == 'feat/policy-promotion-gate-v0-20260824'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/policy-promotion-gate-v0-20260824
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install project and development tools
+        run: python -m pip install -e '.[dev]'
+
+      - name: Normalize the tests-only contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('tests/test_policy_promotion_properties.py')
+          source = path.read_text(encoding='utf-8')
+          old = 'from nextgen_memory.policy_promotion import DeterministicPolicyPromotionGate, PolicyPromotionEvidence, PolicyVerificationSignal'
+          new = '''from nextgen_memory.policy_promotion import (
+              DeterministicPolicyPromotionGate,
+              PolicyPromotionEvidence,
+              PolicyVerificationSignal,
+          )'''
+          new = '\n'.join(
+              line[10:] if line.startswith('          ') else line
+              for line in new.splitlines()
+          ).lstrip('\n')
+          if source.count(old) != 1:
+              raise SystemExit(f'embedded import count={source.count(old)}')
+          path.write_text(source.replace(old, new, 1), encoding='utf-8')
+          PY
+          files=(
+            tests/test_policy_promotion.py
+            tests/test_policy_promotion_properties.py
+            tests/test_policy_promotion_public_api.py
+          )
+          ruff check --fix "${files[@]}"
+          ruff format "${files[@]}"
+          ruff check "${files[@]}"
+          git diff --check
+
+      - name: Prove exact module-absence RED
+        shell: bash
+        run: |
+          set -euo pipefail
+          test ! -e src/nextgen_memory/policy_promotion.py
+          set +e
+          python -m pytest -q \
+            tests/test_policy_promotion.py \
+            tests/test_policy_promotion_properties.py \
+            tests/test_policy_promotion_public_api.py \
+            > /tmp/policy-promotion-red.txt 2>&1
+          red_rc=$?
+          set -e
+          test "$red_rc" -ne 0
+          test "$(grep -c "ModuleNotFoundError: No module named 'nextgen_memory.policy_promotion'" /tmp/policy-promotion-red.txt)" -eq 3
+          if grep -E 'SyntaxError|IndentationError|NameError|ImportError:' /tmp/policy-promotion-red.txt; then
+            echo 'RED contains an unintended failure class' >&2
+            exit 1
+          fi
+          tail -n 160 /tmp/policy-promotion-red.txt
+
+      - name: Remove transport and commit the clean RED contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm .github/workflows/normalize-policy-promotion-red-once.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git diff --cached --check
+          git commit -m 'test: define policy promotion gate v0 contract'
+          git push origin HEAD:feat/policy-promotion-gate-v0-20260824
