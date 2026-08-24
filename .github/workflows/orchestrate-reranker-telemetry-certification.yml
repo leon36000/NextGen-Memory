@@ -1,0 +1,219 @@
+name: Orchestrate reranker telemetry certification
+
+on:
+  pull_request:
+
+permissions:
+  actions: read
+  contents: write
+  issues: write
+  pull-requests: write
+
+jobs:
+  orchestrate:
+    if: github.event.pull_request.head.ref == 'bootstrap/orchestrate-reranker-telemetry-certification-20260823'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Wait for exact reranker and telemetry verifier graphs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          latest_run() {
+            local branch=$1 name=$2
+            gh api --method GET "repos/$REPO/actions/runs" \
+              -f branch="$branch" -f event=pull_request -f per_page=100 \
+              --jq ".workflow_runs | map(select(.name == \"$name\")) | sort_by(.created_at) | last // empty"
+          }
+
+          wait_success() {
+            local branch=$1 name=$2 minimum=$3
+            for attempt in $(seq 1 90); do
+              payload=$(latest_run "$branch" "$name")
+              if [ -n "$payload" ]; then
+                id=$(printf '%s' "$payload" | jq -r '.id')
+                status=$(printf '%s' "$payload" | jq -r '.status')
+                conclusion=$(printf '%s' "$payload" | jq -r '.conclusion // "pending"')
+                printf '%s attempt=%s run=%s status=%s conclusion=%s\n' "$name" "$attempt" "$id" "$status" "$conclusion"
+                if [ "$status" = completed ]; then
+                  test "$conclusion" = success
+                  jobs=$(gh api --method GET "repos/$REPO/actions/runs/$id/jobs" -f per_page=100)
+                  test "$(printf '%s' "$jobs" | jq '[.jobs[] | select(.conclusion != "success")] | length')" -eq 0
+                  test "$(printf '%s' "$jobs" | jq '[.jobs[] | select(.status == "completed" and .conclusion == "success")] | length')" -ge "$minimum"
+                  printf '%s=%s\n' "$(echo "$branch" | tr '/-' '__')_run" "$id" >> /tmp/verifier-runs.env
+                  return 0
+                fi
+              fi
+              sleep 15
+            done
+            echo "timed out waiting for $name" >&2
+            return 1
+          }
+
+          : > /tmp/verifier-runs.env
+          wait_success \
+            bootstrap/verify-pr15-4d131710-v2-20260823 \
+            'Reverify bounded inherited reranker exact SHA' \
+            3
+          wait_success \
+            bootstrap/verify-telemetry-v0-exact-20260823 \
+            'Verify inherited rerank telemetry exact candidate' \
+            4
+          cat /tmp/verifier-runs.env
+
+      - name: Retrigger product finalizer from its immutable control branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          branch='bootstrap/finalize-reranker-telemetry-product-prs-20260823'
+          name='Finalize immutable reranker telemetry product PRs'
+          previous=$(gh api --method GET "repos/$REPO/actions/runs" \
+            -f branch="$branch" -f event=pull_request -f per_page=100 \
+            --jq ".workflow_runs | map(select(.name == \"$name\")) | sort_by(.created_at) | last | .id // 0")
+
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git fetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*'
+          git switch -C "$branch" "origin/$branch"
+          printf 'orchestrator_run=%s\nprevious_finalizer_run=%s\n' "${{ github.run_id }}" "$previous" > .github/finalizer-orchestrator-trigger.txt
+          git add .github/finalizer-orchestrator-trigger.txt
+          git diff --cached --check
+          git commit -m 'ci: trigger product finalizer after exact matrices'
+          git push origin HEAD:"$branch"
+          echo "PREVIOUS_FINALIZER_RUN=$previous" >> "$GITHUB_ENV"
+
+      - name: Wait for the new product-finalizer run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          branch='bootstrap/finalize-reranker-telemetry-product-prs-20260823'
+          name='Finalize immutable reranker telemetry product PRs'
+          for attempt in $(seq 1 90); do
+            payload=$(gh api --method GET "repos/$REPO/actions/runs" \
+              -f branch="$branch" -f event=pull_request -f per_page=100 \
+              --jq ".workflow_runs | map(select(.name == \"$name\")) | sort_by(.created_at) | last // empty")
+            if [ -n "$payload" ]; then
+              id=$(printf '%s' "$payload" | jq -r '.id')
+              status=$(printf '%s' "$payload" | jq -r '.status')
+              conclusion=$(printf '%s' "$payload" | jq -r '.conclusion // "pending"')
+              printf 'finalizer attempt=%s run=%s status=%s conclusion=%s\n' "$attempt" "$id" "$status" "$conclusion"
+              if [ "$id" != "$PREVIOUS_FINALIZER_RUN" ] && [ "$status" = completed ]; then
+                test "$conclusion" = success
+                jobs=$(gh api --method GET "repos/$REPO/actions/runs/$id/jobs" -f per_page=100)
+                test "$(printf '%s' "$jobs" | jq '[.jobs[] | select(.conclusion != "success")] | length')" -eq 0
+                echo "FINALIZER_RUN=$id" >> "$GITHUB_ENV"
+                exit 0
+              fi
+            fi
+            sleep 15
+          done
+          echo 'timed out waiting for product finalizer' >&2
+          exit 1
+
+      - name: Retrigger atomic evidence latch v3
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          branch='bootstrap/latch-reranker-telemetry-green-v3-20260823'
+          name='Atomically latch certified reranker telemetry evidence v3'
+          previous=$(gh api --method GET "repos/$REPO/actions/runs" \
+            -f branch="$branch" -f event=pull_request -f per_page=100 \
+            --jq ".workflow_runs | map(select(.name == \"$name\")) | sort_by(.created_at) | last | .id // 0")
+          git fetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*'
+          git switch -C "$branch" "origin/$branch"
+          printf 'orchestrator_run=%s\nfinalizer_run=%s\nprevious_latch_run=%s\n' \
+            "${{ github.run_id }}" "$FINALIZER_RUN" "$previous" > .github/latch-v3-orchestrator-trigger.txt
+          git add .github/latch-v3-orchestrator-trigger.txt
+          git diff --cached --check
+          git commit -m 'ci: trigger atomic evidence latch after finalization'
+          git push origin HEAD:"$branch"
+          echo "PREVIOUS_LATCH_RUN=$previous" >> "$GITHUB_ENV"
+
+      - name: Wait for the new atomic latch and immutable branches
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          branch='bootstrap/latch-reranker-telemetry-green-v3-20260823'
+          name='Atomically latch certified reranker telemetry evidence v3'
+          encode() { python -c 'import sys,urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$1"; }
+          for attempt in $(seq 1 90); do
+            payload=$(gh api --method GET "repos/$REPO/actions/runs" \
+              -f branch="$branch" -f event=pull_request -f per_page=100 \
+              --jq ".workflow_runs | map(select(.name == \"$name\")) | sort_by(.created_at) | last // empty")
+            if [ -n "$payload" ]; then
+              id=$(printf '%s' "$payload" | jq -r '.id')
+              status=$(printf '%s' "$payload" | jq -r '.status')
+              conclusion=$(printf '%s' "$payload" | jq -r '.conclusion // "pending"')
+              printf 'latch attempt=%s run=%s status=%s conclusion=%s\n' "$attempt" "$id" "$status" "$conclusion"
+              if [ "$id" != "$PREVIOUS_LATCH_RUN" ] && [ "$status" = completed ]; then
+                test "$conclusion" = success
+                jobs=$(gh api --method GET "repos/$REPO/actions/runs/$id/jobs" -f per_page=100)
+                test "$(printf '%s' "$jobs" | jq '[.jobs[] | select(.conclusion != "success")] | length')" -eq 0
+                evidence_sha=$(gh api "repos/$REPO/branches/$(encode evidence/reranker-telemetry-stack-green-20260823)" --jq '.commit.sha')
+                checkpoint_sha=$(gh api "repos/$REPO/branches/$(encode evidence/reranker-telemetry-checkpoint-20260823)" --jq '.commit.sha')
+                test -n "$evidence_sha"
+                test -n "$checkpoint_sha"
+                printf 'LATCH_RUN=%s\nEVIDENCE_SHA=%s\nCHECKPOINT_SHA=%s\n' "$id" "$evidence_sha" "$checkpoint_sha" | tee /tmp/final-status.env
+                exit 0
+              fi
+            fi
+            sleep 15
+          done
+          echo 'timed out waiting for atomic evidence latch' >&2
+          exit 1
+
+      - name: Publish bounded orchestration completion and close transports
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SELF_PR: ${{ github.event.pull_request.number }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          . /tmp/final-status.env
+          body=$(cat <<EOF
+          ## Reranker/telemetry certification orchestration complete
+
+          - product finalizer: \`$FINALIZER_RUN\`;
+          - atomic latch: \`$LATCH_RUN\`;
+          - immutable evidence branch SHA: \`$EVIDENCE_SHA\`;
+          - immutable checkpoint branch SHA: \`$CHECKPOINT_SHA\`.
+
+          Exact product PRs remain draft, unmerged and genuine exact-SHA GPT-5.6 Sol-pending. No database deployment, production write, policy activation or release occurred.
+          EOF
+          )
+          gh api "repos/$REPO/issues/23/comments" -f body="$body"
+
+          pulls=$(gh api --method GET "repos/$REPO/pulls" -f state=open -f per_page=100)
+          for head in \
+            bootstrap/verify-pr15-4d131710-v2-20260823 \
+            bootstrap/rebuild-pr16-v4-20260823 \
+            bootstrap/verify-telemetry-v0-exact-20260823 \
+            bootstrap/finalize-reranker-telemetry-product-prs-20260823 \
+            bootstrap/latch-reranker-telemetry-green-v3-20260823; do
+            number=$(printf '%s' "$pulls" | jq -r --arg head "$head" '.[] | select(.head.ref == $head) | .number' | head -1)
+            if [ -n "$number" ]; then
+              gh api --method PATCH "repos/$REPO/pulls/$number" -f state=closed >/dev/null
+            fi
+          done
+          gh api --method PATCH "repos/$REPO/pulls/$SELF_PR" -f state=closed >/dev/null
