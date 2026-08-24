@@ -1,0 +1,306 @@
+name: Verify corrected bounded inherited reranker exact SHA v2
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13"]
+
+    services:
+      postgres:
+        image: pgvector/pgvector:0.8.6-pg18-bookworm
+        env:
+          POSTGRES_DB: bounded_reranker_exact_v2
+          POSTGRES_PASSWORD: synthetic-bounded-reranker-v2
+          POSTGRES_USER: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d bounded_reranker_exact_v2"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+    env:
+      PGDATABASE: bounded_reranker_exact_v2
+      PGHOST: 127.0.0.1
+      PGPASSWORD: synthetic-bounded-reranker-v2
+      PGPORT: "5432"
+      PGUSER: postgres
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 4d1317101800b11734d33175b1955f92a55ba3b5
+          fetch-depth: 0
+
+      - name: Prove exact checkout, ancestry and twelve-path scope
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "4d1317101800b11734d33175b1955f92a55ba3b5"
+          test "$(git merge-base HEAD f0546ef4980239c4993baac8780c12975e91377c)" = "f0546ef4980239c4993baac8780c12975e91377c"
+          git merge-base --is-ancestor ead611e8cd7caee5a59c6ce19b671625975e976e HEAD
+          mapfile -t changed < <(git diff --name-only f0546ef4980239c4993baac8780c12975e91377c...HEAD | sort)
+          expected=(
+            docs/bounded-inherited-reranker-v0-red.md
+            docs/bounded-inherited-reranker-v0-verification.md
+            docs/bounded-inherited-reranker-v0.md
+            docs/superpowers/plans/2026-08-14-bounded-inherited-reranker-v0.md
+            docs/superpowers/specs/2026-08-14-bounded-inherited-reranker-v0-design.md
+            scripts/simulate_bounded_inherited_reranker_v0.py
+            src/nextgen_memory/__init__.py
+            src/nextgen_memory/bounded_inherited_reranker.py
+            tests/test_bounded_inherited_reranker.py
+            tests/test_bounded_inherited_reranker_properties.py
+            tests/test_bounded_inherited_reranker_public_api.py
+            tests/test_bounded_inherited_reranker_simulation.py
+          )
+          test "${#changed[@]}" -eq "${#expected[@]}"
+          diff -u <(printf '%s\n' "${expected[@]}" | sort) <(printf '%s\n' "${changed[@]}")
+          test -z "$(git diff --name-only f0546ef4980239c4993baac8780c12975e91377c...HEAD -- 'migrations/**' '.github/workflows/**' pyproject.toml 'src/nextgen_memory/corrective_retrieval_*')"
+          git diff --check f0546ef4980239c4993baac8780c12975e91377c...HEAD
+          test -z "$(git status --porcelain)"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install PostgreSQL 18 client
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo install -d /usr/share/postgresql-common/pgdg
+          sudo curl --fail --silent --show-error \
+            -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
+            https://www.postgresql.org/media/keys/ACCC4CF8.asc
+          . /etc/os-release
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt ${VERSION_CODENAME}-pgdg main" \
+            | sudo tee /etc/apt/sources.list.d/pgdg.list >/dev/null
+          sudo apt-get update -q
+          sudo apt-get install -y --no-install-recommends postgresql-client-18
+          sudo ln -sf /usr/lib/postgresql/18/bin/psql /usr/bin/psql
+          sudo ln -sf /usr/lib/postgresql/18/bin/pg_dump /usr/bin/pg_dump
+          psql --version | grep -E '^psql \(PostgreSQL\) 18\.'
+          pg_dump --version | grep -E '^pg_dump \(PostgreSQL\) 18\.'
+
+      - name: Install project and development tools
+        run: python -m pip install -e '.[dev]'
+
+      - name: Static, focused and complete verification
+        shell: bash
+        run: |
+          set -euo pipefail
+          ruff check .
+          python -m compileall -q src scripts
+          python -m pytest -q \
+            tests/test_bounded_inherited_reranker.py \
+            tests/test_bounded_inherited_reranker_properties.py \
+            tests/test_bounded_inherited_reranker_public_api.py \
+            tests/test_bounded_inherited_reranker_simulation.py \
+            | tee /tmp/focused-tests.txt
+          python -m pytest -q | tee /tmp/full-tests.txt
+          git diff --check f0546ef4980239c4993baac8780c12975e91377c...HEAD
+
+      - name: Prove deterministic simulation under its actual serialization contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/simulate_bounded_inherited_reranker_v0.py > /tmp/simulation-a.json
+          python scripts/simulate_bounded_inherited_reranker_v0.py > /tmp/simulation-b.json
+          cmp /tmp/simulation-a.json /tmp/simulation-b.json
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          raw = Path('/tmp/simulation-a.json').read_text(encoding='utf-8')
+          decoded = json.loads(raw)
+          expected_serialization = json.dumps(
+              decoded,
+              ensure_ascii=False,
+              indent=2,
+              sort_keys=True,
+          ) + '\n'
+          if raw != expected_serialization:
+              raise SystemExit('simulation output differs from its documented pretty JSON contract')
+          expected_metrics = {
+              'scenario_count': 5,
+              'naive_false_promotions': 4,
+              'bounded_false_promotions': 0,
+              'bounded_strong_promotions': 1,
+              'maximum_absolute_adjustment': 0.05,
+          }
+          for key, expected in expected_metrics.items():
+              if decoded.get(key) != expected:
+                  raise SystemExit(f'unexpected simulation metric: {key}')
+          cap = decoded['maximum_absolute_adjustment']
+          if any(abs(row['bounded_adjustment_b']) > cap for row in decoded['scenarios']):
+              raise SystemExit('simulation produced an adjustment above the configured cap')
+          PY
+
+      - name: Audit bounded causal and side-effect surface
+        run: |
+          python - <<'PY'
+          from __future__ import annotations
+
+          import ast
+          from pathlib import Path
+
+          path = Path('src/nextgen_memory/bounded_inherited_reranker.py')
+          source = path.read_text(encoding='utf-8')
+          tree = ast.parse(source, filename=str(path))
+          forbidden_roots = {
+              'asyncio','httpx','os','pathlib','psycopg','pymongo','random',
+              'requests','socket','sqlalchemy','subprocess','temporalio','time','urllib',
+          }
+          forbidden_calls = {
+              'eval','exec','open','sleep','system','urlopen','uuid1','uuid4',
+              'write_bytes','write_text',
+          }
+          violations: list[str] = []
+          for node in ast.walk(tree):
+              if isinstance(node, ast.Pass):
+                  violations.append(f'{node.lineno}:pass')
+              elif isinstance(node, ast.Raise):
+                  exc = node.exc.func if isinstance(node.exc, ast.Call) else node.exc
+                  if (
+                      isinstance(exc, ast.Name) and exc.id == 'NotImplementedError'
+                  ) or (
+                      isinstance(exc, ast.Attribute) and exc.attr == 'NotImplementedError'
+                  ):
+                      violations.append(f'{node.lineno}:NotImplementedError')
+              elif isinstance(node, ast.Import):
+                  for alias in node.names:
+                      if alias.name.split('.', 1)[0] in forbidden_roots:
+                          violations.append(f'{node.lineno}:import:{alias.name}')
+              elif isinstance(node, ast.ImportFrom):
+                  if (node.module or '').split('.', 1)[0] in forbidden_roots:
+                      violations.append(f'{node.lineno}:import:{node.module}')
+              elif isinstance(node, ast.Call):
+                  name = node.func.id if isinstance(node.func, ast.Name) else node.func.attr if isinstance(node.func, ast.Attribute) else None
+                  if name in forbidden_calls:
+                      violations.append(f'{node.lineno}:call:{name}')
+          lowered = source.lower()
+          for marker in (
+              'postgresql://','mongodb://','http://','https://','password',
+              'credential','# todo','# fixme','memory_feedback','combined_utility',
+          ):
+              if marker in lowered:
+                  violations.append(f'text:{marker}')
+          if violations:
+              raise SystemExit('\n'.join(violations))
+          print('bounded_reranker_side_effect_or_causal_findings=0')
+          PY
+
+      - name: Bootstrap inherited-credit prerequisites and replay twice
+        shell: bash
+        run: |
+          set -euo pipefail
+          psql -X --no-psqlrc -v ON_ERROR_STOP=1 --quiet --file migrations/neon/0001_memory_moe_kernel.sql
+          psql -X --no-psqlrc -v ON_ERROR_STOP=1 --quiet --file migrations/neon/0002_core_idempotency.sql
+          cat > /tmp/seed.sql <<'SQL'
+          INSERT INTO ngm.memory_spaces (id,parent_id,kind,external_key,name,metadata)
+          VALUES ('279c0edc-e75d-5c7e-a857-2f461b4ba61e'::uuid,NULL,'project','synthetic:bounded-reranker-exact-v2','Synthetic bounded reranker exact v2',jsonb_build_object('synthetic',true))
+          ON CONFLICT DO NOTHING;
+          INSERT INTO ngm.source_principals (id,space_id,source_key,source_type,authority_class,authority_score,origin_uri,metadata)
+          VALUES ('049b6cff-c7a6-5116-a38f-5a7527ca3a21'::uuid,'279c0edc-e75d-5c7e-a857-2f461b4ba61e'::uuid,'synthetic:research-sources-seed','research_corpus','contextual',0.650,NULL,jsonb_build_object('synthetic',true))
+          ON CONFLICT DO NOTHING;
+          SQL
+          psql -X --no-psqlrc -v ON_ERROR_STOP=1 --quiet --file /tmp/seed.sql
+          migrations=(
+            migrations/neon/0001_memory_moe_kernel.sql
+            migrations/neon/0002_core_idempotency.sql
+            migrations/neon/0003_research_sources_seed.sql
+            migrations/neon/0005_causal_credit_feedback.sql
+            migrations/neon/0006_inherited_credit_ledger.sql
+          )
+          for pass in 1 2; do
+            for migration in "${migrations[@]}"; do
+              psql -X --no-psqlrc -v ON_ERROR_STOP=1 --quiet --file "$migration"
+            done
+            pg_dump --schema-only --no-owner --no-privileges --schema=ngm \
+              --format=plain --restrict-key=NextGenMemoryBoundedRerankerExactV2 \
+              | sha256sum | awk '{print $1}' > "/tmp/schema-$pass.sha256"
+            psql -X --no-psqlrc -Atq -v ON_ERROR_STOP=1 \
+              --command "SELECT jsonb_agg(jsonb_build_object('schema_key',schema_key,'schema_version',schema_version,'metadata',metadata) ORDER BY schema_key)::text FROM ngm.schema_meta" \
+              | sha256sum | awk '{print $1}' > "/tmp/schema-meta-$pass.sha256"
+            psql -X --no-psqlrc -Atq -v ON_ERROR_STOP=1 \
+              --command "SELECT tablename FROM pg_catalog.pg_tables WHERE schemaname='ngm' ORDER BY tablename" \
+              > "/tmp/tables-$pass.txt"
+          done
+          cmp /tmp/schema-1.sha256 /tmp/schema-2.sha256
+          cmp /tmp/schema-meta-1.sha256 /tmp/schema-meta-2.sha256
+          cmp /tmp/tables-1.txt /tmp/tables-2.txt
+          test "$(psql -X --no-psqlrc -Atq -v ON_ERROR_STOP=1 --command "SELECT count(*) FROM ngm.memory_feedback")" -eq 0
+          test "$(psql -X --no-psqlrc -Atq -v ON_ERROR_STOP=1 --command "SELECT to_regclass('ngm.node_learning_evidence')")" = 'ngm.node_learning_evidence'
+
+      - name: Build and install exact wheel outside checkout
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf wheelhouse "$RUNNER_TEMP/pr15-wheel-venv"
+          python -m pip wheel --no-deps . -w wheelhouse
+          test "$(find wheelhouse -maxdepth 1 -type f -name '*.whl' | wc -l)" -eq 1
+          python -m venv "$RUNNER_TEMP/pr15-wheel-venv"
+          "$RUNNER_TEMP/pr15-wheel-venv/bin/python" -m pip install --no-deps wheelhouse/*.whl
+          "$RUNNER_TEMP/pr15-wheel-venv/bin/python" - <<'PY'
+          import nextgen_memory
+          from nextgen_memory import BoundedInheritedReranker
+          assert BoundedInheritedReranker is not None
+          assert 'BoundedInheritedReranker' in nextgen_memory.__all__
+          PY
+          "$RUNNER_TEMP/pr15-wheel-venv/bin/python" -m pip check
+          sha256sum wheelhouse/*.whl | awk '{print $1}' > /tmp/wheel.sha256
+
+      - name: Write bounded exact-head evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import hashlib
+          import json
+          import re
+          import sys
+          from pathlib import Path
+
+          def count(path: str) -> int:
+              matches = re.findall(r'(\d+) passed', Path(path).read_text(encoding='utf-8'))
+              if not matches:
+                  raise SystemExit(f'test count missing: {path}')
+              return int(matches[-1])
+
+          report = {
+              'candidate_sha': '4d1317101800b11734d33175b1955f92a55ba3b5',
+              'focused_test_count': count('/tmp/focused-tests.txt'),
+              'full_test_count': count('/tmp/full-tests.txt'),
+              'migration_passes': 2,
+              'postgres_major': 18,
+              'python_version': '.'.join(map(str, sys.version_info[:3])),
+              'schema_meta_stable': True,
+              'schema_stable': True,
+              'simulation_deterministic': True,
+              'simulation_sha256': hashlib.sha256(Path('/tmp/simulation-a.json').read_bytes()).hexdigest(),
+              'wheel_sha256': Path('/tmp/wheel.sha256').read_text().strip(),
+          }
+          Path('/tmp/evidence.json').write_text(
+              json.dumps(report, ensure_ascii=False, allow_nan=False, sort_keys=True, separators=(',', ':')) + '\n',
+              encoding='utf-8',
+          )
+          print(Path('/tmp/evidence.json').read_text(), end='')
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: corrected-pr15-v2-python-${{ matrix.python-version }}
+          path: /tmp/evidence.json
+          if-no-files-found: error
+          retention-days: 7
