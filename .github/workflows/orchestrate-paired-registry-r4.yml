@@ -1,0 +1,203 @@
+name: Orchestrate paired replay registry r4 certification
+
+on:
+  pull_request:
+
+permissions:
+  actions: read
+  contents: write
+  issues: write
+  pull-requests: write
+
+jobs:
+  orchestrate:
+    if: github.event.pull_request.head.ref == 'bootstrap/orchestrate-paired-registry-r4-20260824'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 55
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Wait for successful producer and exact verifier graphs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          latest_run() {
+            local branch=$1 name=$2
+            gh api --method GET "repos/$REPO/actions/runs" \
+              -f branch="$branch" -f event=pull_request -f per_page=100 \
+              --jq ".workflow_runs | map(select(.name == \"$name\")) | sort_by(.created_at) | last // empty"
+          }
+
+          wait_success() {
+            local branch=$1 name=$2 minimum=$3 output=$4
+            for attempt in $(seq 1 160); do
+              payload=$(latest_run "$branch" "$name")
+              if [ -n "$payload" ]; then
+                id=$(printf '%s' "$payload" | jq -r '.id')
+                status=$(printf '%s' "$payload" | jq -r '.status')
+                conclusion=$(printf '%s' "$payload" | jq -r '.conclusion // "pending"')
+                printf '%s attempt=%s run=%s status=%s conclusion=%s\n' "$name" "$attempt" "$id" "$status" "$conclusion"
+                if [ "$status" = completed ]; then
+                  test "$conclusion" = success
+                  jobs=$(gh api --method GET "repos/$REPO/actions/runs/$id/jobs" -f per_page=100)
+                  test "$(printf '%s' "$jobs" | jq '[.jobs[] | select(.conclusion != "success")] | length')" -eq 0
+                  test "$(printf '%s' "$jobs" | jq '[.jobs[] | select(.status == "completed" and .conclusion == "success")] | length')" -ge "$minimum"
+                  printf '%s=%s\n' "$output" "$id" >> /tmp/runs.env
+                  return 0
+                fi
+              fi
+              sleep 15
+            done
+            echo "timed out waiting for $name" >&2
+            return 1
+          }
+
+          : > /tmp/runs.env
+          wait_success \
+            bootstrap/harden-paired-registry-r4-20260824 \
+            'Harden paired registry canonical identities r4' \
+            2 \
+            PRODUCER_RUN
+          wait_success \
+            bootstrap/verify-paired-registry-r4-20260824 \
+            'Verify paired replay registry r4 exact candidate' \
+            4 \
+            VERIFIER_RUN
+          cat /tmp/runs.env
+
+      - name: Resolve exact candidate, evidence branch, canonical PR and artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          . /tmp/runs.env
+          encode() { python -c 'import sys,urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$1"; }
+          candidate_branch='candidate/paired-replay-experiment-registry-v0-r4-20260824'
+          evidence_branch='evidence/paired-replay-registry-v0-r4-green-20260824'
+          base_branch='candidate/paired-rerank-policy-evaluation-v0-20260824'
+          base_sha='847ea08e9e9a0d9193adac6d465557270da6ef7d'
+
+          candidate_sha=$(gh api "repos/$REPO/branches/$(encode "$candidate_branch")" --jq '.commit.sha')
+          evidence_sha=$(gh api "repos/$REPO/branches/$(encode "$evidence_branch")" --jq '.commit.sha')
+          test -n "$candidate_sha"
+          test -n "$evidence_sha"
+          comparison=$(gh api "repos/$REPO/compare/$base_sha...$candidate_sha")
+          test "$(printf '%s' "$comparison" | jq -r '.status')" = ahead
+          test "$(printf '%s' "$comparison" | jq '.files | length')" -eq 9
+          test "$(printf '%s' "$comparison" | jq '[.files[].filename | select(startswith(".github/workflows/"))] | length')" -eq 0
+
+          pulls=$(gh api --method GET "repos/$REPO/pulls" \
+            -f state=all -f head="leon36000:$candidate_branch" -f per_page=100)
+          test "$(printf '%s' "$pulls" | jq 'length')" -eq 1
+          canonical_pr=$(printf '%s' "$pulls" | jq -r '.[0].number')
+          test "$(printf '%s' "$pulls" | jq -r '.[0].state')" = open
+          test "$(printf '%s' "$pulls" | jq -r '.[0].draft')" = true
+          test "$(printf '%s' "$pulls" | jq -r '.[0].base.ref')" = "$base_branch"
+          test "$(printf '%s' "$pulls" | jq -r '.[0].head.sha')" = "$candidate_sha"
+          printf '%s' "$pulls" | jq -r '.[0].body' | grep -F '**GREEN / draft / review_pending / unmerged.**' >/dev/null
+
+          artifacts=$(gh api --method GET "repos/$REPO/actions/runs/$VERIFIER_RUN/artifacts" -f per_page=100)
+          printf '%s' "$artifacts" | jq '[.artifacts[] | {id,name,digest,expired,size_in_bytes}]' > /tmp/artifacts.json
+          test "$(jq '[.[] | select(.expired == true)] | length' /tmp/artifacts.json)" -eq 0
+          test "$(jq 'length' /tmp/artifacts.json)" -ge 3
+
+          rm -rf /tmp/summary
+          gh run download "$VERIFIER_RUN" --repo "$REPO" \
+            --name paired-registry-r4-cross-python-summary \
+            --dir /tmp/summary
+          summary=$(find /tmp/summary -name cross-python-summary.json -print -quit)
+          test -n "$summary"
+          test "$(jq -r '.candidate_sha' "$summary")" = "$candidate_sha"
+          jq -e '.cross_python_plan_identical == true' "$summary" >/dev/null
+          jq -e '.python_versions == ["3.12","3.13"]' "$summary" >/dev/null
+          jq -e '.focused_test_count_each > 0 and .full_test_count_each > 351' "$summary" >/dev/null
+
+          jq -n \
+            --arg status green_review_pending_unmerged \
+            --arg base_branch "$base_branch" \
+            --arg base_sha "$base_sha" \
+            --arg candidate_branch "$candidate_branch" \
+            --arg candidate_sha "$candidate_sha" \
+            --arg evidence_branch "$evidence_branch" \
+            --arg evidence_sha "$evidence_sha" \
+            --argjson canonical_pr "$canonical_pr" \
+            --argjson producer_run "$PRODUCER_RUN" \
+            --argjson verifier_run "$VERIFIER_RUN" \
+            --argjson summary "$(cat "$summary")" \
+            --argjson artifacts "$(cat /tmp/artifacts.json)" \
+            '{status:$status,repository:"leon36000/NextGen-Memory",base:{branch:$base_branch,sha:$base_sha,pull_request:134},candidate:{branch:$candidate_branch,sha:$candidate_sha,pull_request:$canonical_pr},evidence:{branch:$evidence_branch,sha:$evidence_sha},producer_run:$producer_run,verifier_run:$verifier_run,summary:$summary,artifacts:$artifacts,review:{required_model:"GPT-5.6 Sol",verdict:"pending",merge_allowed:false},safety:{merged:false,production_database_contacted:false,production_migration_applied:false,production_application_data_written:false,model_or_agent_executed:false,feedback_written:false,policy_activated:false,release_published:false,corrective_retrieval_changed:false,tests_weakened:false,stubs_added:false,sol_verdict_fabricated:false},next_action:"Obtain a genuine exact-SHA Sol verdict; integrate all prerequisites before any merge. Merge does not authorize execution, persistence, feedback or activation."}' \
+            > /tmp/checkpoint.json
+          cat /tmp/checkpoint.json
+          printf 'CANDIDATE_SHA=%s\nEVIDENCE_SHA=%s\nCANONICAL_PR=%s\n' "$candidate_sha" "$evidence_sha" "$canonical_pr" > /tmp/resolved.env
+
+      - name: Publish immutable checkpoint branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          . /tmp/resolved.env
+          branch='evidence/paired-replay-registry-v0-r4-checkpoint-20260824'
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git fetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*'
+          if git ls-remote --exit-code --heads origin "$branch"; then
+            git switch --detach "origin/$branch"
+            cmp /tmp/checkpoint.json evidence/paired-replay-registry-v0-r4-checkpoint-20260824.json
+          else
+            git switch -c "$branch" "$CANDIDATE_SHA"
+            mkdir -p evidence
+            cp /tmp/checkpoint.json evidence/paired-replay-registry-v0-r4-checkpoint-20260824.json
+            git add evidence/paired-replay-registry-v0-r4-checkpoint-20260824.json
+            git diff --cached --check
+            git commit -m 'evidence: checkpoint paired replay registry v0 r4'
+            git push origin HEAD:"refs/heads/$branch"
+          fi
+
+      - name: Publish durable status and close transports without merge
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SELF_PR: ${{ github.event.pull_request.number }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          . /tmp/runs.env
+          . /tmp/resolved.env
+          checkpoint=$(cat /tmp/checkpoint.json)
+          body=$(cat <<EOF
+          ## Paired replay registry r4 certification complete
+
+          - canonical PR: #$CANONICAL_PR;
+          - exact candidate SHA: \`$CANDIDATE_SHA\`;
+          - producer run: \`$PRODUCER_RUN\`;
+          - verifier run: \`$VERIFIER_RUN\`;
+          - immutable evidence SHA: \`$EVIDENCE_SHA\`;
+          - immutable checkpoint branch: \`evidence/paired-replay-registry-v0-r4-checkpoint-20260824\`.
+
+          Checkpoint: \`$checkpoint\`
+
+          The product remains draft, unmerged and genuine exact-SHA GPT-5.6 Sol-pending. No persistence, model execution, feedback write, policy activation, production database operation or release occurred.
+          EOF
+          )
+          gh api "repos/$REPO/issues/132/comments" -f body="$body"
+          gh api "repos/$REPO/issues/23/comments" -f body="$body"
+
+          pulls=$(gh api --method GET "repos/$REPO/pulls" -f state=open -f per_page=100)
+          for head in \
+            feat/paired-replay-experiment-registry-v0-20260824 \
+            feat/paired-replay-experiment-registry-v0-hardening-r2-20260824 \
+            bootstrap/harden-paired-registry-r4-20260824 \
+            bootstrap/verify-paired-registry-r2-20260824 \
+            bootstrap/verify-paired-registry-r3-20260824 \
+            bootstrap/verify-paired-registry-r4-20260824 \
+            bootstrap/orchestrate-paired-registry-r4-20260824; do
+            number=$(printf '%s' "$pulls" | jq -r --arg head "$head" '.[] | select(.head.ref == $head) | .number' | head -1)
+            if [ -n "$number" ]; then gh api --method PATCH "repos/$REPO/pulls/$number" -f state=closed >/dev/null; fi
+          done
