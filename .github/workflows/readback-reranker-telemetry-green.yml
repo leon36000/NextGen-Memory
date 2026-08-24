@@ -1,0 +1,446 @@
+name: Read back and freeze reranker telemetry certification
+
+on:
+  pull_request:
+
+permissions:
+  actions: read
+  contents: write
+  issues: write
+  pull-requests: write
+
+jobs:
+  certify:
+    if: github.event.pull_request.head.ref == 'bootstrap/readback-reranker-telemetry-green-20260824'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: bootstrap/readback-reranker-telemetry-green-20260824
+          fetch-depth: 0
+
+      - name: Resolve immutable product graph
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*'
+
+          reader_branch='candidate/learning-evidence-reader-v0-20260823'
+          reranker_branch='candidate/bounded-inherited-reranker-v0-20260823'
+          telemetry_branch='candidate/inherited-rerank-telemetry-v0-20260823'
+          reader_sha=$(git rev-parse "origin/$reader_branch")
+          reranker_sha=$(git rev-parse "origin/$reranker_branch")
+          telemetry_sha=$(git rev-parse "origin/$telemetry_branch")
+
+          test "$reader_sha" = 'f0546ef4980239c4993baac8780c12975e91377c'
+          test "$reranker_sha" = '4d1317101800b11734d33175b1955f92a55ba3b5'
+          test "${#telemetry_sha}" -eq 40
+          test "$(git merge-base "$reader_sha" "$reranker_sha")" = "$reader_sha"
+          test "$(git merge-base "$reranker_sha" "$telemetry_sha")" = "$reranker_sha"
+          git merge-base --is-ancestor ead611e8cd7caee5a59c6ce19b671625975e976e "$reranker_sha"
+          git merge-base --is-ancestor d00992d20f970717268a8a7355f19ab487def4e9 "$telemetry_sha"
+
+          mapfile -t reranker_paths < <(git diff --name-only "$reader_sha"..."$reranker_sha" | sort)
+          reranker_expected=(
+            docs/bounded-inherited-reranker-v0-red.md
+            docs/bounded-inherited-reranker-v0-verification.md
+            docs/bounded-inherited-reranker-v0.md
+            docs/superpowers/plans/2026-08-14-bounded-inherited-reranker-v0.md
+            docs/superpowers/specs/2026-08-14-bounded-inherited-reranker-v0-design.md
+            scripts/simulate_bounded_inherited_reranker_v0.py
+            src/nextgen_memory/__init__.py
+            src/nextgen_memory/bounded_inherited_reranker.py
+            tests/test_bounded_inherited_reranker.py
+            tests/test_bounded_inherited_reranker_properties.py
+            tests/test_bounded_inherited_reranker_public_api.py
+            tests/test_bounded_inherited_reranker_simulation.py
+          )
+          test "${#reranker_paths[@]}" -eq "${#reranker_expected[@]}"
+          diff -u <(printf '%s\n' "${reranker_expected[@]}" | sort) <(printf '%s\n' "${reranker_paths[@]}")
+
+          mapfile -t telemetry_paths < <(git diff --name-only "$reranker_sha"..."$telemetry_sha" | sort)
+          telemetry_expected=(
+            docs/inherited-rerank-telemetry-v0-verification.md
+            docs/inherited-rerank-telemetry-v0.md
+            docs/superpowers/plans/2026-08-15-inherited-rerank-telemetry-v0.md
+            docs/superpowers/specs/2026-08-15-inherited-rerank-telemetry-v0-design.md
+            src/nextgen_memory/__init__.py
+            src/nextgen_memory/inherited_rerank_telemetry.py
+            tests/test_inherited_rerank_telemetry.py
+            tests/test_inherited_rerank_telemetry_properties.py
+            tests/test_inherited_rerank_telemetry_public_api.py
+          )
+          test "${#telemetry_paths[@]}" -eq "${#telemetry_expected[@]}"
+          diff -u <(printf '%s\n' "${telemetry_expected[@]}" | sort) <(printf '%s\n' "${telemetry_paths[@]}")
+
+          test -z "$(git diff --name-only "$reader_sha"..."$reranker_sha" -- 'migrations/**' '.github/workflows/**' pyproject.toml 'src/nextgen_memory/corrective_retrieval_*')"
+          test -z "$(git diff --name-only "$reranker_sha"..."$telemetry_sha" -- 'migrations/**' '.github/workflows/**' pyproject.toml 'src/nextgen_memory/corrective_retrieval_*')"
+          git diff --check "$reader_sha"..."$reranker_sha"
+          git diff --check "$reranker_sha"..."$telemetry_sha"
+
+          jq -n \
+            --arg reader_branch "$reader_branch" \
+            --arg reader_sha "$reader_sha" \
+            --arg reranker_branch "$reranker_branch" \
+            --arg reranker_sha "$reranker_sha" \
+            --arg telemetry_branch "$telemetry_branch" \
+            --arg telemetry_sha "$telemetry_sha" \
+            --argjson reranker_paths "$(printf '%s\n' "${reranker_paths[@]}" | jq -R . | jq -s .)" \
+            --argjson telemetry_paths "$(printf '%s\n' "${telemetry_paths[@]}" | jq -R . | jq -s .)" \
+            '{reader:{branch:$reader_branch,sha:$reader_sha},reranker:{branch:$reranker_branch,sha:$reranker_sha,paths:$reranker_paths},telemetry:{branch:$telemetry_branch,sha:$telemetry_sha,paths:$telemetry_paths}}' \
+            > /tmp/product-graph.json
+          cat /tmp/product-graph.json
+
+      - name: Resolve successful exact verifier runs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          latest_success() {
+            local branch=$1
+            local workflow_name=$2
+            gh api --method GET "repos/$REPO/actions/runs" \
+              -f branch="$branch" -f event=pull_request -f per_page=100 \
+              --jq ".workflow_runs | map(select(.name == \"$workflow_name\" and .status == \"completed\" and .conclusion == \"success\")) | sort_by(.created_at) | last // empty"
+          }
+
+          prove_jobs() {
+            local run_id=$1
+            local minimum=$2
+            local jobs
+            jobs=$(gh api --method GET "repos/$REPO/actions/runs/$run_id/jobs" -f per_page=100)
+            test "$(printf '%s' "$jobs" | jq '[.jobs[] | select(.status != "completed" or .conclusion != "success")] | length')" -eq 0
+            test "$(printf '%s' "$jobs" | jq '.jobs | length')" -ge "$minimum"
+            printf '%s' "$jobs" | jq '[.jobs[] | {id,name,status,conclusion,head_sha,started_at,completed_at}]'
+          }
+
+          reranker_payload=$(latest_success \
+            bootstrap/verify-pr15-4d131710-v2-20260823 \
+            'Reverify bounded inherited reranker exact SHA')
+          telemetry_payload=$(latest_success \
+            bootstrap/verify-telemetry-v0-exact-20260823 \
+            'Verify inherited rerank telemetry exact candidate')
+          test -n "$reranker_payload"
+          test -n "$telemetry_payload"
+          reranker_run=$(printf '%s' "$reranker_payload" | jq -r '.id')
+          telemetry_run=$(printf '%s' "$telemetry_payload" | jq -r '.id')
+          prove_jobs "$reranker_run" 3 > /tmp/reranker-jobs.json
+          prove_jobs "$telemetry_run" 4 > /tmp/telemetry-jobs.json
+
+          jq -n \
+            --argjson reranker_run "$reranker_run" \
+            --argjson telemetry_run "$telemetry_run" \
+            --argjson reranker_jobs "$(cat /tmp/reranker-jobs.json)" \
+            --argjson telemetry_jobs "$(cat /tmp/telemetry-jobs.json)" \
+            '{reranker:{run_id:$reranker_run,jobs:$reranker_jobs},telemetry:{run_id:$telemetry_run,jobs:$telemetry_jobs}}' \
+            > /tmp/runs.json
+          cat /tmp/runs.json
+
+      - name: Download and validate exact artifact evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          reranker_run=$(jq -r '.reranker.run_id' /tmp/runs.json)
+          telemetry_run=$(jq -r '.telemetry.run_id' /tmp/runs.json)
+          reranker_sha=$(jq -r '.reranker.sha' /tmp/product-graph.json)
+          telemetry_sha=$(jq -r '.telemetry.sha' /tmp/product-graph.json)
+
+          rm -rf /tmp/reranker-artifacts /tmp/telemetry-artifacts
+          mkdir -p /tmp/reranker-artifacts /tmp/telemetry-artifacts
+          gh run download "$reranker_run" --repo "$REPO" --dir /tmp/reranker-artifacts
+          gh run download "$telemetry_run" --repo "$REPO" --dir /tmp/telemetry-artifacts
+
+          gh api --method GET "repos/$REPO/actions/runs/$reranker_run/artifacts" -f per_page=100 \
+            --jq '[.artifacts[] | {id,name,digest,expired,size_in_bytes,created_at,expires_at}]' > /tmp/reranker-artifact-metadata.json
+          gh api --method GET "repos/$REPO/actions/runs/$telemetry_run/artifacts" -f per_page=100 \
+            --jq '[.artifacts[] | {id,name,digest,expired,size_in_bytes,created_at,expires_at}]' > /tmp/telemetry-artifact-metadata.json
+          test "$(jq '[.[] | select(.expired == true)] | length' /tmp/reranker-artifact-metadata.json)" -eq 0
+          test "$(jq '[.[] | select(.expired == true)] | length' /tmp/telemetry-artifact-metadata.json)" -eq 0
+          test "$(jq 'length' /tmp/reranker-artifact-metadata.json)" -ge 3
+          test "$(jq 'length' /tmp/telemetry-artifact-metadata.json)" -ge 3
+
+          RERANKER_SHA="$reranker_sha" TELEMETRY_SHA="$telemetry_sha" python - <<'PY'
+          from __future__ import annotations
+
+          import json
+          import os
+          from pathlib import Path
+
+          def one_summary(root: str) -> dict[str, object]:
+              paths = sorted(Path(root).rglob('cross-python-summary.json'))
+              if len(paths) != 1:
+                  raise SystemExit(f'expected one cross-python-summary.json in {root}, found {len(paths)}')
+              return json.loads(paths[0].read_text(encoding='utf-8'))
+
+          reranker = one_summary('/tmp/reranker-artifacts')
+          telemetry = one_summary('/tmp/telemetry-artifacts')
+          if reranker.get('candidate_sha') != os.environ['RERANKER_SHA']:
+              raise SystemExit('reranker summary SHA drift')
+          if telemetry.get('candidate_sha') != os.environ['TELEMETRY_SHA']:
+              raise SystemExit('telemetry summary SHA drift')
+          if reranker.get('cross_python_semantic_evidence_identical') is not True:
+              raise SystemExit('reranker cross-Python semantic evidence is not identical')
+          if telemetry.get('cross_python_semantic_evidence_identical') is not True:
+              raise SystemExit('telemetry cross-Python semantic evidence is not identical')
+          for name, summary in (('reranker', reranker), ('telemetry', telemetry)):
+              versions = summary.get('python_versions')
+              if sorted(versions) != ['3.12', '3.13']:
+                  raise SystemExit(f'{name} Python matrix is incomplete')
+              if int(summary.get('focused_test_count', 0)) <= 0:
+                  raise SystemExit(f'{name} focused test count is invalid')
+              if int(summary.get('full_test_count', 0)) <= 0:
+                  raise SystemExit(f'{name} full test count is invalid')
+          Path('/tmp/summaries.json').write_text(
+              json.dumps({'reranker': reranker, 'telemetry': telemetry}, ensure_ascii=False, allow_nan=False, sort_keys=True, separators=(',', ':')) + '\n',
+              encoding='utf-8',
+          )
+          print(Path('/tmp/summaries.json').read_text(encoding='utf-8'), end='')
+          PY
+
+      - name: Create or update unique exact product PRs and Sol packets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ensure_product_pr() {
+            local head=$1 base=$2 title=$3 sha=$4 body_file=$5 packet_file=$6
+            local open_pulls pr node_id
+            open_pulls=$(gh api --method GET "repos/$REPO/pulls" -f state=open -f head="leon36000:$head" -f per_page=100)
+            if [ "$(printf '%s' "$open_pulls" | jq 'length')" -eq 0 ]; then
+              pr_url=$(gh pr create --repo "$REPO" --head "$head" --base "$base" --title "$title" --body-file "$body_file" --draft)
+              pr=${pr_url##*/}
+            else
+              test "$(printf '%s' "$open_pulls" | jq 'length')" -eq 1
+              pr=$(printf '%s' "$open_pulls" | jq -r '.[0].number')
+              test "$(printf '%s' "$open_pulls" | jq -r '.[0].head.sha')" = "$sha"
+              test "$(printf '%s' "$open_pulls" | jq -r '.[0].base.ref')" = "$base"
+              if [ "$(printf '%s' "$open_pulls" | jq -r '.[0].draft')" != true ]; then
+                node_id=$(printf '%s' "$open_pulls" | jq -r '.[0].node_id')
+                gh api graphql -f query='mutation($id:ID!){convertPullRequestToDraft(input:{pullRequestId:$id}){pullRequest{isDraft}}}' -f id="$node_id" >/dev/null
+              fi
+              gh api --method PATCH "repos/$REPO/pulls/$pr" --raw-field body="$(cat "$body_file")" >/dev/null
+            fi
+            comments=$(gh api --paginate "repos/$REPO/issues/$pr/comments?per_page=100" | jq -s 'add')
+            packet_id=$(printf '%s' "$comments" | jq -r --arg sha "$sha" '[.[] | select((.body | contains("Blind GPT-5.6 Sol review request")) and (.body | contains($sha)))] | last | .id // empty')
+            if [ -z "$packet_id" ]; then
+              packet_id=$(gh api "repos/$REPO/issues/$pr/comments" --raw-field body="$(cat "$packet_file")" --jq '.id')
+            fi
+            printf '%s\t%s\n' "$pr" "$packet_id"
+          }
+
+          reader_sha=$(jq -r '.reader.sha' /tmp/product-graph.json)
+          reranker_sha=$(jq -r '.reranker.sha' /tmp/product-graph.json)
+          telemetry_sha=$(jq -r '.telemetry.sha' /tmp/product-graph.json)
+          reranker_run=$(jq -r '.reranker.run_id' /tmp/runs.json)
+          telemetry_run=$(jq -r '.telemetry.run_id' /tmp/runs.json)
+          reranker_focused=$(jq -r '.reranker.focused_test_count' /tmp/summaries.json)
+          reranker_full=$(jq -r '.reranker.full_test_count' /tmp/summaries.json)
+          telemetry_focused=$(jq -r '.telemetry.focused_test_count' /tmp/summaries.json)
+          telemetry_full=$(jq -r '.telemetry.full_test_count' /tmp/summaries.json)
+          telemetry_properties=$(jq -r '.telemetry.property_test_count // 0' /tmp/summaries.json)
+
+          cat > /tmp/reranker-body.md <<EOF
+          ## Status
+
+          **GREEN / draft / review_pending / unmerged.** Exact immutable candidate SHA: \`$reranker_sha\`.
+
+          Base learning-evidence reader: \`$reader_sha\`. Exact verifier run: \`$reranker_run\`.
+
+          Exact surface: twelve product/design/test paths; no migration, workflow, dependency or corrective-retrieval change. Python 3.12/3.13 exact verification passed Ruff, compileall, \`$reranker_focused\` focused tests, \`$reranker_full\` complete tests, deterministic simulation semantics, privacy/side-effect audit, PostgreSQL 18 two-pass regression, isolated wheel import and cross-Python semantic comparison.
+
+          No merge, deployment, production database write, policy activation or release occurred. Merge remains forbidden until a genuine independent GPT-5.6 Sol \`APPROVE\` is tied to this unchanged SHA and prerequisites are integrated in order.
+          EOF
+          cat > /tmp/reranker-packet.md <<EOF
+          ## Blind GPT-5.6 Sol review request — bounded inherited reranker v0
+
+          Return exactly one verdict: \`APPROVE\`, \`CHANGES_REQUIRED\`, or \`BLOCKED_BY_EVIDENCE\`.
+
+          Exact boundary: base \`$reader_sha\`, candidate \`$reranker_sha\`, branch \`candidate/bounded-inherited-reranker-v0-20260823\`, verifier run \`$reranker_run\`. Any SHA movement invalidates the request.
+
+          Review direct-score preservation, lower-confidence inherited signal, evidence/confidence gates, non-negative capped bonus, malformed-input rejection, deterministic ranking, identity conservation, and absence of persistence/network/activation behavior. Inspect the exact twelve-path diff, tests, simulation, workflow logs and artifacts; do not rely on this prose as proof.
+          EOF
+
+          cat > /tmp/telemetry-body.md <<EOF
+          ## Status
+
+          **GREEN / draft / review_pending / unmerged.** Exact immutable candidate SHA: \`$telemetry_sha\`.
+
+          Base bounded reranker: \`$reranker_sha\`. Exact verifier run: \`$telemetry_run\`.
+
+          Exact surface: nine telemetry/design/test paths; no migration, workflow, dependency or corrective-retrieval change. Python 3.12/3.13 exact verification passed Ruff, compileall, \`$telemetry_focused\` focused tests, \`$telemetry_full\` complete tests, \`$telemetry_properties\` property tests, privacy/identity audit, PostgreSQL 18 two-pass regression, isolated wheel import and cross-Python semantic comparison.
+
+          No merge, deployment, production database write, policy activation or release occurred. Merge remains forbidden until a genuine independent GPT-5.6 Sol \`APPROVE\` is tied to this unchanged SHA and prerequisites are integrated in order.
+          EOF
+          cat > /tmp/telemetry-packet.md <<EOF
+          ## Blind GPT-5.6 Sol review request — inherited rerank telemetry v0
+
+          Return exactly one verdict: \`APPROVE\`, \`CHANGES_REQUIRED\`, or \`BLOCKED_BY_EVIDENCE\`.
+
+          Exact boundary: base \`$reranker_sha\`, candidate \`$telemetry_sha\`, branch \`candidate/inherited-rerank-telemetry-v0-20260823\`, verifier run \`$telemetry_run\`. Any SHA movement invalidates the request.
+
+          Review trace/evidence membership, deterministic event/hash identity, finite bounded summaries, policy fidelity, confidence bucketing, privacy and absence of persistence/network/policy-action behavior. Inspect the exact nine-path diff, tests, workflow logs and artifacts; do not rely on this prose as proof.
+          EOF
+
+          read -r reranker_pr reranker_packet_id < <(ensure_product_pr candidate/bounded-inherited-reranker-v0-20260823 candidate/learning-evidence-reader-v0-20260823 'feat: bounded inherited reranker v0' "$reranker_sha" /tmp/reranker-body.md /tmp/reranker-packet.md)
+          read -r telemetry_pr telemetry_packet_id < <(ensure_product_pr candidate/inherited-rerank-telemetry-v0-20260823 candidate/bounded-inherited-reranker-v0-20260823 'feat: inherited rerank telemetry v0' "$telemetry_sha" /tmp/telemetry-body.md /tmp/telemetry-packet.md)
+
+          jq -n \
+            --argjson reranker_pr "$reranker_pr" \
+            --argjson telemetry_pr "$telemetry_pr" \
+            --argjson reranker_packet_id "$reranker_packet_id" \
+            --argjson telemetry_packet_id "$telemetry_packet_id" \
+            '{reranker:{pull_request:$reranker_pr,sol_packet_comment_id:$reranker_packet_id},telemetry:{pull_request:$telemetry_pr,sol_packet_comment_id:$telemetry_packet_id}}' \
+            > /tmp/prs.json
+          cat /tmp/prs.json
+
+      - name: Build canonical readback evidence and checkpoint
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from __future__ import annotations
+
+          import hashlib
+          import json
+          from pathlib import Path
+
+          graph = json.loads(Path('/tmp/product-graph.json').read_text())
+          runs = json.loads(Path('/tmp/runs.json').read_text())
+          summaries = json.loads(Path('/tmp/summaries.json').read_text())
+          prs = json.loads(Path('/tmp/prs.json').read_text())
+          reranker_artifacts = json.loads(Path('/tmp/reranker-artifact-metadata.json').read_text())
+          telemetry_artifacts = json.loads(Path('/tmp/telemetry-artifact-metadata.json').read_text())
+          evidence = {
+              'schema_version': '1.0.0',
+              'status': 'green_review_pending_unmerged',
+              'repository': 'leon36000/NextGen-Memory',
+              'reader': {
+                  **graph['reader'],
+                  'pull_request': 120,
+              },
+              'reranker': {
+                  **graph['reranker'],
+                  **prs['reranker'],
+                  'verifier': runs['reranker'],
+                  'summary': summaries['reranker'],
+                  'artifacts': reranker_artifacts,
+                  'review': {'required_model': 'GPT-5.6 Sol', 'verdict': 'pending', 'merge_allowed': False},
+              },
+              'telemetry': {
+                  **graph['telemetry'],
+                  **prs['telemetry'],
+                  'verifier': runs['telemetry'],
+                  'summary': summaries['telemetry'],
+                  'artifacts': telemetry_artifacts,
+                  'review': {'required_model': 'GPT-5.6 Sol', 'verdict': 'pending', 'merge_allowed': False},
+              },
+              'safety': {
+                  'merged': False,
+                  'production_database_contacted': False,
+                  'production_migration_applied': False,
+                  'production_application_data_written': False,
+                  'policy_activated': False,
+                  'release_published': False,
+                  'corrective_retrieval_changed': False,
+                  'tests_weakened': False,
+                  'stubs_added': False,
+                  'sol_verdict_fabricated': False,
+              },
+          }
+          raw = json.dumps(evidence, ensure_ascii=False, allow_nan=False, sort_keys=True, separators=(',', ':')) + '\n'
+          Path('/tmp/readback-evidence.json').write_text(raw, encoding='utf-8')
+          checkpoint = {
+              'checkpoint_key': 'm-head:reranker-telemetry-stack:green-readback:20260824',
+              'status': evidence['status'],
+              'repository': evidence['repository'],
+              'evidence_sha256': hashlib.sha256(raw.encode('utf-8')).hexdigest(),
+              'reader': evidence['reader'],
+              'reranker': evidence['reranker'],
+              'telemetry': evidence['telemetry'],
+              'safety': evidence['safety'],
+              'next_action': 'Obtain genuine exact-SHA GPT-5.6 Sol verdicts and integrate reader -> reranker -> telemetry in dependency order. No deployment or activation is authorized.',
+          }
+          Path('/tmp/readback-checkpoint.json').write_text(
+              json.dumps(checkpoint, ensure_ascii=False, allow_nan=False, sort_keys=True, separators=(',', ':')) + '\n',
+              encoding='utf-8',
+          )
+          print(Path('/tmp/readback-checkpoint.json').read_text(encoding='utf-8'), end='')
+          PY
+
+      - name: Publish immutable readback evidence and checkpoint branches
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git fetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*'
+          reader_sha=$(jq -r '.reader.sha' /tmp/product-graph.json)
+
+          publish_immutable() {
+            local branch=$1 source_file=$2 destination=$3 message=$4 base_ref=$5
+            if git ls-remote --exit-code --heads origin "$branch"; then
+              git switch --detach "origin/$branch"
+              cmp "$source_file" "$destination"
+              return
+            fi
+            git switch -C "$branch" "$base_ref"
+            mkdir -p "$(dirname "$destination")"
+            cp "$source_file" "$destination"
+            git add "$destination"
+            git diff --cached --check
+            git commit -m "$message"
+            git push origin HEAD:"refs/heads/$branch"
+          }
+
+          publish_immutable \
+            evidence/reranker-telemetry-readback-green-20260824 \
+            /tmp/readback-evidence.json \
+            evidence/reranker-telemetry-readback-green-20260824.json \
+            'evidence: read back reranker telemetry exact certification' \
+            "$reader_sha"
+          publish_immutable \
+            evidence/reranker-telemetry-readback-checkpoint-20260824 \
+            /tmp/readback-checkpoint.json \
+            evidence/reranker-telemetry-readback-checkpoint-20260824.json \
+            'evidence: checkpoint reranker telemetry certification readback' \
+            origin/evidence/reranker-telemetry-readback-green-20260824
+
+      - name: Publish durable issue status and close without merge
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SELF_PR: ${{ github.event.pull_request.number }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          checkpoint=$(cat /tmp/readback-checkpoint.json)
+          body=$(cat <<EOF
+          ## Reranker/telemetry certification readback GREEN
+
+          Independent readback recomputed and matched the immutable reader, reranker and telemetry graph, exact PR heads, successful Python 3.12/3.13 verifier jobs, downloaded cross-Python summaries and non-expired artifact digests.
+
+          Immutable records:
+
+          - \`evidence/reranker-telemetry-readback-green-20260824\`
+          - \`evidence/reranker-telemetry-readback-checkpoint-20260824\`
+
+          Canonical checkpoint: \`$checkpoint\`
+
+          Product PRs remain draft, unmerged and genuine exact-SHA GPT-5.6 Sol-pending. No production database, migration deployment, policy activation or release operation occurred.
+          EOF
+          )
+          gh api "repos/$REPO/issues/23/comments" --raw-field body="$body" >/dev/null
+          gh api --method PATCH "repos/$REPO/pulls/$SELF_PR" -f state=closed >/dev/null
