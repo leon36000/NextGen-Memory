@@ -1,10 +1,10 @@
-name: Run advisory policy promotion finalizer v12
+name: Run advisory policy promotion finalizer v13
 
 on:
   pull_request:
 
 concurrency:
-  group: advisory-policy-promotion-v0-finalize-v12-runner
+  group: advisory-policy-promotion-v0-finalize-v13-runner
   cancel-in-progress: true
 
 permissions:
@@ -34,4 +34,4 @@ jobs:
       - name: Execute fail-closed finalizer controller
         env:
           GH_TOKEN: ${{ github.token }}
-        run: bash .github/controllers/run_finalize_advisory_policy_promotion_v12.sh
+        run: bash .github/controllers/run_finalize_advisory_policy_promotion_v13.sh
