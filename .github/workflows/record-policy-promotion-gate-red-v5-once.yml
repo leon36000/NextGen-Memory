@@ -1,0 +1,239 @@
+name: Record advisory policy promotion gate RED v5 once
+
+on:
+  pull_request:
+
+concurrency:
+  group: advisory-policy-promotion-gate-v0-red-v5
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  record-red:
+    if: github.event.pull_request.head.ref == 'feat/advisory-policy-promotion-gate-v0-20260824'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/advisory-policy-promotion-gate-v0-20260824
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install project and development tools
+        run: python -m pip install -e '.[dev]'
+
+      - name: Resolve immutable registry base
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*'
+          base_sha=$(git rev-parse origin/candidate/paired-replay-experiment-registry-v0-20260824)
+          test "$(git merge-base HEAD "$base_sha")" = "$base_sha"
+          printf 'BASE_SHA=%s\n' "$base_sha" | tee -a "$GITHUB_ENV"
+
+      - name: Format embedded subprocess source before linting
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('tests/test_policy_promotion_gate_properties.py')
+          source = path.read_text(encoding='utf-8')
+          marker = "    script = r'''"
+          start = source.index(marker)
+          body_start = source.index('\n', start) + 1
+          body_end = source.index("\n'''", body_start)
+          Path('/tmp/promotion-subprocess.py').write_text(
+              source[body_start:body_end].strip() + '\n',
+              encoding='utf-8',
+          )
+          Path('/tmp/promotion-prefix.txt').write_text(
+              source[:start],
+              encoding='utf-8',
+          )
+          Path('/tmp/promotion-suffix.txt').write_text(
+              source[body_end + len("\n'''"):],
+              encoding='utf-8',
+          )
+          PY
+
+          ruff format /tmp/promotion-subprocess.py
+          ruff check --fix /tmp/promotion-subprocess.py
+          ruff check /tmp/promotion-subprocess.py
+          ruff format --check /tmp/promotion-subprocess.py
+
+          python - <<'PY'
+          from pathlib import Path
+
+          prefix = Path('/tmp/promotion-prefix.txt').read_text(encoding='utf-8')
+          suffix = Path('/tmp/promotion-suffix.txt').read_text(encoding='utf-8')
+          embedded = Path('/tmp/promotion-subprocess.py').read_text(
+              encoding='utf-8'
+          ).rstrip()
+          replacement = "    script = r'''\n" + embedded + "\n'''"
+          Path('tests/test_policy_promotion_gate_properties.py').write_text(
+              prefix + replacement + suffix,
+              encoding='utf-8',
+          )
+          PY
+
+      - name: Prove Ruff-clean and syntactically valid tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          files=(
+            tests/test_policy_promotion_gate.py
+            tests/test_policy_promotion_gate_properties.py
+            tests/test_policy_promotion_gate_public_api.py
+          )
+          ruff format "${files[@]}"
+          ruff check --fix "${files[@]}"
+          ruff check "${files[@]}"
+          ruff format --check "${files[@]}"
+          python -m py_compile "${files[@]}"
+          git diff --check
+
+      - name: Build isolated immutable base-plus-tests workspace
+        shell: bash
+        run: |
+          set -euo pipefail
+          red_root="$RUNNER_TEMP/advisory-policy-promotion-red"
+          rm -rf "$red_root"
+          git worktree add --detach "$red_root" "$BASE_SHA"
+          mkdir -p "$red_root/tests" "$red_root/docs"
+          cp tests/test_policy_promotion_gate.py "$red_root/tests/"
+          cp tests/test_policy_promotion_gate_properties.py "$red_root/tests/"
+          cp tests/test_policy_promotion_gate_public_api.py "$red_root/tests/"
+          cat > "$red_root/docs/policy-promotion-gate-v0-red.md" <<EOF
+          # Advisory Policy Promotion Gate v0 — TDD RED Evidence
+
+          **Date:** 2026-08-24
+          **Base branch:** \`candidate/paired-replay-experiment-registry-v0-20260824\`
+          **Base SHA:** \`$BASE_SHA\`
+          **TDD branch:** \`tdd/advisory-policy-promotion-gate-v0-red-20260824\`
+
+          The three tests-only contract files are Ruff-clean and syntactically valid. Each file independently reaches only the absence of \`nextgen_memory.policy_promotion_gate\` when collected against the immutable base. The implementation and package-root exports are absent.
+
+          This RED fixes advisory promote/hold/reject behavior, hard-rejection precedence, threshold neighborhoods, registry completeness, generated properties, deterministic identity, retries, privacy and public API before implementation qualification.
+          EOF
+          sed -i 's/^          //' "$red_root/docs/policy-promotion-gate-v0-red.md"
+
+      - name: Prove each test reaches only the intended module-absence boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          red_root="$RUNNER_TEMP/advisory-policy-promotion-red"
+          cd "$red_root"
+          test ! -e src/nextgen_memory/policy_promotion_gate.py
+          if grep -F 'policy_promotion_gate' src/nextgen_memory/__init__.py; then
+            echo 'base package root unexpectedly exports the absent module' >&2
+            exit 1
+          fi
+          files=(
+            tests/test_policy_promotion_gate.py
+            tests/test_policy_promotion_gate_properties.py
+            tests/test_policy_promotion_gate_public_api.py
+          )
+          : > /tmp/advisory-red-files.txt
+          for file in "${files[@]}"; do
+            output="/tmp/$(basename "$file" .py)-advisory-red.txt"
+            set +e
+            PYTHONPATH="$PWD/src" python -m pytest --collect-only -q "$file" \
+              > "$output" 2>&1
+            rc=$?
+            set -e
+            test "$rc" -ne 0
+            FILE="$file" OUTPUT="$output" python - <<'PY'
+          from __future__ import annotations
+
+          import os
+          import re
+          from pathlib import Path
+
+          file = os.environ['FILE']
+          text = Path(os.environ['OUTPUT']).read_text(
+              encoding='utf-8',
+              errors='replace',
+          )
+          modules = set(
+              re.findall(
+                  r"ModuleNotFoundError: No module named '([^']+)'",
+                  text,
+              )
+          )
+          if modules != {'nextgen_memory.policy_promotion_gate'}:
+              raise SystemExit(
+                  f'{file}: unexpected missing-module set: {sorted(modules)!r}'
+              )
+          for marker in (
+              'SyntaxError',
+              'IndentationError',
+              'NameError',
+              'fixture ',
+              'ERROR at setup',
+          ):
+              if marker in text:
+                  raise SystemExit(f'{file}: unintended RED marker: {marker}')
+          PY
+            printf '%s\n' "$file" >> /tmp/advisory-red-files.txt
+          done
+          test "$(wc -l < /tmp/advisory-red-files.txt)" -eq 3
+          cat /tmp/advisory-red-files.txt
+
+      - name: Publish immutable deterministic RED branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          red_root="$RUNNER_TEMP/advisory-policy-promotion-red"
+          red_branch='tdd/advisory-policy-promotion-gate-v0-red-20260824'
+          cd "$red_root"
+          git add \
+            docs/policy-promotion-gate-v0-red.md \
+            tests/test_policy_promotion_gate.py \
+            tests/test_policy_promotion_gate_properties.py \
+            tests/test_policy_promotion_gate_public_api.py
+          git diff --cached --check
+          mapfile -t changed < <(git diff --cached --name-only | sort)
+          expected=(
+            docs/policy-promotion-gate-v0-red.md
+            tests/test_policy_promotion_gate.py
+            tests/test_policy_promotion_gate_properties.py
+            tests/test_policy_promotion_gate_public_api.py
+          )
+          test "${#changed[@]}" -eq "${#expected[@]}"
+          diff -u <(printf '%s\n' "${expected[@]}" | sort) <(printf '%s\n' "${changed[@]}")
+          proposed_tree=$(git write-tree)
+          remote_sha=$(git ls-remote --heads origin "$red_branch" | awk '{print $1}')
+          if [ -n "$remote_sha" ]; then
+            git fetch --no-tags origin "+refs/heads/$red_branch:refs/remotes/origin/$red_branch"
+            test "$(git rev-parse "origin/$red_branch^{tree}")" = "$proposed_tree"
+            red_sha=$remote_sha
+          else
+            git config user.name 'github-actions[bot]'
+            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+            git commit -m 'test: record advisory policy promotion gate RED'
+            red_sha=$(git rev-parse HEAD)
+            git push origin "$red_sha:refs/heads/$red_branch"
+          fi
+          printf 'RED_SHA=%s\n' "$red_sha" | tee -a "$GITHUB_ENV"
+
+      - name: Commit normalized tests and remove obsolete RED transports
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$GITHUB_WORKSPACE"
+          rm -f .github/workflows/record-policy-promotion-gate-red*-once.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git diff --cached --check
+          git commit -m 'test: normalize advisory policy promotion gate contract'
+          git push origin HEAD:feat/advisory-policy-promotion-gate-v0-20260824
