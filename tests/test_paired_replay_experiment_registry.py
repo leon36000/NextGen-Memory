@@ -6,6 +6,13 @@ from dataclasses import FrozenInstanceError, replace
 from uuid import UUID
 
 import pytest
+
+from nextgen_memory.bounded_inherited_reranker import BoundedInheritedRerankerConfig
+from nextgen_memory.causal_credit import OutcomeMeasurement
+from nextgen_memory.inherited_rerank_telemetry import (
+    build_inherited_rerank_telemetry,
+    fingerprint_bounded_inherited_policy,
+)
 from nextgen_memory.paired_replay_experiment_registry import (
     BalancedPairedReplayPlanner,
     InMemoryPairedReplayExperimentRegistry,
@@ -18,13 +25,6 @@ from nextgen_memory.paired_replay_experiment_registry import (
     ReplayArm,
     ReplayFailureCode,
     ReplayPairStatus,
-)
-
-from nextgen_memory.bounded_inherited_reranker import BoundedInheritedRerankerConfig
-from nextgen_memory.causal_credit import OutcomeMeasurement
-from nextgen_memory.inherited_rerank_telemetry import (
-    build_inherited_rerank_telemetry,
-    fingerprint_bounded_inherited_policy,
 )
 
 EXPERIMENT_ID = UUID("00000000-0000-5000-8000-000000000901")
@@ -404,8 +404,13 @@ def test_failure_and_cancellation_are_terminal(
     assert registry.completed_trials(EXPERIMENT_ID) == ()
     with pytest.raises(PairedReplayRegistryStateError, match="terminal"):
         registry.record_arm_result(result_for_step(step))
+    conflicting_code = (
+        ReplayFailureCode.EXECUTION_FAILED
+        if code is ReplayFailureCode.CANCELLED
+        else ReplayFailureCode.CANCELLED
+    )
     with pytest.raises(PairedReplayRegistryConflictError, match="failure conflict"):
-        registry.record_failure(replace(failure, code=ReplayFailureCode.CANCELLED))
+        registry.record_failure(replace(failure, code=conflicting_code))
 
 
 def test_summary_counts_partition_pairs_and_account_resources() -> None:
