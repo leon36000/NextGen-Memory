@@ -1,0 +1,326 @@
+name: Consolidate paired replay registry v0 evidence
+
+on:
+  pull_request:
+
+permissions:
+  actions: read
+  contents: read
+  issues: write
+  pull-requests: write
+
+jobs:
+  consolidate:
+    if: github.event.pull_request.head.ref == 'bootstrap/consolidate-paired-registry-v0-20260824'
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Resolve immutable product and successful exact-SHA verifier
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          encode() {
+            python -c 'import sys,urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$1"
+          }
+          candidate_branch='candidate/paired-replay-experiment-registry-v0-20260824'
+          verifier_branch='bootstrap/verify-paired-registry-exact-20260824'
+          product_branch='feat/paired-replay-experiment-registry-v0-20260824'
+          base_branch='candidate/paired-rerank-policy-evaluation-v0-20260824'
+
+          candidate_sha=''
+          canonical_pr=''
+          verifier_run=''
+          for attempt in $(seq 1 40); do
+            if gh api "repos/$REPO/branches/$(encode "$candidate_branch")" >/tmp/candidate.json 2>/dev/null; then
+              candidate_sha=$(jq -r '.commit.sha' /tmp/candidate.json)
+              pulls=$(gh api --method GET "repos/$REPO/pulls" \
+                -f state=all -f head="leon36000:$candidate_branch" -f per_page=100)
+              if [ "$(printf '%s' "$pulls" | jq 'length')" -eq 1 ]; then
+                canonical_pr=$(printf '%s' "$pulls" | jq -r '.[0].number')
+                test "$(printf '%s' "$pulls" | jq -r '.[0].state')" = open
+                test "$(printf '%s' "$pulls" | jq -r '.[0].draft')" = true
+                test "$(printf '%s' "$pulls" | jq -r '.[0].head.sha')" = "$candidate_sha"
+                test "$(printf '%s' "$pulls" | jq -r '.[0].base.ref')" = "$base_branch"
+              fi
+              verifier_run=$(gh api --method GET "repos/$REPO/actions/runs" \
+                -f branch="$verifier_branch" -f event=pull_request -f per_page=100 \
+                --jq '.workflow_runs | map(select(.name == "Verify paired replay registry exact SHA" and .status == "completed" and .conclusion == "success")) | sort_by(.created_at) | last | .id // empty')
+            fi
+            if [ -n "$candidate_sha" ] && [ -n "$canonical_pr" ] && [ -n "$verifier_run" ]; then
+              break
+            fi
+            echo "attempt=$attempt candidate=${candidate_sha:-pending} pr=${canonical_pr:-pending} run=${verifier_run:-pending}"
+            sleep 15
+          done
+          test -n "$candidate_sha"
+          test -n "$canonical_pr"
+          test -n "$verifier_run"
+
+          product_sha=$(gh api "repos/$REPO/branches/$(encode "$product_branch")" --jq '.commit.sha')
+          test "$product_sha" = "$candidate_sha"
+          base_sha=$(gh api "repos/$REPO/branches/$(encode "$base_branch")" --jq '.commit.sha')
+          test "$base_sha" = '847ea08e9e9a0d9193adac6d465557270da6ef7d'
+
+          jobs=$(gh api --method GET "repos/$REPO/actions/runs/$verifier_run/jobs" -f per_page=100)
+          printf '%s' "$jobs" | jq '[.jobs[] | {id,name,status,conclusion,head_sha,started_at,completed_at}]' > /tmp/jobs.json
+          test "$(jq '[.[] | select(.status == "completed" and .conclusion == "success")] | length' /tmp/jobs.json)" -ge 4
+          test "$(jq '[.[] | select(.conclusion != "success")] | length' /tmp/jobs.json)" -eq 0
+
+          dev_pulls=$(gh api --method GET "repos/$REPO/pulls" \
+            -f state=all -f head="leon36000:$product_branch" -f per_page=100)
+          test "$(printf '%s' "$dev_pulls" | jq 'length')" -eq 1
+          development_pr=$(printf '%s' "$dev_pulls" | jq -r '.[0].number')
+          verifier_pulls=$(gh api --method GET "repos/$REPO/pulls" \
+            -f state=all -f head="leon36000:$verifier_branch" -f per_page=100)
+          test "$(printf '%s' "$verifier_pulls" | jq 'length')" -eq 1
+          verifier_pr=$(printf '%s' "$verifier_pulls" | jq -r '.[0].number')
+
+          jq -n \
+            --arg candidate_branch "$candidate_branch" \
+            --arg candidate_sha "$candidate_sha" \
+            --arg base_branch "$base_branch" \
+            --arg base_sha "$base_sha" \
+            --argjson canonical_pr "$canonical_pr" \
+            --argjson development_pr "$development_pr" \
+            --argjson verifier_pr "$verifier_pr" \
+            --argjson verifier_run "$verifier_run" \
+            --argjson jobs "$(cat /tmp/jobs.json)" \
+            '{candidate_branch:$candidate_branch,candidate_sha:$candidate_sha,base_branch:$base_branch,base_sha:$base_sha,canonical_pr:$canonical_pr,development_pr:$development_pr,verifier_pr:$verifier_pr,verifier_run:$verifier_run,jobs:$jobs}' \
+            > /tmp/resolved.json
+          cat /tmp/resolved.json
+
+      - name: Download and validate bounded verifier artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          run=$(jq -r '.verifier_run' /tmp/resolved.json)
+          mkdir -p /tmp/artifacts
+          gh run download "$run" --repo "$REPO" \
+            --pattern 'paired-registry-python-*' \
+            --dir /tmp/artifacts
+          gh run download "$run" --repo "$REPO" \
+            --name paired-registry-cross-python-summary \
+            --dir /tmp/artifacts/summary
+          python - <<'PY'
+          import hashlib
+          import json
+          from pathlib import Path
+
+          root = Path('/tmp/artifacts')
+          reports = sorted(root.rglob('verification.json'))
+          states = sorted(root.rglob('registry-state.json'))
+          summaries = sorted(root.rglob('cross-python-summary.json'))
+          if tuple(map(len, (reports, states, summaries))) != (2, 2, 1):
+              raise SystemExit('incomplete paired-registry artifact set')
+          documents = [json.loads(path.read_text(encoding='utf-8')) for path in reports]
+          state_documents = [json.loads(path.read_text(encoding='utf-8')) for path in states]
+          summary = json.loads(summaries[0].read_text(encoding='utf-8'))
+          candidate_sha = json.loads(Path('/tmp/resolved.json').read_text())['candidate_sha']
+          if {doc['candidate_sha'] for doc in documents} != {candidate_sha}:
+              raise SystemExit('artifact candidate SHA drift')
+          if {'.'.join(doc['python_version'].split('.')[:2]) for doc in documents} != {'3.12','3.13'}:
+              raise SystemExit('unexpected Python artifact set')
+          if states[0].read_bytes() != states[1].read_bytes():
+              raise SystemExit('cross-Python registry-state bytes differ')
+          state_hash = hashlib.sha256(states[0].read_bytes()).hexdigest()
+          if {doc['registry_state_sha256'] for doc in documents} != {state_hash}:
+              raise SystemExit('registry-state hash differs from manifests')
+          if summary['candidate_sha'] != candidate_sha:
+              raise SystemExit('summary candidate SHA drift')
+          if summary['cross_python_registry_state_identical'] is not True:
+              raise SystemExit('cross-Python identity not proved')
+          if summary['registry_state_sha256'] != state_hash:
+              raise SystemExit('summary registry-state hash drift')
+          first = state_documents[0]
+          state_summary = first['summary']
+          expected = {
+              'pair_count': 4,
+              'planned_count': 1,
+              'first_arm_recorded_count': 0,
+              'complete_count': 1,
+              'failed_count': 1,
+              'cancelled_count': 1,
+              'recorded_arm_count': 2,
+              'completed_trial_count': 1,
+              'actual_tokens': 24,
+              'actual_latency_ms': 5.0,
+          }
+          for key, value in expected.items():
+              if state_summary[key] != value:
+                  raise SystemExit(f'unexpected registry-state summary {key}')
+          evidence = {
+              'candidate_sha': candidate_sha,
+              'cross_python_registry_state_identical': True,
+              'focused_test_count_each': summary['focused_test_count_each'],
+              'full_test_count_each': summary['full_test_count_each'],
+              'python_versions': summary['python_versions'],
+              'registry_state_sha256': state_hash,
+              'wheel_sha256_by_python': {
+                  '.'.join(doc['python_version'].split('.')[:2]): doc['wheel_sha256']
+                  for doc in documents
+              },
+          }
+          Path('/tmp/evidence.json').write_text(
+              json.dumps(evidence, ensure_ascii=False, allow_nan=False, sort_keys=True, separators=(',', ':')) + '\n',
+              encoding='utf-8',
+          )
+          print(Path('/tmp/evidence.json').read_text(), end='')
+          PY
+
+      - name: Update canonical PR and publish blind GPT-5.6 Sol packet
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          pr=$(jq -r '.canonical_pr' /tmp/resolved.json)
+          issue=132
+          sha=$(jq -r '.candidate_sha' /tmp/resolved.json)
+          base=$(jq -r '.base_sha' /tmp/resolved.json)
+          run=$(jq -r '.verifier_run' /tmp/resolved.json)
+          focused=$(jq -r '.focused_test_count_each' /tmp/evidence.json)
+          full=$(jq -r '.full_test_count_each' /tmp/evidence.json)
+          state_hash=$(jq -r '.registry_state_sha256' /tmp/evidence.json)
+          wheel_312=$(jq -r '.wheel_sha256_by_python["3.12"]' /tmp/evidence.json)
+          wheel_313=$(jq -r '.wheel_sha256_by_python["3.13"]' /tmp/evidence.json)
+          job_lines=$(jq -r '.jobs[] | "- `" + .name + "`: status=`" + .status + "`, conclusion=`" + .conclusion + "`, head=`" + .head_sha + "`"' /tmp/resolved.json)
+
+          body=$(cat <<EOF
+          ## Status
+
+          **GREEN / draft / review_pending / unmerged.** Exact immutable candidate SHA: \`$sha\`.
+
+          Base paired-policy evaluation SHA: \`$base\`.
+          Immutable branch: \`candidate/paired-replay-experiment-registry-v0-20260824\`.
+          Exact verifier run: \`$run\`.
+
+          $job_lines
+
+          ## Exact scope
+
+          Seven paths only: approved design, execution plan, package-root exports, one pure in-memory registry module, and three focused/property/public-API test files. No migration, workflow, dependency, persistence adapter, model execution, feedback writer, policy activation or corrective-retrieval source is changed.
+
+          ## Proven contract
+
+          - deterministic context normalization and pair identities;
+          - seed-driven arm order with balanced control-first/treatment-first counts;
+          - worst-case token and latency preflight before registration;
+          - exact plan, result and failure retry idempotence with immutable conflicts;
+          - one schedulable arm per non-terminal pair;
+          - step, pair, experiment, space, policy, router-decision and per-arm budget validation before mutation;
+          - complete evaluator trial only after two matched arms;
+          - terminal failed/cancelled states excluded from completed trials;
+          - deterministic snapshots, summaries and completed-trial ordering;
+          - 5,000 generated plans/traces and process-hash-seed invariance;
+          - no persistence, network, database, Temporal, lease, worker, model execution, feedback or activation side effect.
+
+          ## Verification
+
+          - precise tests-only module-absence RED with Ruff clean;
+          - Python 3.12/3.13 Ruff, compileall, focused and full suites passed;
+          - focused tests per version: \`$focused\`;
+          - full tests per version: \`$full\`;
+          - strict dependency/privacy/stub audit passed;
+          - isolated wheel import and \`pip check\` passed on both versions;
+          - mixed planned/complete/failed/cancelled registry state was byte-identical across Python versions;
+          - registry-state SHA-256: \`$state_hash\`;
+          - Python 3.12 wheel SHA-256: \`$wheel_312\`;
+          - Python 3.13 wheel SHA-256: \`$wheel_313\`.
+
+          ## Merge rule
+
+          Do not merge until PR #134 and all prerequisite candidates are approved/integrated in dependency order, and a genuine independent GPT-5.6 Sol review returns \`APPROVE\` for exact SHA \`$sha\`. Any SHA movement invalidates all evidence. Merge never authorizes execution, persistence, activation or feedback emission.
+          EOF
+          )
+          gh api --method PATCH "repos/$REPO/pulls/$pr" -f body="$body" >/dev/null
+
+          packet=$(cat <<EOF
+          ## Blind GPT-5.6 Sol review request — Paired Replay Experiment Registry v0
+
+          Return exactly one verdict: \`APPROVE\`, \`CHANGES_REQUIRED\`, or \`BLOCKED_BY_EVIDENCE\`.
+
+          ### Exact review boundary
+
+          - base paired-policy evaluation: \`$base\`;
+          - candidate: \`$sha\`;
+          - immutable branch: \`candidate/paired-replay-experiment-registry-v0-20260824\`;
+          - pull request: #$pr;
+          - exact verifier run: \`$run\`;
+          - any SHA movement invalidates this request.
+
+          ### Task contract
+
+          Create a pure deterministic in-memory planner and state machine that counterbalances matched replay arms, reserves worst-case resources, exposes only the currently permitted arm, records bounded results/failures idempotently, and emits complete \`PairedRerankPolicyTrial\` values only after two truly matched arms.
+
+          ### Acceptance criteria
+
+          1. Input context order cannot change plan identity; order seed may change arm order but not pair IDs.
+          2. Control-first/treatment-first counts partition pairs and differ by at most one.
+          3. Duplicate contexts, pair overflow, token overflow and latency overflow fail before registration.
+          4. Exact plan registration is idempotent; reused experiment identity with changed content conflicts.
+          5. Only one arm per non-terminal pair is schedulable at a time.
+          6. Wrong step, pair, experiment, space, policy, fingerprint, router decision or per-arm budget fails before mutation.
+          7. Exact result/failure retry is idempotent; changed retry conflicts.
+          8. Two matched arms create exactly one complete evaluator trial; mismatched telemetry cannot complete a pair.
+          9. Failed and cancelled pairs are terminal and excluded from completed trials.
+          10. Snapshots and summaries exactly partition pair state and resource totals.
+          11. Plan, state and summaries are deterministic across input permutations, hash seeds and Python 3.12/3.13.
+          12. No query/prompt/answer/memory body/error text/credential/backend identity/arbitrary metadata surface.
+          13. No persistence, SQL, network, filesystem write, Temporal, lease, worker, model execution, feedback write or policy activation.
+          14. No migration, dependency, corrective-retrieval change, stub, skipped test or weakened contract.
+
+          ### Evidence
+
+          - accepted module-absence RED on PR #133 with Ruff clean and three collection failures solely for the absent registry module;
+          - exact seven-path candidate scope;
+          - Python 3.12/3.13 focused/full suites, Ruff and compileall green;
+          - focused tests per version: \`$focused\`;
+          - full tests per version: \`$full\`;
+          - 5,000 generated deterministic traces and process-hash-seed invariance;
+          - strict dependency/privacy/stub audit;
+          - isolated wheel imports and \`pip check\`;
+          - cross-Python byte-identical mixed registry state, SHA-256 \`$state_hash\`.
+
+          ### Review focus
+
+          - identity domain separation for experiment, plan, pair, step, result, failure and trial;
+          - whether seed changes can accidentally alter pair identities or violate balance;
+          - reservation arithmetic and bool/non-finite numeric confusion;
+          - immutable retry semantics and pre-mutation validation ordering;
+          - second-arm-before-first and terminal-state bypasses;
+          - telemetry/policy/router-decision matching and complete-trial construction;
+          - deterministic ordering of steps, snapshots, summaries and completed trials;
+          - privacy of canonical serialization and absence of hidden execution/persistence behavior;
+          - whether generated traces and the mixed-state cross-Python evidence challenge shared assumptions sufficiently.
+
+          Do not rely on this comment or PR prose as proof. Inspect the exact seven-file diff, module, tests, workflow logs and artifacts before issuing the verdict.
+          EOF
+          )
+          gh api "repos/$REPO/issues/$pr/comments" -f body="$packet"
+          gh issue comment "$issue" --repo "$REPO" --body "$packet"
+          gh issue comment 23 --repo "$REPO" --body "$packet"
+
+      - name: Close superseded development and verifier transports
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          for key in development_pr verifier_pr; do
+            number=$(jq -r ".$key" /tmp/resolved.json)
+            gh api --method PATCH "repos/$REPO/pulls/$number" -f state=closed >/dev/null
+          done
+
+      - name: Close this evidence PR without merge
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SELF_PR: ${{ github.event.pull_request.number }}
+        run: gh api --method PATCH "repos/$REPO/pulls/$SELF_PR" -f state=closed >/dev/null
