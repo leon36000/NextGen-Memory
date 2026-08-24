@@ -1,0 +1,326 @@
+name: Derive next M-HEAD contract after paired registry
+
+on:
+  pull_request:
+
+permissions:
+  actions: read
+  contents: write
+  issues: write
+  pull-requests: write
+
+jobs:
+  audit:
+    if: github.event.pull_request.head.ref == 'audit/post-paired-registry-20260824'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: audit/post-paired-registry-20260824
+          fetch-depth: 0
+
+      - name: Validate paired-registry immutable evidence against GitHub
+        id: registry
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          evidence='evidence/paired-replay-registry-green-20260824.json'
+          digest='evidence/paired-replay-registry-green-20260824.sha256'
+          test -f "$evidence"
+          test -f "$digest"
+          test "$(sha256sum "$evidence" | awk '{print $1}')" = "$(awk '{print $1}' "$digest")"
+          jq -e '.status == "green_review_pending_unmerged"' "$evidence" >/dev/null
+          jq -e '.base_sha == "847ea08e9e9a0d9193adac6d465557270da6ef7d"' "$evidence" >/dev/null
+          jq -e '.candidate_branch == "candidate/paired-replay-experiment-registry-v0-20260824"' "$evidence" >/dev/null
+          jq -e '.cross_python_registry_state_identical == true' "$evidence" >/dev/null
+          jq -e '.safety.merged == false' "$evidence" >/dev/null
+          jq -e '.safety.production_database_contacted == false' "$evidence" >/dev/null
+          jq -e '.safety.policy_activated == false' "$evidence" >/dev/null
+          candidate_sha=$(jq -r '.candidate_sha' "$evidence")
+          test "${#candidate_sha}" -eq 40
+          actual_sha=$(gh api "repos/$REPO/branches/candidate%2Fpaired-replay-experiment-registry-v0-20260824" --jq '.commit.sha')
+          test "$actual_sha" = "$candidate_sha"
+          pulls=$(gh api --method GET "repos/$REPO/pulls" \
+            -f state=all \
+            -f head='leon36000:candidate/paired-replay-experiment-registry-v0-20260824' \
+            -f per_page=100)
+          test "$(printf '%s' "$pulls" | jq 'length')" -eq 1
+          test "$(printf '%s' "$pulls" | jq -r '.[0].state')" = open
+          test "$(printf '%s' "$pulls" | jq -r '.[0].draft')" = true
+          test "$(printf '%s' "$pulls" | jq -r '.[0].head.sha')" = "$candidate_sha"
+          test "$(printf '%s' "$pulls" | jq -r '.[0].base.ref')" = candidate/paired-rerank-policy-evaluation-v0-20260824
+          pr=$(printf '%s' "$pulls" | jq -r '.[0].number')
+          body=$(printf '%s' "$pulls" | jq -r '.[0].body')
+          printf '%s' "$body" | grep -F '**GREEN / draft / review_pending / unmerged.**' >/dev/null
+          printf '%s' "$body" | grep -F "$candidate_sha" >/dev/null
+          latest_verifier=$(gh api --method GET "repos/$REPO/actions/runs" \
+            -f branch=audit/probe-paired-registry-20260824 \
+            -f event=pull_request \
+            -f per_page=100 \
+            --jq '.workflow_runs | map(select(.name == "Certify paired replay registry after M-HEAD rehydration")) | sort_by(.created_at) | last')
+          test "$(printf '%s' "$latest_verifier" | jq -r '.status')" = completed
+          test "$(printf '%s' "$latest_verifier" | jq -r '.conclusion')" = success
+          verifier_run=$(printf '%s' "$latest_verifier" | jq -r '.id')
+          jobs=$(gh api --method GET "repos/$REPO/actions/runs/$verifier_run/jobs" -f per_page=100)
+          test "$(printf '%s' "$jobs" | jq '[.jobs[] | select(.conclusion != "success")] | length')" -eq 0
+          test "$(printf '%s' "$jobs" | jq '[.jobs[] | select(.conclusion == "success")] | length')" -ge 4
+          artifacts=$(gh api --method GET "repos/$REPO/actions/runs/$verifier_run/artifacts" -f per_page=100)
+          test "$(printf '%s' "$artifacts" | jq '[.artifacts[] | select(.expired == true)] | length')" -eq 0
+          test "$(printf '%s' "$artifacts" | jq '.artifacts | length')" -ge 2
+          echo "candidate_sha=$candidate_sha" >> "$GITHUB_OUTPUT"
+          echo "pr=$pr" >> "$GITHUB_OUTPUT"
+          echo "verifier_run=$verifier_run" >> "$GITHUB_OUTPUT"
+          jq -n \
+            --arg candidate_sha "$candidate_sha" \
+            --argjson pull_request "$pr" \
+            --argjson verifier_run "$verifier_run" \
+            --argjson artifacts "$(printf '%s' "$artifacts" | jq '[.artifacts[] | {id,name,digest,expired,size_in_bytes}]')" \
+            '{status:"green_review_pending_unmerged",candidate_branch:"candidate/paired-replay-experiment-registry-v0-20260824",candidate_sha:$candidate_sha,pull_request:$pull_request,verifier_run:$verifier_run,artifacts:$artifacts,merge_allowed:false,sol_verdict:"pending"}' \
+            > /tmp/registry-state.json
+
+      - name: Inventory open issues, pull requests, and branches
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh api --paginate "repos/$REPO/issues?state=open&per_page=100" \
+            --jq '[.[] | select(has("pull_request") | not) | {number,title,body,labels:[.labels[].name],milestone:(.milestone.title // null),assignees:[.assignees[].login],created_at,updated_at,html_url}]' \
+            | jq -s 'add | sort_by(.number)' > /tmp/open-issues.json
+          gh api --paginate "repos/$REPO/pulls?state=open&per_page=100" \
+            --jq '[.[] | {number,title,draft,head_ref:.head.ref,head_sha:.head.sha,base_ref:.base.ref,base_sha:.base.sha,created_at,updated_at,html_url}]' \
+            | jq -s 'add | sort_by(.number)' > /tmp/open-prs.json
+          git ls-remote --heads origin \
+            | awk '{sub("refs/heads/", "", $2); print $1 "\t" $2}' \
+            | sort -k2 > /tmp/branches.tsv
+          python - <<'PY'
+          from __future__ import annotations
+
+          import json
+          from pathlib import Path
+
+          branches = [
+              {"sha": line.split("\t", 1)[0], "name": line.split("\t", 1)[1]}
+              for line in Path('/tmp/branches.tsv').read_text(encoding='utf-8').splitlines()
+              if "\t" in line
+          ]
+          Path('/tmp/branches.json').write_text(
+              json.dumps(branches, ensure_ascii=False, sort_keys=True, separators=(',', ':')) + '\n',
+              encoding='utf-8',
+          )
+          PY
+
+      - name: Rank the next real contract from repository evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from __future__ import annotations
+
+          import json
+          import re
+          from pathlib import Path
+
+          issues = json.loads(Path('/tmp/open-issues.json').read_text(encoding='utf-8'))
+          prs = json.loads(Path('/tmp/open-prs.json').read_text(encoding='utf-8'))
+          branches = json.loads(Path('/tmp/branches.json').read_text(encoding='utf-8'))
+          branch_names = {item['name'] for item in branches}
+          pr_titles = {str(item['title']).casefold() for item in prs}
+          completed_issue_numbers = {23, 132}
+          completed_title_fragments = {
+              'paired replay experiment registry',
+              'paired-rerank policy evaluation',
+              'paired rerank policy evaluation',
+              'inherited rerank telemetry',
+              'bounded inherited reranker',
+              'learning evidence reader',
+              'inherited credit ledger',
+          }
+
+          def score(issue: dict[str, object]) -> tuple[int, list[str]]:
+              number = int(issue['number'])
+              title = str(issue.get('title') or '')
+              body = str(issue.get('body') or '')
+              labels = {str(value).casefold() for value in issue.get('labels', [])}
+              combined = f'{title}\n{body}'.casefold()
+              reasons: list[str] = []
+              value = 0
+              if number in completed_issue_numbers:
+                  return -10_000, ['completed/meta issue']
+              if any(fragment in title.casefold() for fragment in completed_title_fragments):
+                  return -9_000, ['contract already represented by immutable GREEN evidence']
+              if 'paired-replay-experiment-registry-v0' in combined or 'paired replay experiment registry' in combined:
+                  value += 300
+                  reasons.append('explicit dependency on completed paired replay registry')
+              if re.search(r'policy\s+promotion|promotion\s+gate|promot(e|ion)', combined):
+                  value += 220
+                  reasons.append('policy-promotion contract')
+              if re.search(r'replay.*(orchestrat|execut)|(?:orchestrat|execut).*replay', combined):
+                  value += 160
+                  reasons.append('replay execution/orchestration contract')
+              if 'rollout' in combined or 'activation' in combined:
+                  value += 110
+                  reasons.append('rollout/activation boundary')
+              if 'policy' in title.casefold():
+                  value += 60
+                  reasons.append('policy-scoped issue title')
+              if 'replay' in title.casefold():
+                  value += 45
+                  reasons.append('replay-scoped issue title')
+              if {'priority', 'next', 'roadmap', 'high-priority'} & labels:
+                  value += 40
+                  reasons.append('priority/roadmap label')
+              if any(token in combined for token in ('depends on', 'after ', 'prerequisite', 'blocked by')):
+                  value += 25
+                  reasons.append('explicit dependency language')
+              if title.casefold() in pr_titles:
+                  value += 15
+                  reasons.append('matching open PR title')
+              for branch in branch_names:
+                  slug = branch.replace('-', ' ').replace('/', ' ').casefold()
+                  words = [word for word in re.split(r'\W+', title.casefold()) if len(word) >= 5]
+                  if words and sum(word in slug for word in words) >= min(2, len(words)):
+                      value += 10
+                      reasons.append(f'related branch: {branch}')
+                      break
+              return value, reasons
+
+          ranked: list[dict[str, object]] = []
+          for issue in issues:
+              value, reasons = score(issue)
+              if value <= -9_000:
+                  continue
+              ranked.append(
+                  {
+                      'number': issue['number'],
+                      'title': issue['title'],
+                      'score': value,
+                      'reasons': reasons,
+                      'labels': issue.get('labels', []),
+                      'milestone': issue.get('milestone'),
+                      'updated_at': issue.get('updated_at'),
+                      'html_url': issue.get('html_url'),
+                  }
+              )
+          ranked.sort(key=lambda item: (-int(item['score']), int(item['number'])))
+          if ranked and int(ranked[0]['score']) > 0:
+              selected = ranked[0]
+              decision = {
+                  'status': 'next_contract_selected_from_git_issues',
+                  'issue_number': selected['number'],
+                  'title': selected['title'],
+                  'score': selected['score'],
+                  'reasons': selected['reasons'],
+              }
+          else:
+              decision = {
+                  'status': 'no_explicit_next_contract_found',
+                  'issue_number': None,
+                  'title': None,
+                  'score': 0,
+                  'reasons': ['no open issue had an explicit dependency or roadmap signal after paired registry'],
+              }
+          output = {
+              'decision': decision,
+              'ranked_candidates': ranked[:15],
+              'open_issue_count': len(issues),
+              'open_pr_count': len(prs),
+              'branch_count': len(branches),
+          }
+          Path('/tmp/next-contract.json').write_text(
+              json.dumps(output, ensure_ascii=False, allow_nan=False, sort_keys=True, separators=(',', ':')) + '\n',
+              encoding='utf-8',
+          )
+          print(Path('/tmp/next-contract.json').read_text(), end='')
+          PY
+
+      - name: Assemble and publish immutable post-registry roadmap evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from __future__ import annotations
+
+          import hashlib
+          import json
+          from pathlib import Path
+
+          def load(path: str):
+              return json.loads(Path(path).read_text(encoding='utf-8'))
+
+          report = {
+              'schema': 'm-head-post-registry-roadmap-v1',
+              'status': 'post_registry_reconciled',
+              'repository': 'leon36000/NextGen-Memory',
+              'paired_registry': load('/tmp/registry-state.json'),
+              'roadmap': load('/tmp/next-contract.json'),
+              'open_issues': load('/tmp/open-issues.json'),
+              'open_prs': load('/tmp/open-prs.json'),
+              'branches': load('/tmp/branches.json'),
+              'safety': {
+                  'merged': False,
+                  'production_database_contacted': False,
+                  'production_migration_applied': False,
+                  'production_application_data_written': False,
+                  'model_or_agent_executed': False,
+                  'feedback_written': False,
+                  'policy_activated': False,
+                  'release_published': False,
+              },
+          }
+          raw = json.dumps(report, ensure_ascii=False, allow_nan=False, sort_keys=True, separators=(',', ':')) + '\n'
+          destination = Path('/tmp/m-head-post-registry-next-20260824.json')
+          destination.write_text(raw, encoding='utf-8')
+          Path('/tmp/m-head-post-registry-next-20260824.sha256').write_text(
+              hashlib.sha256(raw.encode('utf-8')).hexdigest() + '  ' + destination.name + '\n',
+              encoding='utf-8',
+          )
+          PY
+          branch='evidence/m-head-post-registry-next-20260824'
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git fetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*'
+          if git ls-remote --exit-code --heads origin "$branch"; then
+            git switch --detach "origin/$branch"
+            cmp /tmp/m-head-post-registry-next-20260824.json evidence/m-head-post-registry-next-20260824.json
+            cmp /tmp/m-head-post-registry-next-20260824.sha256 evidence/m-head-post-registry-next-20260824.sha256
+          else
+            git switch -c "$branch" origin/evidence/paired-replay-registry-green-20260824
+            cp /tmp/m-head-post-registry-next-20260824.json evidence/
+            cp /tmp/m-head-post-registry-next-20260824.sha256 evidence/
+            git add evidence/m-head-post-registry-next-20260824.json evidence/m-head-post-registry-next-20260824.sha256
+            git diff --cached --check
+            git commit -m 'evidence: select next M-HEAD contract after paired registry'
+            git push origin HEAD:"refs/heads/$branch"
+          fi
+
+      - name: Publish bounded decision and close without merge
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SELF_PR: ${{ github.event.pull_request.number }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          status=$(jq -r '.decision.status' /tmp/next-contract.json)
+          issue=$(jq -r '.decision.issue_number // "none"' /tmp/next-contract.json)
+          title=$(jq -r '.decision.title // "none"' /tmp/next-contract.json)
+          digest=$(awk '{print $1}' /tmp/m-head-post-registry-next-20260824.sha256)
+          body=$(cat <<EOF
+          ## Post-registry M-HEAD roadmap audit
+
+          Immutable report: \`evidence/m-head-post-registry-next-20260824\`.
+          Report SHA-256: \`$digest\`.
+          Decision: \`$status\`.
+          Selected issue: \`$issue\` — $title.
+
+          Selection was computed from live open issues, PRs and branches after revalidating the paired-registry GREEN evidence, candidate PR, exact verifier jobs and non-expired artifacts. No product branch, merge, deployment, database, feedback, activation or release operation occurred.
+          EOF
+          )
+          gh api "repos/$REPO/issues/23/comments" -f body="$body"
+          gh api --method PATCH "repos/$REPO/pulls/$SELF_PR" -f state=closed >/dev/null
