@@ -1,0 +1,232 @@
+name: Rebuild paired policy evaluation on corrected telemetry
+
+on:
+  pull_request:
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+jobs:
+  rebuild:
+    if: github.event.pull_request.head.ref == 'bootstrap/rebuild-pr17-on-telemetry-20260824'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: bootstrap/rebuild-pr17-on-telemetry-20260824
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Merge exact PR17 over immutable telemetry
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git fetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*'
+          base_sha=$(git rev-parse origin/candidate/inherited-rerank-telemetry-v0-20260824)
+          test "$base_sha" = 'e76275a7d75f06e6510dc72c971d1f198d659107'
+          git cat-file -e '67e7c0bc05165c1676541bd3ce7e648e3df54dc7^{commit}'
+          git merge-base --is-ancestor d00992d20f970717268a8a7355f19ab487def4e9 67e7c0bc05165c1676541bd3ce7e648e3df54dc7
+          if git ls-remote --exit-code --heads origin candidate/paired-rerank-policy-evaluation-v0-20260824; then
+            echo 'immutable paired-evaluation target already exists' >&2
+            exit 1
+          fi
+          git switch -c candidate/paired-rerank-policy-evaluation-v0-20260824 "$base_sha"
+          git merge --no-ff --no-edit 67e7c0bc05165c1676541bd3ce7e648e3df54dc7
+          git merge-base --is-ancestor "$base_sha" HEAD
+          git merge-base --is-ancestor 67e7c0bc05165c1676541bd3ce7e648e3df54dc7 HEAD
+          echo "BASE_SHA=$base_sha" >> "$GITHUB_ENV"
+          echo "CANDIDATE_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+
+      - name: Prove exact seven-path product scope
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t changed < <(git diff --name-only "$BASE_SHA"...HEAD | sort)
+          expected=(
+            docs/superpowers/plans/2026-08-15-paired-rerank-policy-evaluation-v0.md
+            docs/superpowers/specs/2026-08-15-paired-rerank-policy-evaluation-v0-design.md
+            scripts/simulate_paired_rerank_policy_evaluation_v0.py
+            src/nextgen_memory/paired_rerank_policy_evaluation.py
+            tests/test_paired_rerank_policy_evaluation.py
+            tests/test_paired_rerank_policy_evaluation_properties.py
+            tests/test_paired_rerank_policy_evaluation_simulation.py
+          )
+          test "${#changed[@]}" -eq "${#expected[@]}"
+          diff -u <(printf '%s\n' "${expected[@]}" | sort) <(printf '%s\n' "${changed[@]}")
+          test -z "$(git diff --name-only "$BASE_SHA"...HEAD -- 'migrations/**' '.github/workflows/**' pyproject.toml 'src/nextgen_memory/corrective_retrieval_*')"
+          git diff --check "$BASE_SHA"...HEAD
+          test -z "$(git status --porcelain)"
+
+      - name: Install project and development tools
+        run: python -m pip install -e '.[dev]'
+
+      - name: Static, focused and complete verification
+        shell: bash
+        run: |
+          set -euo pipefail
+          ruff check .
+          python -m compileall -q src scripts
+          python -m pytest -q \
+            tests/test_paired_rerank_policy_evaluation.py \
+            tests/test_paired_rerank_policy_evaluation_properties.py \
+            tests/test_paired_rerank_policy_evaluation_simulation.py \
+            | tee /tmp/focused-tests.txt
+          python -m pytest -q | tee /tmp/full-tests.txt
+          git diff --check "$BASE_SHA"...HEAD
+
+      - name: Prove deterministic paired-policy simulation
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/simulate_paired_rerank_policy_evaluation_v0.py > /tmp/simulation-a.json
+          python scripts/simulate_paired_rerank_policy_evaluation_v0.py > /tmp/simulation-b.json
+          cmp /tmp/simulation-a.json /tmp/simulation-b.json
+          python - <<'PY'
+          import hashlib
+          import json
+          from pathlib import Path
+
+          raw = Path('/tmp/simulation-a.json').read_text(encoding='utf-8')
+          decoded = json.loads(raw)
+          expected_bytes = json.dumps(
+              decoded,
+              ensure_ascii=False,
+              indent=2,
+              sort_keys=True,
+          ) + '\n'
+          if raw != expected_bytes:
+              raise SystemExit('simulation output differs from its pretty sorted JSON contract')
+          if decoded['scenario_count'] != 6:
+              raise SystemExit('simulation does not cover six verdicts')
+          expected_verdicts = {
+              'harmful': 'harmful',
+              'inconclusive': 'inconclusive',
+              'insufficient_evidence': 'insufficient_evidence',
+              'neutral': 'neutral',
+              'promising': 'promising',
+              'too_costly': 'too_costly',
+          }
+          if decoded['verdict_scenarios'] != expected_verdicts:
+              raise SystemExit('simulation verdict matrix differs')
+          variance = decoded['variance_experiment']
+          if variance['trial_count'] != 64:
+              raise SystemExit('variance experiment trial count differs')
+          if not variance['paired_standard_error'] < variance['unpaired_standard_error']:
+              raise SystemExit('paired estimator did not reduce standard error')
+          if not variance['standard_error_ratio'] < 0.25:
+              raise SystemExit('paired standard error reduction is too weak')
+          if decoded['memory_level_credit_emitted'] is not False:
+              raise SystemExit('policy evaluation emitted memory-level credit')
+          print(hashlib.sha256(raw.encode('utf-8')).hexdigest())
+          PY
+          sha256sum /tmp/simulation-a.json | awk '{print $1}' > /tmp/simulation.sha256
+
+      - name: Audit matched-pair, privacy and side-effect surface
+        run: |
+          python - <<'PY'
+          from __future__ import annotations
+
+          import ast
+          from pathlib import Path
+
+          path = Path('src/nextgen_memory/paired_rerank_policy_evaluation.py')
+          source = path.read_text(encoding='utf-8')
+          tree = ast.parse(source, filename=str(path))
+          forbidden_roots = {
+              'asyncio','httpx','os','pathlib','psycopg','pymongo','random',
+              'requests','socket','sqlalchemy','subprocess','temporalio','time','urllib',
+          }
+          forbidden_calls = {
+              'eval','exec','open','sleep','system','urlopen','uuid1','uuid4',
+              'write_bytes','write_text',
+          }
+          violations: list[str] = []
+          for node in ast.walk(tree):
+              if isinstance(node, ast.Pass):
+                  violations.append(f'{node.lineno}:pass')
+              elif isinstance(node, ast.Raise):
+                  exc = node.exc.func if isinstance(node.exc, ast.Call) else node.exc
+                  if (
+                      isinstance(exc, ast.Name) and exc.id == 'NotImplementedError'
+                  ) or (
+                      isinstance(exc, ast.Attribute) and exc.attr == 'NotImplementedError'
+                  ):
+                      violations.append(f'{node.lineno}:NotImplementedError')
+              elif isinstance(node, ast.Import):
+                  for alias in node.names:
+                      if alias.name.split('.', 1)[0] in forbidden_roots:
+                          violations.append(f'{node.lineno}:import:{alias.name}')
+              elif isinstance(node, ast.ImportFrom):
+                  if (node.module or '').split('.', 1)[0] in forbidden_roots:
+                      violations.append(f'{node.lineno}:import:{node.module}')
+              elif isinstance(node, ast.Call):
+                  name = node.func.id if isinstance(node.func, ast.Name) else node.func.attr if isinstance(node.func, ast.Attribute) else None
+                  if name in forbidden_calls:
+                      violations.append(f'{node.lineno}:call:{name}')
+          lowered = source.lower()
+          for marker in (
+              'postgresql://','mongodb://','http://','https://','password',
+              'credential','# todo','# fixme','raw_query','raw_prompt',
+              'response_text','memory_body','write_feedback','activate_policy',
+          ):
+              if marker in lowered:
+                  violations.append(f'text:{marker}')
+          if violations:
+              raise SystemExit('\n'.join(violations))
+          print('paired_policy_evaluation_side_effect_or_privacy_findings=0')
+          PY
+
+      - name: Build and install exact wheel outside checkout
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf wheelhouse /tmp/paired-evaluation-wheel-venv
+          python -m pip wheel --no-deps . -w wheelhouse
+          test "$(find wheelhouse -maxdepth 1 -type f -name '*.whl' | wc -l)" -eq 1
+          python -m venv /tmp/paired-evaluation-wheel-venv
+          /tmp/paired-evaluation-wheel-venv/bin/python -m pip install --no-deps wheelhouse/*.whl
+          /tmp/paired-evaluation-wheel-venv/bin/python - <<'PY'
+          from nextgen_memory.paired_rerank_policy_evaluation import (
+              PairedPolicyEvaluationConfig,
+              PairedPolicyVerdict,
+              PairedRerankPolicyEvaluator,
+              PairedRerankPolicyTrial,
+          )
+          assert PairedPolicyEvaluationConfig is not None
+          assert PairedPolicyVerdict.PROMISING.value == 'promising'
+          assert PairedRerankPolicyEvaluator is not None
+          assert PairedRerankPolicyTrial is not None
+          PY
+          /tmp/paired-evaluation-wheel-venv/bin/python -m pip check
+          sha256sum wheelhouse/*.whl | awk '{print $1}' > /tmp/wheel.sha256
+
+      - name: Publish immutable paired-evaluation candidate
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git push origin HEAD:refs/heads/candidate/paired-rerank-policy-evaluation-v0-20260824
+          body=$(cat <<EOF
+          ## Corrected paired-policy evaluation producer GREEN
+
+          - corrected telemetry base: \`$BASE_SHA\`
+          - paired-evaluation candidate: \`$CANDIDATE_SHA\`
+          - exact original PR #17 SHA \`67e7c0bc05165c1676541bd3ce7e648e3df54dc7\` is an ancestor
+          - exact seven-path scope, focused/full tests, deterministic simulation, matched-pair/privacy audit and isolated wheel import passed
+          - migration, dependency, workflow and corrective-retrieval changes: none
+          - merge, production database, feedback write, policy activation and release: none
+
+          Independent Python 3.12/3.13 exact-SHA verification and blind GPT-5.6 Sol review remain required.
+          EOF
+          )
+          gh api "repos/${{ github.repository }}/issues/17/comments" -f body="$body"
+          gh api "repos/${{ github.repository }}/issues/23/comments" -f body="$body"
