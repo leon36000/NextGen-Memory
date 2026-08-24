@@ -1,0 +1,37 @@
+name: Run advisory policy promotion finalizer v8
+
+on:
+  pull_request:
+
+concurrency:
+  group: advisory-policy-promotion-v0-finalize-v8-runner
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+jobs:
+  finalize:
+    if: github.event.pull_request.head.ref == 'bootstrap/finalize-advisory-policy-promotion-v8-20260824'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 55
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: bootstrap/finalize-advisory-policy-promotion-v8-20260824
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install development tools for the controller
+        run: python -m pip install -e '.[dev]'
+
+      - name: Execute fail-closed finalizer controller
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash .github/controllers/finalize_advisory_policy_promotion_v8.sh
