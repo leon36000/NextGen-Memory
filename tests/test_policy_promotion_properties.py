@@ -9,7 +9,6 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import UUID
 
-from nextgen_memory.paired_rerank_policy_evaluation import PairedPolicyVerdict
 from nextgen_memory.policy_promotion import (
     DeterministicPolicyPromotionGate,
     PolicyPromotionDisposition,
@@ -19,6 +18,8 @@ from nextgen_memory.policy_promotion import (
     PolicyVerificationSignal,
 )
 
+from nextgen_memory.paired_rerank_policy_evaluation import PairedPolicyVerdict
+
 ROOT = Path(__file__).resolve().parents[1]
 NOW = datetime(2026, 8, 24, 4, 0, tzinfo=UTC)
 SIGNALS = tuple(PolicyVerificationSignal)
@@ -27,16 +28,12 @@ SIGNALS = tuple(PolicyVerificationSignal)
 def evidence_for(index: int, **overrides: object) -> PolicyPromotionEvidence:
     values: dict[str, object] = {
         "space_id": UUID("00000000-0000-5000-8000-000000000e01"),
-        "candidate_policy_id": UUID(
-            f"00000000-0000-5000-8000-{index + 1:012x}"
-        ),
+        "candidate_policy_id": UUID(f"00000000-0000-5000-8000-{index + 1:012x}"),
         "evaluated_policy_version": "treatment-v1",
         "current_policy_version": "treatment-v1",
         "evaluated_policy_fingerprint": f"{index + 1:064x}"[-64:],
         "current_policy_fingerprint": f"{index + 1:064x}"[-64:],
-        "evaluation_id": UUID(
-            f"00000000-0000-5001-8000-{index + 1:012x}"
-        ),
+        "evaluation_id": UUID(f"00000000-0000-5001-8000-{index + 1:012x}"),
         "evaluation_content_hash": f"{index + 10_001:064x}"[-64:],
         "context_collection_hash": f"{index + 20_001:064x}"[-64:],
         "continuation_set_hash": f"{index + 30_001:064x}"[-64:],
@@ -51,9 +48,7 @@ def evidence_for(index: int, **overrides: object) -> PolicyPromotionEvidence:
         "evidence_at": NOW - timedelta(seconds=index % 1_000),
         "decision_at": NOW,
         "maximum_evidence_age_seconds": 86_400,
-        "rollback_plan_id": UUID(
-            f"00000000-0000-5002-8000-{index + 1:012x}"
-        ),
+        "rollback_plan_id": UUID(f"00000000-0000-5002-8000-{index + 1:012x}"),
         "rollback_plan_hash": f"{index + 40_001:064x}"[-64:],
         "rollback_ready": True,
         "required_signals": SIGNALS,
@@ -101,9 +96,7 @@ def test_five_thousand_generated_decisions_preserve_invariants() -> None:
         assert len(first.config_fingerprint) == 64
         assert json.loads(first.render_json())["disposition"] == expected.value
         if expected is PolicyPromotionDisposition.PROMOTE:
-            assert first.reasons == (
-                PolicyPromotionReason.ALL_REQUIREMENTS_SATISFIED,
-            )
+            assert first.reasons == (PolicyPromotionReason.ALL_REQUIREMENTS_SATISFIED,)
         elif expected is PolicyPromotionDisposition.HOLD:
             assert PolicyPromotionReason.INSUFFICIENT_TRIALS in first.reasons
         else:
@@ -138,9 +131,7 @@ def test_each_accepted_material_field_changes_evidence_identity() -> None:
     baseline = gate.evaluate(evidence)
     mutations: dict[str, object] = {
         "space_id": UUID("00000000-0000-5000-8000-000000000e99"),
-        "candidate_policy_id": UUID(
-            "00000000-0000-5000-8000-000000000e98"
-        ),
+        "candidate_policy_id": UUID("00000000-0000-5000-8000-000000000e98"),
         "evaluated_policy_version": "treatment-v2",
         "current_policy_version": "treatment-v2",
         "evaluated_policy_fingerprint": "f" * 64,
@@ -160,9 +151,7 @@ def test_each_accepted_material_field_changes_evidence_identity() -> None:
         "evidence_at": NOW - timedelta(seconds=2),
         "decision_at": NOW + timedelta(seconds=1),
         "maximum_evidence_age_seconds": 86_401,
-        "rollback_plan_id": UUID(
-            "00000000-0000-5000-8000-000000000e96"
-        ),
+        "rollback_plan_id": UUID("00000000-0000-5000-8000-000000000e96"),
         "rollback_plan_hash": "b" * 64,
         "rollback_ready": False,
         "required_signals": SIGNALS[:-1],
@@ -204,33 +193,25 @@ def test_generated_malformed_strings_are_fingerprinted_not_echoed() -> None:
 
     for index in range(250):
         sentinel = f"private-query-{index}"
-        decision = gate.evaluate(
-            evidence_for(index, evaluation_content_hash=sentinel)
-        )
+        decision = gate.evaluate(evidence_for(index, evaluation_content_hash=sentinel))
         rendered = decision.render_json()
 
         assert decision.disposition is PolicyPromotionDisposition.REJECT
-        assert decision.reasons == (
-            PolicyPromotionReason.MALFORMED_EVIDENCE,
-        )
+        assert decision.reasons == (PolicyPromotionReason.MALFORMED_EVIDENCE,)
         assert sentinel not in rendered
         assert "private-query" not in rendered
 
 
 def test_configuration_mutations_change_config_fingerprint() -> None:
     evidence = evidence_for(700_000)
-    baseline = DeterministicPolicyPromotionGate(
-        PolicyPromotionGateConfig()
-    ).evaluate(evidence)
+    baseline = DeterministicPolicyPromotionGate(PolicyPromotionGateConfig()).evaluate(evidence)
     configs = (
         PolicyPromotionGateConfig(minimum_paired_trials=17),
         PolicyPromotionGateConfig(minimum_confidence_lower_bound=0.001),
         PolicyPromotionGateConfig(maximum_standard_error=0.06),
         PolicyPromotionGateConfig(maximum_mean_cost_delta=0.06),
         PolicyPromotionGateConfig(maximum_harm_rate=0.02),
-        PolicyPromotionGateConfig(
-            established_negative_effect_tolerance=0.001
-        ),
+        PolicyPromotionGateConfig(established_negative_effect_tolerance=0.001),
         PolicyPromotionGateConfig(policy_version="policy-promotion-gate-v0.1"),
     )
 
@@ -241,11 +222,15 @@ def test_configuration_mutations_change_config_fingerprint() -> None:
 
 
 def test_process_hash_seed_does_not_change_decision_json() -> None:
-    script = r'''
+    script = r"""
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
 from nextgen_memory.paired_rerank_policy_evaluation import PairedPolicyVerdict
-from nextgen_memory.policy_promotion import DeterministicPolicyPromotionGate, PolicyPromotionEvidence, PolicyVerificationSignal
+from nextgen_memory.policy_promotion import (
+    DeterministicPolicyPromotionGate,
+    PolicyPromotionEvidence,
+    PolicyVerificationSignal,
+)
 now = datetime(2026, 8, 24, 4, 0, tzinfo=UTC)
 signals = set(PolicyVerificationSignal)
 evidence = PolicyPromotionEvidence(
@@ -284,7 +269,7 @@ evidence = PolicyPromotionEvidence(
     hard_safety_violation=False,
 )
 print(DeterministicPolicyPromotionGate().evaluate(evidence).render_json(), end="")
-'''
+"""
     outputs: list[str] = []
     for seed in ("1", "37", "999"):
         environment = dict(os.environ)

@@ -2,13 +2,11 @@ from __future__ import annotations
 
 import json
 import math
-from dataclasses import FrozenInstanceError, replace
+from dataclasses import FrozenInstanceError
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 import pytest
-
-from nextgen_memory.paired_rerank_policy_evaluation import PairedPolicyVerdict
 from nextgen_memory.policy_promotion import (
     DeterministicPolicyPromotionGate,
     PolicyPromotionDisposition,
@@ -19,6 +17,8 @@ from nextgen_memory.policy_promotion import (
     PolicyVerificationSignal,
     fingerprint_policy_promotion_config,
 )
+
+from nextgen_memory.paired_rerank_policy_evaluation import PairedPolicyVerdict
 
 NOW = datetime(2026, 8, 24, 3, 30, tzinfo=UTC)
 SPACE_ID = UUID("00000000-0000-5000-8000-000000000d01")
@@ -79,9 +79,7 @@ def test_fully_satisfied_promising_evidence_promotes() -> None:
     decision = evaluate(valid_evidence())
 
     assert decision.disposition is PolicyPromotionDisposition.PROMOTE
-    assert decision.reasons == (
-        PolicyPromotionReason.ALL_REQUIREMENTS_SATISFIED,
-    )
+    assert decision.reasons == (PolicyPromotionReason.ALL_REQUIREMENTS_SATISFIED,)
     assert decision.invalid_fields == ()
     assert decision.missing_signals == ()
     assert decision.candidate_policy_id == POLICY_ID

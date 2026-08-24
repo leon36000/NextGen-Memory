@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import nextgen_memory
 from nextgen_memory.policy_promotion import (
     DeterministicPolicyPromotionGate,
     PolicyPromotionDecision,
@@ -13,6 +12,8 @@ from nextgen_memory.policy_promotion import (
     PolicyVerificationSignal,
     fingerprint_policy_promotion_config,
 )
+
+import nextgen_memory
 
 
 def test_policy_promotion_contract_is_exported_from_package_root() -> None:
