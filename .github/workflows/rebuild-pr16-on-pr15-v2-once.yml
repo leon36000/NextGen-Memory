@@ -1,0 +1,225 @@
+name: Rebuild inherited rerank telemetry on corrected reranker v2
+
+on:
+  pull_request:
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+jobs:
+  rebuild:
+    if: github.event.pull_request.head.ref == 'bootstrap/rebuild-pr16-on-pr15-v2-20260824'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: bootstrap/rebuild-pr16-on-pr15-v2-20260824
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Merge exact PR16 over the corrected reranker candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git fetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*'
+          base_sha=$(git rev-parse origin/candidate/bounded-inherited-reranker-v0-20260823)
+          test "$base_sha" = '4d1317101800b11734d33175b1955f92a55ba3b5'
+          git cat-file -e 'd00992d20f970717268a8a7355f19ab487def4e9^{commit}'
+          git merge-base --is-ancestor ead611e8cd7caee5a59c6ce19b671625975e976e d00992d20f970717268a8a7355f19ab487def4e9
+          if git ls-remote --exit-code --heads origin candidate/inherited-rerank-telemetry-v0-20260824; then
+            echo 'immutable telemetry candidate already exists' >&2
+            exit 1
+          fi
+          git switch -c candidate/inherited-rerank-telemetry-v0-20260824 "$base_sha"
+          git merge --no-ff --no-edit d00992d20f970717268a8a7355f19ab487def4e9
+          git merge-base --is-ancestor "$base_sha" HEAD
+          git merge-base --is-ancestor d00992d20f970717268a8a7355f19ab487def4e9 HEAD
+          echo "BASE_SHA=$base_sha" >> "$GITHUB_ENV"
+          echo "CANDIDATE_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+
+      - name: Prove exact nine-path product scope
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t changed < <(git diff --name-only "$BASE_SHA"...HEAD | sort)
+          expected=(
+            docs/inherited-rerank-telemetry-v0-verification.md
+            docs/inherited-rerank-telemetry-v0.md
+            docs/superpowers/plans/2026-08-15-inherited-rerank-telemetry-v0.md
+            docs/superpowers/specs/2026-08-15-inherited-rerank-telemetry-v0-design.md
+            src/nextgen_memory/__init__.py
+            src/nextgen_memory/inherited_rerank_telemetry.py
+            tests/test_inherited_rerank_telemetry.py
+            tests/test_inherited_rerank_telemetry_properties.py
+            tests/test_inherited_rerank_telemetry_public_api.py
+          )
+          test "${#changed[@]}" -eq "${#expected[@]}"
+          diff -u <(printf '%s\n' "${expected[@]}" | sort) <(printf '%s\n' "${changed[@]}")
+          test -z "$(git diff --name-only "$BASE_SHA"...HEAD -- 'migrations/**' '.github/workflows/**' pyproject.toml 'src/nextgen_memory/corrective_retrieval_*')"
+          git diff --check "$BASE_SHA"...HEAD
+          test -z "$(git status --porcelain)"
+
+      - name: Install project and development tools
+        run: python -m pip install -e '.[dev]'
+
+      - name: Static, focused and complete telemetry verification
+        shell: bash
+        run: |
+          set -euo pipefail
+          ruff check .
+          python -m compileall -q src scripts
+          python -m pytest -q \
+            tests/test_inherited_rerank_telemetry.py \
+            tests/test_inherited_rerank_telemetry_properties.py \
+            tests/test_inherited_rerank_telemetry_public_api.py \
+            | tee /tmp/focused-tests.txt
+          python -m pytest -q | tee /tmp/full-tests.txt
+          git diff --check "$BASE_SHA"...HEAD
+
+      - name: Prove determinism through the actual public telemetry API
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json
+          from uuid import UUID
+
+          from nextgen_memory.bounded_inherited_reranker import (
+              BoundedInheritedRerankerConfig,
+          )
+          from nextgen_memory.inherited_rerank_telemetry import (
+              InheritedRerankTelemetryBatch,
+              build_inherited_rerank_telemetry,
+          )
+
+          arguments = {
+              'space_id': UUID('11111111-1111-1111-1111-111111111111'),
+              'router_decision_id': UUID('33333333-3333-3333-3333-333333333333'),
+              'config': BoundedInheritedRerankerConfig(),
+              'results': (),
+          }
+          first = build_inherited_rerank_telemetry(**arguments)
+          second = build_inherited_rerank_telemetry(**arguments)
+          if not isinstance(first, InheritedRerankTelemetryBatch):
+              raise SystemExit('public builder did not return a telemetry batch')
+          if first != second:
+              raise SystemExit('exact telemetry retry changed the immutable batch')
+          first_json = first.render_json()
+          if first_json != second.render_json():
+              raise SystemExit('exact telemetry retry changed rendered JSON')
+          decoded = json.loads(first_json)
+          if decoded.get('observations') != []:
+              raise SystemExit('empty telemetry batch contains observations')
+          if len(first.content_hash) != 64 or len(first.id.hex) != 32:
+              raise SystemExit('telemetry identity is malformed')
+          print(first_json, end='')
+          PY
+
+      - name: Audit telemetry privacy and side-effect surface
+        run: |
+          python - <<'PY'
+          from __future__ import annotations
+
+          import ast
+          from pathlib import Path
+
+          path = Path('src/nextgen_memory/inherited_rerank_telemetry.py')
+          source = path.read_text(encoding='utf-8')
+          tree = ast.parse(source, filename=str(path))
+          forbidden_roots = {
+              'asyncio','httpx','os','pathlib','psycopg','pymongo','random',
+              'requests','socket','sqlalchemy','subprocess','temporalio','time','urllib',
+          }
+          forbidden_calls = {
+              'eval','exec','open','sleep','system','urlopen','uuid1','uuid4',
+              'write_bytes','write_text',
+          }
+          violations: list[str] = []
+          for node in ast.walk(tree):
+              if isinstance(node, ast.Pass):
+                  violations.append(f'{node.lineno}:pass')
+              elif isinstance(node, ast.Raise):
+                  exc = node.exc.func if isinstance(node.exc, ast.Call) else node.exc
+                  if (
+                      isinstance(exc, ast.Name) and exc.id == 'NotImplementedError'
+                  ) or (
+                      isinstance(exc, ast.Attribute) and exc.attr == 'NotImplementedError'
+                  ):
+                      violations.append(f'{node.lineno}:NotImplementedError')
+              elif isinstance(node, ast.Import):
+                  for alias in node.names:
+                      if alias.name.split('.', 1)[0] in forbidden_roots:
+                          violations.append(f'{node.lineno}:import:{alias.name}')
+              elif isinstance(node, ast.ImportFrom):
+                  if (node.module or '').split('.', 1)[0] in forbidden_roots:
+                      violations.append(f'{node.lineno}:import:{node.module}')
+              elif isinstance(node, ast.Call):
+                  name = node.func.id if isinstance(node.func, ast.Name) else node.func.attr if isinstance(node.func, ast.Attribute) else None
+                  if name in forbidden_calls:
+                      violations.append(f'{node.lineno}:call:{name}')
+          lowered = source.lower()
+          for marker in (
+              'postgresql://','mongodb://','http://','https://','password',
+              'credential','# todo','# fixme','raw_query','raw_prompt',
+              'response_text','memory_body','combined_utility',
+          ):
+              if marker in lowered:
+                  violations.append(f'text:{marker}')
+          if violations:
+              raise SystemExit('\n'.join(violations))
+          print('telemetry_side_effect_or_privacy_findings=0')
+          PY
+
+      - name: Build and install exact wheel outside checkout
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf wheelhouse /tmp/telemetry-wheel-venv
+          python -m pip wheel --no-deps . -w wheelhouse
+          test "$(find wheelhouse -maxdepth 1 -type f -name '*.whl' | wc -l)" -eq 1
+          python -m venv /tmp/telemetry-wheel-venv
+          /tmp/telemetry-wheel-venv/bin/python -m pip install --no-deps wheelhouse/*.whl
+          /tmp/telemetry-wheel-venv/bin/python - <<'PY'
+          import nextgen_memory
+          from nextgen_memory import (
+              InheritedRerankTelemetryBatch,
+              build_inherited_rerank_telemetry,
+          )
+          assert InheritedRerankTelemetryBatch is not None
+          assert build_inherited_rerank_telemetry is not None
+          assert 'InheritedRerankTelemetryBatch' in nextgen_memory.__all__
+          assert 'build_inherited_rerank_telemetry' in nextgen_memory.__all__
+          PY
+          /tmp/telemetry-wheel-venv/bin/python -m pip check
+          sha256sum wheelhouse/*.whl | awk '{print $1}' > /tmp/wheel.sha256
+
+      - name: Publish immutable telemetry candidate and bounded evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git push origin HEAD:refs/heads/candidate/inherited-rerank-telemetry-v0-20260824
+          body=$(cat <<EOF
+          ## Corrected inherited-rerank telemetry producer GREEN
+
+          - corrected bounded-reranker base: \`$BASE_SHA\`
+          - telemetry candidate: \`$CANDIDATE_SHA\`
+          - exact original PR #16 SHA \`d00992d20f970717268a8a7355f19ab487def4e9\` is an ancestor
+          - exact nine-path scope, focused/full tests, actual public-API determinism, privacy/side-effect audit and isolated wheel import passed
+          - migrations, dependencies, workflows and corrective-retrieval sources changed: none
+          - merge, production database, activation and release: none
+
+          Independent Python 3.12/3.13 exact-SHA verification and blind GPT-5.6 Sol review remain required.
+          EOF
+          )
+          gh api "repos/${{ github.repository }}/issues/16/comments" -f body="$body"
+          gh api "repos/${{ github.repository }}/issues/23/comments" -f body="$body"
