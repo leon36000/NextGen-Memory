@@ -8,12 +8,6 @@ import sys
 from pathlib import Path
 from uuid import UUID
 
-from nextgen_memory.bounded_inherited_reranker import BoundedInheritedRerankerConfig
-from nextgen_memory.causal_credit import OutcomeMeasurement
-from nextgen_memory.inherited_rerank_telemetry import (
-    build_inherited_rerank_telemetry,
-    fingerprint_bounded_inherited_policy,
-)
 from nextgen_memory.paired_replay_experiment_registry import (
     BalancedPairedReplayPlanner,
     InMemoryPairedReplayExperimentRegistry,
@@ -23,6 +17,13 @@ from nextgen_memory.paired_replay_experiment_registry import (
     ReplayArm,
     ReplayFailureCode,
     ReplayPairStatus,
+)
+
+from nextgen_memory.bounded_inherited_reranker import BoundedInheritedRerankerConfig
+from nextgen_memory.causal_credit import OutcomeMeasurement
+from nextgen_memory.inherited_rerank_telemetry import (
+    build_inherited_rerank_telemetry,
+    fingerprint_bounded_inherited_policy,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -45,9 +46,7 @@ def spec_for(index: int, *, pair_limit: int = 8) -> PairedReplayExperimentSpec:
     control = config_for(ReplayArm.CONTROL)
     treatment = config_for(ReplayArm.TREATMENT)
     return PairedReplayExperimentSpec(
-        experiment_id=UUID(
-            f"00000000-0000-5000-8000-{index + 1:012x}"
-        ),
+        experiment_id=UUID(f"00000000-0000-5000-8000-{index + 1:012x}"),
         space_id=SPACE_ID,
         control_policy_version=control.policy_version,
         control_policy_fingerprint=fingerprint_bounded_inherited_policy(control),
@@ -90,10 +89,7 @@ def test_five_thousand_generated_plans_and_traces_preserve_invariants() -> None:
 
     for index in range(5_000):
         pair_count = (index % 8) + 1
-        contexts = tuple(
-            digest(f"context:{index}:{ordinal}")
-            for ordinal in range(pair_count)
-        )
+        contexts = tuple(digest(f"context:{index}:{ordinal}") for ordinal in range(pair_count))
         spec = spec_for(index)
         first = planner.plan(spec, contexts)
         second = planner.plan(spec, tuple(reversed(contexts)))
@@ -101,15 +97,8 @@ def test_five_thousand_generated_plans_and_traces_preserve_invariants() -> None:
         assert first == second
         assert first.id == second.id
         assert first.summary.pair_count == pair_count
-        assert (
-            first.summary.control_first_count
-            + first.summary.treatment_first_count
-            == pair_count
-        )
-        assert abs(
-            first.summary.control_first_count
-            - first.summary.treatment_first_count
-        ) <= 1
+        assert first.summary.control_first_count + first.summary.treatment_first_count == pair_count
+        assert abs(first.summary.control_first_count - first.summary.treatment_first_count) <= 1
         assert first.summary.worst_case_total_tokens == pair_count * 100
         assert first.summary.worst_case_total_latency_ms == pair_count * 50.0
         assert len({assignment.id for assignment in first.assignments}) == pair_count
@@ -187,24 +176,23 @@ def test_order_seed_changes_plan_but_not_context_pair_ids_for_generated_cases() 
         first = planner.plan(base, contexts)
         second = planner.plan(changed, contexts)
 
-        assert {
-            assignment.context_set_hash: assignment.id
-            for assignment in first.assignments
-        } == {
-            assignment.context_set_hash: assignment.id
-            for assignment in second.assignments
+        assert {assignment.context_set_hash: assignment.id for assignment in first.assignments} == {
+            assignment.context_set_hash: assignment.id for assignment in second.assignments
         }
         assert first.id != second.id
         assert first.content_hash != second.content_hash
 
 
 def test_process_hash_seed_does_not_change_plan_json() -> None:
-    script = r'''
+    script = r"""
 import hashlib
 from uuid import UUID
 from nextgen_memory.bounded_inherited_reranker import BoundedInheritedRerankerConfig
 from nextgen_memory.inherited_rerank_telemetry import fingerprint_bounded_inherited_policy
-from nextgen_memory.paired_replay_experiment_registry import BalancedPairedReplayPlanner, PairedReplayExperimentSpec
+from nextgen_memory.paired_replay_experiment_registry import (
+    BalancedPairedReplayPlanner,
+    PairedReplayExperimentSpec,
+)
 control = BoundedInheritedRerankerConfig(policy_version="control-v1")
 treatment = BoundedInheritedRerankerConfig(policy_version="treatment-v1")
 spec = PairedReplayExperimentSpec(
@@ -224,7 +212,7 @@ spec = PairedReplayExperimentSpec(
 )
 contexts = tuple(hashlib.sha256(f"context:{value}".encode()).hexdigest() for value in range(8))
 print(BalancedPairedReplayPlanner().plan(spec, set(contexts)).render_json(), end="")
-'''
+"""
     outputs: list[str] = []
     for seed in ("1", "2", "37", "999"):
         environment = dict(os.environ)

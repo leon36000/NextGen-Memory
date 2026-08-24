@@ -6,13 +6,6 @@ from dataclasses import FrozenInstanceError, replace
 from uuid import UUID
 
 import pytest
-
-from nextgen_memory.bounded_inherited_reranker import BoundedInheritedRerankerConfig
-from nextgen_memory.causal_credit import OutcomeMeasurement
-from nextgen_memory.inherited_rerank_telemetry import (
-    build_inherited_rerank_telemetry,
-    fingerprint_bounded_inherited_policy,
-)
 from nextgen_memory.paired_replay_experiment_registry import (
     BalancedPairedReplayPlanner,
     InMemoryPairedReplayExperimentRegistry,
@@ -23,9 +16,15 @@ from nextgen_memory.paired_replay_experiment_registry import (
     PairedReplayRegistryStateError,
     PairedReplayRegistryValidationError,
     ReplayArm,
-    ReplayArmOrder,
     ReplayFailureCode,
     ReplayPairStatus,
+)
+
+from nextgen_memory.bounded_inherited_reranker import BoundedInheritedRerankerConfig
+from nextgen_memory.causal_credit import OutcomeMeasurement
+from nextgen_memory.inherited_rerank_telemetry import (
+    build_inherited_rerank_telemetry,
+    fingerprint_bounded_inherited_policy,
 )
 
 EXPERIMENT_ID = UUID("00000000-0000-5000-8000-000000000901")
@@ -87,9 +86,7 @@ def result_for_step(
         results=(),
     )
     outcome = OutcomeMeasurement(
-        score=(0.4 if step.arm is ReplayArm.CONTROL else 0.5)
-        if score is None
-        else score,
+        score=(0.4 if step.arm is ReplayArm.CONTROL else 0.5) if score is None else score,
         task_success=True,
         tokens=tokens,
         latency_ms=latency_ms,
@@ -124,9 +121,7 @@ def test_plan_is_deterministic_balanced_and_input_order_invariant() -> None:
     assert tuple(item.ordinal for item in first.assignments) == (1, 2, 3, 4)
     assert first.summary.pair_count == 4
     assert first.summary.control_first_count + first.summary.treatment_first_count == 4
-    assert abs(
-        first.summary.control_first_count - first.summary.treatment_first_count
-    ) <= 1
+    assert abs(first.summary.control_first_count - first.summary.treatment_first_count) <= 1
     assert first.summary.worst_case_total_tokens == 800
     assert first.summary.worst_case_total_latency_ms == 400.0
     assert not hasattr(first, "__dict__")
@@ -370,9 +365,7 @@ def test_mismatched_router_decision_rejects_second_arm_without_mutation() -> Non
         registry.record_arm_result(
             result_for_step(
                 second,
-                router_decision_id=UUID(
-                    "00000000-0000-5000-8000-000000000904"
-                ),
+                router_decision_id=UUID("00000000-0000-5000-8000-000000000904"),
             )
         )
 
@@ -412,9 +405,7 @@ def test_failure_and_cancellation_are_terminal(
     with pytest.raises(PairedReplayRegistryStateError, match="terminal"):
         registry.record_arm_result(result_for_step(step))
     with pytest.raises(PairedReplayRegistryConflictError, match="failure conflict"):
-        registry.record_failure(
-            replace(failure, code=ReplayFailureCode.CANCELLED)
-        )
+        registry.record_failure(replace(failure, code=ReplayFailureCode.CANCELLED))
 
 
 def test_summary_counts_partition_pairs_and_account_resources() -> None:
@@ -424,22 +415,16 @@ def test_summary_counts_partition_pairs_and_account_resources() -> None:
     initial = registry.next_steps(EXPERIMENT_ID)
 
     registry.record_arm_result(result_for_step(initial[0], tokens=11, latency_ms=1.5))
-    registry.record_failure(
-        failure_for_step(initial[1], ReplayFailureCode.EXECUTION_FAILED)
-    )
+    registry.record_failure(failure_for_step(initial[1], ReplayFailureCode.EXECUTION_FAILED))
     registry.record_failure(failure_for_step(initial[2], ReplayFailureCode.CANCELLED))
     first_of_complete = initial[3]
-    registry.record_arm_result(
-        result_for_step(first_of_complete, tokens=13, latency_ms=2.5)
-    )
+    registry.record_arm_result(result_for_step(first_of_complete, tokens=13, latency_ms=2.5))
     second_of_complete = next(
         step
         for step in registry.next_steps(EXPERIMENT_ID)
         if step.pair_id == first_of_complete.pair_id
     )
-    registry.record_arm_result(
-        result_for_step(second_of_complete, tokens=17, latency_ms=3.5)
-    )
+    registry.record_arm_result(result_for_step(second_of_complete, tokens=17, latency_ms=3.5))
 
     summary = registry.summary(EXPERIMENT_ID)
 
