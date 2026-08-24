@@ -1,0 +1,93 @@
+# Finalization trigger after accepted RED 8c986904573a26cbb9055bfd1a94466943358034.
+name: Normalize policy promotion design whitespace once
+
+on:
+  pull_request:
+
+permissions:
+  contents: write
+
+jobs:
+  normalize:
+    if: github.event.pull_request.head.ref == 'feat/policy-promotion-gate-v0-20260824'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/policy-promotion-gate-v0-20260824
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install project and development tools
+        run: python -m pip install -e '.[dev]'
+
+      - name: Normalize only the approved design and tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('docs/superpowers/specs/2026-08-24-policy-promotion-gate-v0-design.md')
+          lines = path.read_text(encoding='utf-8').splitlines()
+          normalized = '\n'.join(line.rstrip() for line in lines) + '\n'
+          path.write_text(normalized, encoding='utf-8')
+          PY
+          files=(
+            tests/test_policy_promotion.py
+            tests/test_policy_promotion_properties.py
+            tests/test_policy_promotion_public_api.py
+          )
+          ruff check --fix "${files[@]}"
+          ruff format "${files[@]}"
+          ruff check "${files[@]}"
+          git diff --check
+
+      - name: Prove clean tests-only RED after normalization
+        shell: bash
+        run: |
+          set -euo pipefail
+          files=(
+            tests/test_policy_promotion.py
+            tests/test_policy_promotion_properties.py
+            tests/test_policy_promotion_public_api.py
+          )
+          python -m compileall -q "${files[@]}"
+          test ! -e src/nextgen_memory/policy_promotion.py
+          exact="ModuleNotFoundError: No module named 'nextgen_memory.policy_promotion'"
+          for file in "${files[@]}"; do
+            output="/tmp/$(basename "$file" .py).txt"
+            set +e
+            python -m pytest -q "$file" >"$output" 2>&1
+            rc=$?
+            set -e
+            test "$rc" -ne 0
+            grep -Fq "$exact" "$output"
+            if grep -F 'ModuleNotFoundError:' "$output" | grep -Fv "$exact"; then
+              echo "unexpected missing module in $file" >&2
+              cat "$output" >&2
+              exit 1
+            fi
+            if grep -Eq 'SyntaxError|IndentationError|NameError|ImportError:' "$output"; then
+              echo "unexpected RED class in $file" >&2
+              cat "$output" >&2
+              exit 1
+            fi
+            printf '%s\trc=%s\tpolicy_promotion_module_absent\n' "$file" "$rc"
+          done
+
+      - name: Remove transport and commit the normalized RED candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm .github/workflows/normalize-policy-promotion-design-whitespace-once.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git diff --cached --check
+          git commit -m 'test: normalize policy promotion RED contract'
+          git push origin HEAD:feat/policy-promotion-gate-v0-20260824
