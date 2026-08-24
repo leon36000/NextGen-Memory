@@ -1,0 +1,113 @@
+name: Diagnose policy promotion GREEN contract
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    if: github.event.pull_request.head.ref == 'feat/policy-promotion-gate-v0-20260824'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/policy-promotion-gate-v0-20260824
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install project and development tools
+        run: python -m pip install -e '.[dev]'
+
+      - name: Materialize package-root exports in the diagnostic workspace
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from __future__ import annotations
+
+          import ast
+          from pathlib import Path
+
+          path = Path('src/nextgen_memory/__init__.py')
+          source = path.read_text(encoding='utf-8')
+          names = (
+              'DeterministicPolicyPromotionGate',
+              'PolicyPromotionDecision',
+              'PolicyPromotionDisposition',
+              'PolicyPromotionEvidence',
+              'PolicyPromotionGateConfig',
+              'PolicyPromotionReason',
+              'PolicyPromotionSafeMetrics',
+              'PolicyPromotionValidationError',
+              'PolicyVerificationSignal',
+              'fingerprint_policy_promotion_config',
+          )
+          if 'from .policy_promotion import (' not in source:
+              block = 'from .policy_promotion import (\n' + ''.join(
+                  f'    {name},\n' for name in names
+              ) + ')\n'
+              marker = 'from .provenance_credit import ('
+              if source.count(marker) != 1:
+                  raise SystemExit('provenance-credit marker drift')
+              source = source.replace(marker, block + marker, 1)
+
+          tree = ast.parse(source)
+          assignment = next(
+              statement
+              for statement in tree.body
+              if isinstance(statement, ast.Assign)
+              and any(
+                  isinstance(target, ast.Name) and target.id == '__all__'
+                  for target in statement.targets
+              )
+          )
+          if not isinstance(assignment.value, ast.List):
+              raise SystemExit('__all__ must remain a literal list')
+          current = [
+              item.value
+              for item in assignment.value.elts
+              if isinstance(item, ast.Constant) and isinstance(item.value, str)
+          ]
+          if len(current) != len(assignment.value.elts):
+              raise SystemExit('__all__ contains a non-string entry')
+          merged = sorted(set(current).union(names))
+          start = source.index('__all__ = [')
+          end = source.index('\n]', start) + 2
+          source = (
+              source[:start]
+              + '__all__ = [\n'
+              + ''.join(f'    "{name}",\n' for name in merged)
+              + ']'
+              + source[end:]
+          )
+          ast.parse(source)
+          path.write_text(source, encoding='utf-8')
+          PY
+
+      - name: Normalize module and tests locally
+        run: |
+          files=(
+            src/nextgen_memory/__init__.py
+            src/nextgen_memory/policy_promotion.py
+            tests/test_policy_promotion.py
+            tests/test_policy_promotion_properties.py
+            tests/test_policy_promotion_public_api.py
+          )
+          ruff check --fix "${files[@]}"
+          ruff format "${files[@]}"
+          ruff check "${files[@]}"
+          python -m compileall -q src scripts
+          git diff --check
+
+      - name: Run focused policy promotion contracts
+        run: |
+          python -m pytest -q \
+            tests/test_policy_promotion.py \
+            tests/test_policy_promotion_properties.py \
+            tests/test_policy_promotion_public_api.py
