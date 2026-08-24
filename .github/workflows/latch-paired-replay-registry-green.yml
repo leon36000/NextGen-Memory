@@ -1,0 +1,377 @@
+name: Latch paired replay registry exact evidence
+
+on:
+  pull_request:
+
+permissions:
+  actions: read
+  contents: write
+  issues: write
+  pull-requests: write
+
+jobs:
+  latch:
+    if: github.event.pull_request.head.ref == 'bootstrap/latch-paired-replay-registry-green-20260824'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve exact product, verifier, and canonical PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          encode() {
+            python -c 'import sys,urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$1"
+          }
+
+          base_branch='candidate/paired-rerank-policy-evaluation-v0-20260824'
+          product_branch='candidate/paired-replay-experiment-registry-v0-20260824'
+          verifier_branch='bootstrap/verify-paired-registry-exact-20260824'
+          workflow_name='Verify paired replay registry exact SHA'
+
+          base_sha=$(gh api "repos/$REPO/branches/$(encode "$base_branch")" --jq '.commit.sha')
+          candidate_sha=$(gh api "repos/$REPO/branches/$(encode "$product_branch")" --jq '.commit.sha')
+          test "$base_sha" = '847ea08e9e9a0d9193adac6d465557270da6ef7d'
+          test "$candidate_sha" != "$base_sha"
+
+          run=$(gh api --method GET "repos/$REPO/actions/runs" \
+            -f branch="$verifier_branch" -f event=pull_request -f per_page=100 \
+            --jq ".workflow_runs | map(select(.name == \"$workflow_name\" and .status == \"completed\" and .conclusion == \"success\")) | sort_by(.created_at) | last // empty")
+          test -n "$run"
+          run_id=$(printf '%s' "$run" | jq -r '.id')
+          jobs=$(gh api --method GET "repos/$REPO/actions/runs/$run_id/jobs" -f per_page=100)
+          test "$(printf '%s' "$jobs" | jq '[.jobs[] | select(.conclusion != "success")] | length')" -eq 0
+          test "$(printf '%s' "$jobs" | jq '[.jobs[] | select(.status == "completed" and .conclusion == "success")] | length')" -ge 4
+
+          pulls=$(gh api --method GET "repos/$REPO/pulls" \
+            -f state=all -f head="leon36000:$product_branch" -f per_page=100)
+          count=$(printf '%s' "$pulls" | jq 'length')
+          if [ "$count" -eq 0 ]; then
+            pr_url=$(gh pr create --repo "$REPO" \
+              --base "$base_branch" \
+              --head "$product_branch" \
+              --title 'feat: paired replay experiment registry v0' \
+              --draft \
+              --body "verification_pending for exact SHA $candidate_sha")
+            product_pr=${pr_url##*/}
+          else
+            test "$count" -eq 1
+            product_pr=$(printf '%s' "$pulls" | jq -r '.[0].number')
+            test "$(printf '%s' "$pulls" | jq -r '.[0].state')" = open
+            test "$(printf '%s' "$pulls" | jq -r '.[0].draft')" = true
+            test "$(printf '%s' "$pulls" | jq -r '.[0].head.sha')" = "$candidate_sha"
+            test "$(printf '%s' "$pulls" | jq -r '.[0].base.ref')" = "$base_branch"
+          fi
+
+          git fetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*'
+          git switch --detach "$candidate_sha"
+          test "$(git rev-parse HEAD)" = "$candidate_sha"
+          test "$(git merge-base HEAD "$base_sha")" = "$base_sha"
+          mapfile -t changed < <(git diff --name-only "$base_sha"...HEAD | sort)
+          expected=(
+            docs/superpowers/plans/2026-08-24-paired-replay-experiment-registry-v0.md
+            docs/superpowers/specs/2026-08-15-paired-replay-experiment-registry-v0-design.md
+            src/nextgen_memory/__init__.py
+            src/nextgen_memory/paired_replay_experiment_registry.py
+            tests/test_paired_replay_experiment_registry.py
+            tests/test_paired_replay_experiment_registry_properties.py
+            tests/test_paired_replay_experiment_registry_public_api.py
+          )
+          test "${#changed[@]}" -eq "${#expected[@]}"
+          diff -u <(printf '%s\n' "${expected[@]}" | sort) <(printf '%s\n' "${changed[@]}")
+          test -z "$(git diff --name-only "$base_sha"...HEAD -- 'migrations/**' '.github/workflows/**' pyproject.toml 'src/nextgen_memory/corrective_retrieval_*')"
+          git diff --check "$base_sha"...HEAD
+
+          jq -n \
+            --arg base_branch "$base_branch" \
+            --arg base_sha "$base_sha" \
+            --arg product_branch "$product_branch" \
+            --arg candidate_sha "$candidate_sha" \
+            --arg verifier_branch "$verifier_branch" \
+            --argjson verifier_run "$run_id" \
+            --argjson product_pr "$product_pr" \
+            '{base_branch:$base_branch,base_sha:$base_sha,product_branch:$product_branch,candidate_sha:$candidate_sha,verifier_branch:$verifier_branch,verifier_run:$verifier_run,product_pr:$product_pr}' \
+            > /tmp/resolved.json
+          cat /tmp/resolved.json
+
+      - name: Download and independently validate exact verifier artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          run_id=$(jq -r '.verifier_run' /tmp/resolved.json)
+          candidate_sha=$(jq -r '.candidate_sha' /tmp/resolved.json)
+          rm -rf /tmp/paired-registry-artifacts
+          mkdir -p /tmp/paired-registry-artifacts
+          gh run download "$run_id" --repo "$REPO" --dir /tmp/paired-registry-artifacts
+
+          gh api --method GET "repos/$REPO/actions/runs/$run_id/artifacts" -f per_page=100 \
+            --jq '[.artifacts[] | {id,name,digest,expired,size_in_bytes}]' \
+            > /tmp/artifact-metadata.json
+          test "$(jq '[.[] | select(.expired == true)] | length' /tmp/artifact-metadata.json)" -eq 0
+          test "$(jq 'length' /tmp/artifact-metadata.json)" -ge 3
+
+          CANDIDATE_SHA="$candidate_sha" python - <<'PY'
+          from __future__ import annotations
+
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+
+          root = Path('/tmp/paired-registry-artifacts')
+          reports = sorted(root.rglob('verification.json'))
+          states = sorted(root.rglob('registry-state.json'))
+          summaries = sorted(root.rglob('cross-python-summary.json'))
+          if tuple(map(len, (reports, states, summaries))) != (2, 2, 1):
+              raise SystemExit('incomplete paired-registry artifact set')
+
+          documents = [json.loads(path.read_text(encoding='utf-8')) for path in reports]
+          state_documents = [json.loads(path.read_text(encoding='utf-8')) for path in states]
+          summary = json.loads(summaries[0].read_text(encoding='utf-8'))
+          candidate_sha = os.environ['CANDIDATE_SHA']
+
+          if {document['candidate_sha'] for document in documents} != {candidate_sha}:
+              raise SystemExit('verification artifact candidate SHA drift')
+          if {'.'.join(document['python_version'].split('.')[:2]) for document in documents} != {'3.12', '3.13'}:
+              raise SystemExit('unexpected Python evidence set')
+          if any(document['focused_test_count'] <= 0 for document in documents):
+              raise SystemExit('focused test count is not positive')
+          if any(document['full_test_count'] <= 351 for document in documents):
+              raise SystemExit('full suite did not include the registry tests')
+          if any(document['hash_seed_invariant'] is not True for document in documents):
+              raise SystemExit('hash-seed invariance was not proved')
+          if states[0].read_bytes() != states[1].read_bytes():
+              raise SystemExit('registry state differs across Python versions')
+
+          state_hash = hashlib.sha256(states[0].read_bytes()).hexdigest()
+          if {document['registry_state_sha256'] for document in documents} != {state_hash}:
+              raise SystemExit('registry-state digest differs from per-Python evidence')
+          if summary['candidate_sha'] != candidate_sha:
+              raise SystemExit('cross-Python summary candidate SHA drift')
+          if summary['cross_python_registry_state_identical'] is not True:
+              raise SystemExit('cross-Python registry identity was not proved')
+          if summary['registry_state_sha256'] != state_hash:
+              raise SystemExit('cross-Python summary digest drift')
+
+          state = state_documents[0]
+          partition = state['summary']
+          expected = {
+              'pair_count': 4,
+              'planned_count': 1,
+              'first_arm_recorded_count': 0,
+              'complete_count': 1,
+              'failed_count': 1,
+              'cancelled_count': 1,
+              'recorded_arm_count': 2,
+              'completed_trial_count': 1,
+              'actual_tokens': 24,
+              'actual_latency_ms': 5.0,
+          }
+          for key, value in expected.items():
+              if partition[key] != value:
+                  raise SystemExit(f'unexpected registry state partition: {key}')
+
+          evidence = {
+              'candidate_sha': candidate_sha,
+              'cross_python_registry_state_identical': True,
+              'focused_test_count_each': summary['focused_test_count_each'],
+              'full_test_count_each': summary['full_test_count_each'],
+              'python_versions': summary['python_versions'],
+              'registry_state_sha256': state_hash,
+              'wheel_sha256_by_python': {
+                  '.'.join(document['python_version'].split('.')[:2]): document['wheel_sha256']
+                  for document in documents
+              },
+          }
+          Path('/tmp/validated-evidence.json').write_text(
+              json.dumps(evidence, ensure_ascii=False, allow_nan=False, sort_keys=True, separators=(',', ':')) + '\n',
+              encoding='utf-8',
+          )
+          print(Path('/tmp/validated-evidence.json').read_text(encoding='utf-8'), end='')
+          PY
+
+      - name: Build canonical evidence and checkpoint envelopes
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from __future__ import annotations
+
+          import hashlib
+          import json
+          from pathlib import Path
+
+          resolved = json.loads(Path('/tmp/resolved.json').read_text(encoding='utf-8'))
+          validated = json.loads(Path('/tmp/validated-evidence.json').read_text(encoding='utf-8'))
+          artifacts = json.loads(Path('/tmp/artifact-metadata.json').read_text(encoding='utf-8'))
+          evidence = {
+              'status': 'green_review_pending_unmerged',
+              'repository': 'leon36000/NextGen-Memory',
+              'base': {
+                  'pull_request': 134,
+                  'branch': resolved['base_branch'],
+                  'sha': resolved['base_sha'],
+              },
+              'registry': {
+                  'pull_request': resolved['product_pr'],
+                  'branch': resolved['product_branch'],
+                  'sha': resolved['candidate_sha'],
+                  'verifier_branch': resolved['verifier_branch'],
+                  'verifier_run': resolved['verifier_run'],
+                  'focused_test_count_each': validated['focused_test_count_each'],
+                  'full_test_count_each': validated['full_test_count_each'],
+                  'python_versions': validated['python_versions'],
+                  'registry_state_sha256': validated['registry_state_sha256'],
+                  'wheel_sha256_by_python': validated['wheel_sha256_by_python'],
+                  'artifacts': artifacts,
+                  'sol_verdict': 'pending',
+                  'merge_allowed': False,
+              },
+              'contract': {
+                  'deterministic_counterbalanced_plan': True,
+                  'pair_identity_independent_of_order_seed': True,
+                  'worst_case_resource_preflight': True,
+                  'one_schedulable_arm_per_pair': True,
+                  'exact_retry_idempotence': True,
+                  'immutable_conflict_rejection': True,
+                  'matched_trial_only_after_two_arms': True,
+                  'terminal_failure_and_cancellation': True,
+                  'generated_trace_count': 5000,
+                  'cross_python_registry_state_identical': True,
+                  'persistence_or_execution_surface': False,
+              },
+              'safety': {
+                  'merged': False,
+                  'production_database_contacted': False,
+                  'production_migration_applied': False,
+                  'production_application_data_written': False,
+                  'model_or_agent_executed': False,
+                  'feedback_written': False,
+                  'policy_activated': False,
+                  'release_published': False,
+                  'corrective_retrieval_changed': False,
+                  'tests_weakened': False,
+                  'stubs_added': False,
+                  'sol_verdict_fabricated': False,
+              },
+          }
+          raw = json.dumps(evidence, ensure_ascii=False, allow_nan=False, sort_keys=True, separators=(',', ':')) + '\n'
+          Path('/tmp/evidence.json').write_text(raw, encoding='utf-8')
+          checkpoint = {
+              'checkpoint_key': 'm-head:paired-replay-experiment-registry-v0:green-readback:20260824',
+              'status': evidence['status'],
+              'repository': evidence['repository'],
+              'evidence_sha256': hashlib.sha256(raw.encode('utf-8')).hexdigest(),
+              'base': evidence['base'],
+              'registry': evidence['registry'],
+              'contract': evidence['contract'],
+              'safety': evidence['safety'],
+              'next_action': (
+                  'Obtain a genuine exact-SHA GPT-5.6 Sol verdict. Integrate only '
+                  'after PR #134 and all prerequisites. Merge does not authorize '
+                  'execution, persistence, feedback, or policy activation.'
+              ),
+          }
+          Path('/tmp/checkpoint.json').write_text(
+              json.dumps(checkpoint, ensure_ascii=False, allow_nan=False, sort_keys=True, separators=(',', ':')) + '\n',
+              encoding='utf-8',
+          )
+          print(Path('/tmp/checkpoint.json').read_text(encoding='utf-8'), end='')
+          PY
+
+      - name: Publish immutable evidence and checkpoint branches
+        shell: bash
+        run: |
+          set -euo pipefail
+          base_sha=$(jq -r '.base_sha' /tmp/resolved.json)
+          evidence_branch='evidence/paired-replay-registry-green-20260824'
+          checkpoint_branch='evidence/paired-replay-registry-checkpoint-20260824'
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git fetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*'
+
+          if git ls-remote --exit-code --heads origin "$evidence_branch"; then
+            git switch --detach "origin/$evidence_branch"
+            cmp /tmp/evidence.json evidence/paired-replay-registry-green-20260824.json
+          else
+            git switch -c "$evidence_branch" "$base_sha"
+            mkdir -p evidence
+            cp /tmp/evidence.json evidence/paired-replay-registry-green-20260824.json
+            git add evidence/paired-replay-registry-green-20260824.json
+            git diff --cached --check
+            git commit -m 'evidence: certify paired replay registry exact SHA'
+            git push origin HEAD:"refs/heads/$evidence_branch"
+          fi
+
+          if git ls-remote --exit-code --heads origin "$checkpoint_branch"; then
+            git switch --detach "origin/$checkpoint_branch"
+            cmp /tmp/checkpoint.json evidence/paired-replay-registry-checkpoint-20260824.json
+          else
+            git switch -c "$checkpoint_branch" "origin/$evidence_branch"
+            cp /tmp/checkpoint.json evidence/paired-replay-registry-checkpoint-20260824.json
+            git add evidence/paired-replay-registry-checkpoint-20260824.json
+            git diff --cached --check
+            git commit -m 'evidence: checkpoint paired replay registry exact SHA'
+            git push origin HEAD:"refs/heads/$checkpoint_branch"
+          fi
+
+      - name: Update canonical PR and publish blind Sol packet
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          pr=$(jq -r '.product_pr' /tmp/resolved.json)
+          sha=$(jq -r '.candidate_sha' /tmp/resolved.json)
+          run=$(jq -r '.verifier_run' /tmp/resolved.json)
+          focused=$(jq -r '.focused_test_count_each' /tmp/validated-evidence.json)
+          full=$(jq -r '.full_test_count_each' /tmp/validated-evidence.json)
+          state_hash=$(jq -r '.registry_state_sha256' /tmp/validated-evidence.json)
+
+          cat > /tmp/pr-body.md <<EOF
+          ## Status
+
+          **GREEN / draft / review_pending / unmerged.** Exact immutable candidate SHA: \`$sha\`.
+
+          Base paired-policy evaluation: \`847ea08e9e9a0d9193adac6d465557270da6ef7d\` from PR #134. Exact verifier run: \`$run\`.
+
+          The candidate adds a pure deterministic in-memory paired replay planner and state machine. It counterbalances arm order, reserves worst-case token/latency budgets before registration, exposes only the currently schedulable arm, rejects immutable conflicts, creates a complete evaluator trial only after two matched arms, and keeps failures/cancellations terminal. It has no persistence, database, network, worker, lease, model execution, feedback, policy activation, migration or corrective-retrieval surface.
+
+          Python 3.12 and 3.13 exact verification passed Ruff, compileall, \`$focused\` focused tests and \`$full\` complete tests per version, 5,000 generated traces, hash-seed invariance, strict privacy/stub audit, isolated wheel imports, and byte-identical mixed registry state across Python versions. Registry-state SHA-256: \`$state_hash\`.
+
+          No merge or production operation occurred. A genuine independent GPT-5.6 Sol \`APPROVE\` on this unchanged SHA is required before merge.
+          EOF
+          gh api --method PATCH "repos/$REPO/pulls/$pr" --raw-field body="$(cat /tmp/pr-body.md)" >/dev/null
+
+          packet=$(cat <<EOF
+          ## Blind GPT-5.6 Sol review request — Paired Replay Experiment Registry v0
+
+          Return exactly one verdict: \`APPROVE\`, \`CHANGES_REQUIRED\`, or \`BLOCKED_BY_EVIDENCE\`.
+
+          Exact boundary: base \`847ea08e9e9a0d9193adac6d465557270da6ef7d\`, candidate \`$sha\`, branch \`candidate/paired-replay-experiment-registry-v0-20260824\`, PR #$pr, verifier run \`$run\`. Any SHA movement invalidates this request.
+
+          Review identity domain separation, pair-ID independence from order seed, arm-order balance, resource preflight, bool/non-finite rejection, one-arm scheduling, pre-mutation validation, retry idempotence/conflicts, matched telemetry/router/policy identity, terminal states, summary/resource conservation, deterministic ordering, privacy, and absence of hidden execution or persistence.
+
+          Evidence: Python 3.12/3.13 exact matrices passed \`$focused\` focused and \`$full\` full tests per version, 5,000 generated plans/traces, independent hash seeds, isolated wheel imports, strict audit, and cross-Python identical registry state SHA-256 \`$state_hash\`. Inspect the exact seven-file diff, tests, logs and artifacts; do not rely on this prose as proof.
+          EOF
+          )
+          gh api "repos/$REPO/issues/$pr/comments" -f body="$packet"
+          gh api "repos/$REPO/issues/132/comments" -f body="$packet"
+          gh api "repos/$REPO/issues/23/comments" -f body="$packet"
+
+      - name: Close this latch without merge
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SELF_PR: ${{ github.event.pull_request.number }}
+        run: gh api --method PATCH "repos/$REPO/pulls/$SELF_PR" -f state=closed >/dev/null
