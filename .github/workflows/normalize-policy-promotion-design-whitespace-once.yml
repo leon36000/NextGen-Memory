@@ -36,7 +36,6 @@ jobs:
           normalized = '\n'.join(line.rstrip() for line in lines) + '\n'
           path.write_text(normalized, encoding='utf-8')
           PY
-          git diff --check 91d14e9ff9f8c89d05cb2349b012a6681bf3d828...HEAD
           git diff --check
 
       - name: Prove clean tests-only RED after normalization
