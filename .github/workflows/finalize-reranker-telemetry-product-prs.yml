@@ -1,0 +1,258 @@
+name: Finalize immutable reranker telemetry product PRs
+
+on:
+  pull_request:
+
+permissions:
+  actions: read
+  contents: write
+  issues: write
+  pull-requests: write
+
+jobs:
+  finalize:
+    if: github.event.pull_request.head.ref == 'bootstrap/finalize-reranker-telemetry-product-prs-20260823'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve immutable candidates and successful exact verifiers
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          encode() { python -c 'import sys,urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$1"; }
+          branch_sha() { gh api "repos/$REPO/branches/$(encode "$1")" --jq '.commit.sha'; }
+          latest_run() {
+            local branch=$1 name=$2
+            gh api --method GET "repos/$REPO/actions/runs" \
+              -f branch="$branch" -f event=pull_request -f per_page=100 \
+              --jq ".workflow_runs | map(select(.name == \"$name\")) | sort_by(.created_at) | last // empty"
+          }
+          prove_run() {
+            local payload=$1 minimum=$2
+            test -n "$payload"
+            test "$(printf '%s' "$payload" | jq -r '.status')" = completed
+            test "$(printf '%s' "$payload" | jq -r '.conclusion')" = success
+            local id jobs
+            id=$(printf '%s' "$payload" | jq -r '.id')
+            jobs=$(gh api --method GET "repos/$REPO/actions/runs/$id/jobs" -f per_page=100)
+            test "$(printf '%s' "$jobs" | jq '[.jobs[] | select(.conclusion != "success")] | length')" -eq 0
+            test "$(printf '%s' "$jobs" | jq '[.jobs[] | select(.status == "completed" and .conclusion == "success")] | length')" -ge "$minimum"
+          }
+
+          reader_sha=$(branch_sha candidate/learning-evidence-reader-v0-20260823)
+          reranker_sha=$(branch_sha candidate/bounded-inherited-reranker-v0-20260823)
+          telemetry_sha=$(branch_sha candidate/inherited-rerank-telemetry-v0-20260823)
+          test "$reader_sha" = f0546ef4980239c4993baac8780c12975e91377c
+          test "$reranker_sha" = 4d1317101800b11734d33175b1955f92a55ba3b5
+
+          reranker_run=$(latest_run bootstrap/verify-pr15-4d131710-v2-20260823 'Reverify bounded inherited reranker exact SHA')
+          telemetry_run=$(latest_run bootstrap/verify-telemetry-v0-exact-20260823 'Verify inherited rerank telemetry exact candidate')
+          prove_run "$reranker_run" 3
+          prove_run "$telemetry_run" 4
+
+          reranker_run_id=$(printf '%s' "$reranker_run" | jq -r '.id')
+          telemetry_run_id=$(printf '%s' "$telemetry_run" | jq -r '.id')
+          jq -n \
+            --arg reader_sha "$reader_sha" \
+            --arg reranker_sha "$reranker_sha" \
+            --arg telemetry_sha "$telemetry_sha" \
+            --argjson reranker_run "$reranker_run_id" \
+            --argjson telemetry_run "$telemetry_run_id" \
+            '{reader_sha:$reader_sha,reranker_sha:$reranker_sha,telemetry_sha:$telemetry_sha,reranker_run:$reranker_run,telemetry_run:$telemetry_run}' \
+            > /tmp/resolved.json
+          cat /tmp/resolved.json
+
+      - name: Download and validate exact cross-Python summaries
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          reranker_run=$(jq -r '.reranker_run' /tmp/resolved.json)
+          telemetry_run=$(jq -r '.telemetry_run' /tmp/resolved.json)
+          reranker_sha=$(jq -r '.reranker_sha' /tmp/resolved.json)
+          telemetry_sha=$(jq -r '.telemetry_sha' /tmp/resolved.json)
+          rm -rf /tmp/reranker-summary /tmp/telemetry-summary
+          gh run download "$reranker_run" --repo "$REPO" \
+            --name bounded-reranker-v2-cross-python-summary \
+            --dir /tmp/reranker-summary
+          gh run download "$telemetry_run" --repo "$REPO" \
+            --name telemetry-exact-cross-python-summary \
+            --dir /tmp/telemetry-summary
+          RERANKER_SHA="$reranker_sha" TELEMETRY_SHA="$telemetry_sha" python - <<'PY'
+          from __future__ import annotations
+
+          import json
+          import os
+          from pathlib import Path
+
+          reranker_path = next(Path('/tmp/reranker-summary').rglob('cross-python-summary.json'))
+          telemetry_path = next(Path('/tmp/telemetry-summary').rglob('cross-python-summary.json'))
+          reranker = json.loads(reranker_path.read_text(encoding='utf-8'))
+          telemetry = json.loads(telemetry_path.read_text(encoding='utf-8'))
+          if reranker.get('candidate_sha') != os.environ['RERANKER_SHA']:
+              raise SystemExit('reranker summary SHA drift')
+          if telemetry.get('candidate_sha') != os.environ['TELEMETRY_SHA']:
+              raise SystemExit('telemetry summary SHA drift')
+          if reranker.get('cross_python_semantic_evidence_identical') is not True:
+              raise SystemExit('reranker semantic evidence is not cross-Python identical')
+          if telemetry.get('cross_python_semantic_evidence_identical') is not True:
+              raise SystemExit('telemetry semantic evidence is not cross-Python identical')
+          evidence = {'reranker': reranker, 'telemetry': telemetry}
+          Path('/tmp/evidence.json').write_text(
+              json.dumps(evidence, ensure_ascii=False, allow_nan=False, sort_keys=True, separators=(',', ':')) + '\n',
+              encoding='utf-8',
+          )
+          print(Path('/tmp/evidence.json').read_text(encoding='utf-8'), end='')
+          PY
+
+      - name: Create or resolve exact draft product PRs and replace their bodies
+        id: products
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          resolve_or_create() {
+            local head=$1 base=$2 title=$3 body_file=$4
+            local pulls number
+            pulls=$(gh api --method GET "repos/$REPO/pulls" \
+              -f state=all -f head="leon36000:$head" -f per_page=100)
+            if [ "$(printf '%s' "$pulls" | jq 'length')" -eq 0 ]; then
+              number=$(gh pr create --repo "$REPO" --head "$head" --base "$base" \
+                --title "$title" --body-file "$body_file" --draft | sed 's#.*/##')
+            else
+              test "$(printf '%s' "$pulls" | jq 'length')" -eq 1
+              number=$(printf '%s' "$pulls" | jq -r '.[0].number')
+              test "$(printf '%s' "$pulls" | jq -r '.[0].state')" = open
+              test "$(printf '%s' "$pulls" | jq -r '.[0].draft')" = true
+              test "$(printf '%s' "$pulls" | jq -r '.[0].base.ref')" = "$base"
+              gh api --method PATCH "repos/$REPO/pulls/$number" \
+                --raw-field body="$(cat "$body_file")" >/dev/null
+            fi
+            printf '%s\n' "$number"
+          }
+
+          reader_sha=$(jq -r '.reader_sha' /tmp/resolved.json)
+          reranker_sha=$(jq -r '.reranker_sha' /tmp/resolved.json)
+          telemetry_sha=$(jq -r '.telemetry_sha' /tmp/resolved.json)
+          reranker_run=$(jq -r '.reranker_run' /tmp/resolved.json)
+          telemetry_run=$(jq -r '.telemetry_run' /tmp/resolved.json)
+          reranker_focused=$(jq -r '.reranker.focused_test_count' /tmp/evidence.json)
+          reranker_full=$(jq -r '.reranker.full_test_count' /tmp/evidence.json)
+          telemetry_focused=$(jq -r '.telemetry.focused_test_count' /tmp/evidence.json)
+          telemetry_full=$(jq -r '.telemetry.full_test_count' /tmp/evidence.json)
+          telemetry_properties=$(jq -r '.telemetry.property_test_count' /tmp/evidence.json)
+
+          cat > /tmp/reranker-body.md <<EOF
+          ## Status
+
+          **GREEN / draft / review_pending / unmerged.** Exact immutable candidate SHA: \`$reranker_sha\`.
+
+          Base learning-evidence reader: \`$reader_sha\`. Exact verifier run: \`$reranker_run\`.
+
+          The candidate has an exact twelve-path surface and introduces a deterministic bounded inherited-evidence reranker with no migration, persistence, dependency, network, activation or corrective-retrieval change. Direct evidence remains the explicit base score; inherited evidence contributes only a conservative, non-negative, threshold-gated and capped bonus.
+
+          Python 3.12/3.13 exact verification passed Ruff, compileall, \`$reranker_focused\` focused tests, \`$reranker_full\` complete tests, fixed-seed simulation semantics, causal/privacy audit, PostgreSQL 18 two-pass inherited-credit regression, isolated wheel import and cross-Python semantic comparison.
+
+          No merge, deployment, production database write, policy activation or release occurred. Merge remains forbidden until a genuine independent GPT-5.6 Sol \`APPROVE\` verdict is tied to this unchanged SHA and all prerequisite candidates are integrated in order.
+          EOF
+
+          cat > /tmp/telemetry-body.md <<EOF
+          ## Status
+
+          **GREEN / draft / review_pending / unmerged.** Exact immutable candidate SHA: \`$telemetry_sha\`.
+
+          Base bounded reranker: \`$reranker_sha\`. Exact verifier run: \`$telemetry_run\`.
+
+          The candidate has an exact nine-path surface and adds deterministic privacy-safe telemetry derived only from completed rerank traces and bounded evidence. It performs no persistence, network access, database write, policy action or corrective-retrieval change.
+
+          Python 3.12/3.13 exact verification passed Ruff, compileall, \`$telemetry_focused\` focused tests, \`$telemetry_full\` complete tests, \`$telemetry_properties\` property tests under independent hash seeds, privacy/identity audit, PostgreSQL 18 two-pass inherited-credit regression, isolated wheel import and cross-Python semantic comparison.
+
+          No merge, deployment, production database write, policy activation or release occurred. Merge remains forbidden until a genuine independent GPT-5.6 Sol \`APPROVE\` verdict is tied to this unchanged SHA and all prerequisite candidates are integrated in order.
+          EOF
+
+          reranker_pr=$(resolve_or_create candidate/bounded-inherited-reranker-v0-20260823 candidate/learning-evidence-reader-v0-20260823 'feat: bounded inherited reranker v0' /tmp/reranker-body.md)
+          telemetry_pr=$(resolve_or_create candidate/inherited-rerank-telemetry-v0-20260823 candidate/bounded-inherited-reranker-v0-20260823 'feat: inherited rerank telemetry v0' /tmp/telemetry-body.md)
+          echo "reranker_pr=$reranker_pr" >> "$GITHUB_OUTPUT"
+          echo "telemetry_pr=$telemetry_pr" >> "$GITHUB_OUTPUT"
+          printf 'reranker_pr=%s\ntelemetry_pr=%s\n' "$reranker_pr" "$telemetry_pr"
+
+      - name: Publish exact blind-review packets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RERANKER_PR: ${{ steps.products.outputs.reranker_pr }}
+          TELEMETRY_PR: ${{ steps.products.outputs.telemetry_pr }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          reader_sha=$(jq -r '.reader_sha' /tmp/resolved.json)
+          reranker_sha=$(jq -r '.reranker_sha' /tmp/resolved.json)
+          telemetry_sha=$(jq -r '.telemetry_sha' /tmp/resolved.json)
+          reranker_run=$(jq -r '.reranker_run' /tmp/resolved.json)
+          telemetry_run=$(jq -r '.telemetry_run' /tmp/resolved.json)
+          reranker_focused=$(jq -r '.reranker.focused_test_count' /tmp/evidence.json)
+          reranker_full=$(jq -r '.reranker.full_test_count' /tmp/evidence.json)
+          telemetry_focused=$(jq -r '.telemetry.focused_test_count' /tmp/evidence.json)
+          telemetry_full=$(jq -r '.telemetry.full_test_count' /tmp/evidence.json)
+          telemetry_properties=$(jq -r '.telemetry.property_test_count' /tmp/evidence.json)
+
+          reranker_packet=$(cat <<EOF
+          ## Blind GPT-5.6 Sol review request — bounded inherited reranker v0
+
+          Return exactly one verdict: \`APPROVE\`, \`CHANGES_REQUIRED\`, or \`BLOCKED_BY_EVIDENCE\`.
+
+          Exact boundary: base \`$reader_sha\`, candidate \`$reranker_sha\`, branch \`candidate/bounded-inherited-reranker-v0-20260823\`, verifier run \`$reranker_run\`. Any SHA movement invalidates the request.
+
+          Review direct-score preservation, lower-confidence inherited bonus, minimum evidence/confidence gates, non-negative/capped bonus, malformed-input rejection, identity conservation, deterministic ordering and absence of persistence/network/activation effects.
+
+          Evidence: Python 3.12/3.13 exact matrices passed \`$reranker_focused\` focused and \`$reranker_full\` full tests, Ruff, compileall, simulation semantics, PostgreSQL regression, wheel import and cross-Python comparison. Inspect the exact twelve-path diff and logs; do not rely on this prose as proof.
+          EOF
+          )
+
+          telemetry_packet=$(cat <<EOF
+          ## Blind GPT-5.6 Sol review request — inherited rerank telemetry v0
+
+          Return exactly one verdict: \`APPROVE\`, \`CHANGES_REQUIRED\`, or \`BLOCKED_BY_EVIDENCE\`.
+
+          Exact boundary: base \`$reranker_sha\`, candidate \`$telemetry_sha\`, branch \`candidate/inherited-rerank-telemetry-v0-20260823\`, verifier run \`$telemetry_run\`. Any SHA movement invalidates the request.
+
+          Review trace/evidence membership, deterministic event/hash identity, finite bounded summaries, confidence bucketing, policy-parameter fidelity, privacy, permutation properties and absence of persistence/network/policy-action effects.
+
+          Evidence: Python 3.12/3.13 exact matrices passed \`$telemetry_focused\` focused and \`$telemetry_full\` full tests, \`$telemetry_properties\` property tests under independent hash seeds, Ruff, compileall, PostgreSQL regression, wheel import and cross-Python comparison. Inspect the exact nine-path diff and logs; do not rely on this prose as proof.
+          EOF
+          )
+          gh api "repos/$REPO/issues/$RERANKER_PR/comments" -f body="$reranker_packet"
+          gh api "repos/$REPO/issues/$TELEMETRY_PR/comments" -f body="$telemetry_packet"
+
+      - name: Retrigger fail-closed latch v2 after body replacement
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git fetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*'
+          git switch -C bootstrap/latch-reranker-telemetry-green-v2-20260823 origin/bootstrap/latch-reranker-telemetry-green-v2-20260823
+          printf 'finalizer_run=%s\n' "${{ github.run_id }}" > .github/latch-v2-finalizer-run.txt
+          git add .github/latch-v2-finalizer-run.txt
+          git diff --cached --check
+          git commit -m 'ci: trigger evidence latch after product finalization'
+          git push origin HEAD:bootstrap/latch-reranker-telemetry-green-v2-20260823
+
+      - name: Close this finalizer without merge
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SELF_PR: ${{ github.event.pull_request.number }}
+        run: gh api --method PATCH "repos/$REPO/pulls/$SELF_PR" -f state=closed >/dev/null
