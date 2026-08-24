@@ -1,0 +1,273 @@
+name: Reconcile inherited rerank telemetry candidates by Git tree
+
+on:
+  pull_request:
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+jobs:
+  reconcile:
+    if: github.event.pull_request.head.ref == 'bootstrap/reconcile-telemetry-candidates-20260824'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: candidate/bounded-inherited-reranker-v0-20260823
+          fetch-depth: 0
+
+      - name: Resolve every immutable branch in the dependent chain
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*'
+
+          base_sha=$(git rev-parse origin/candidate/bounded-inherited-reranker-v0-20260823)
+          telemetry_23_sha=$(git rev-parse origin/candidate/inherited-rerank-telemetry-v0-20260823)
+          telemetry_24_sha=$(git rev-parse origin/candidate/inherited-rerank-telemetry-v0-20260824)
+          evaluator_sha=$(git rev-parse origin/candidate/paired-rerank-policy-evaluation-v0-20260824)
+          registry_sha=$(git rev-parse origin/candidate/paired-replay-experiment-registry-v0-20260824)
+
+          test "$base_sha" = '4d1317101800b11734d33175b1955f92a55ba3b5'
+          test "$telemetry_24_sha" = 'e76275a7d75f06e6510dc72c971d1f198d659107'
+          test "$evaluator_sha" = '847ea08e9e9a0d9193adac6d465557270da6ef7d'
+
+          git merge-base --is-ancestor "$base_sha" "$telemetry_23_sha"
+          git merge-base --is-ancestor "$base_sha" "$telemetry_24_sha"
+          git merge-base --is-ancestor "$telemetry_24_sha" "$evaluator_sha"
+          git merge-base --is-ancestor "$evaluator_sha" "$registry_sha"
+
+          printf 'BASE_SHA=%s\nTELEMETRY_23_SHA=%s\nTELEMETRY_24_SHA=%s\nEVALUATOR_SHA=%s\nREGISTRY_SHA=%s\n' \
+            "$base_sha" "$telemetry_23_sha" "$telemetry_24_sha" "$evaluator_sha" "$registry_sha" \
+            | tee /tmp/chain.env
+
+      - name: Prove byte-identical product trees and exact nine-path scope
+        shell: bash
+        run: |
+          set -euo pipefail
+          . /tmp/chain.env
+
+          tree_23=$(git rev-parse "$TELEMETRY_23_SHA^{tree}")
+          tree_24=$(git rev-parse "$TELEMETRY_24_SHA^{tree}")
+          test "$tree_23" = "$tree_24"
+          git diff --exit-code "$TELEMETRY_23_SHA" "$TELEMETRY_24_SHA"
+
+          expected=(
+            docs/inherited-rerank-telemetry-v0-verification.md
+            docs/inherited-rerank-telemetry-v0.md
+            docs/superpowers/plans/2026-08-15-inherited-rerank-telemetry-v0.md
+            docs/superpowers/specs/2026-08-15-inherited-rerank-telemetry-v0-design.md
+            src/nextgen_memory/__init__.py
+            src/nextgen_memory/inherited_rerank_telemetry.py
+            tests/test_inherited_rerank_telemetry.py
+            tests/test_inherited_rerank_telemetry_properties.py
+            tests/test_inherited_rerank_telemetry_public_api.py
+          )
+          mapfile -t paths_23 < <(git diff --name-only "$BASE_SHA"..."$TELEMETRY_23_SHA" | sort)
+          mapfile -t paths_24 < <(git diff --name-only "$BASE_SHA"..."$TELEMETRY_24_SHA" | sort)
+          test "${#paths_23[@]}" -eq "${#expected[@]}"
+          test "${#paths_24[@]}" -eq "${#expected[@]}"
+          diff -u <(printf '%s\n' "${expected[@]}" | sort) <(printf '%s\n' "${paths_23[@]}")
+          diff -u <(printf '%s\n' "${expected[@]}" | sort) <(printf '%s\n' "${paths_24[@]}")
+          diff -u <(printf '%s\n' "${paths_23[@]}") <(printf '%s\n' "${paths_24[@]}")
+          test -z "$(git diff --name-only "$BASE_SHA"..."$TELEMETRY_24_SHA" -- 'migrations/**' '.github/workflows/**' pyproject.toml 'src/nextgen_memory/corrective_retrieval_*')"
+          git diff --check "$BASE_SHA"..."$TELEMETRY_23_SHA"
+          git diff --check "$BASE_SHA"..."$TELEMETRY_24_SHA"
+
+          printf 'TREE_SHA=%s\n' "$tree_23" | tee -a /tmp/chain.env
+
+      - name: Prove the canonical descendant chain is uniquely rooted in the 20260824 telemetry ref
+        shell: bash
+        run: |
+          set -euo pipefail
+          . /tmp/chain.env
+
+          git merge-base --is-ancestor "$TELEMETRY_24_SHA" "$EVALUATOR_SHA"
+          if git merge-base --is-ancestor "$TELEMETRY_23_SHA" "$EVALUATOR_SHA"; then
+            echo 'the evaluator unexpectedly contains both equivalent telemetry commits' >&2
+            exit 1
+          fi
+          git merge-base --is-ancestor "$EVALUATOR_SHA" "$REGISTRY_SHA"
+
+          evaluator_tree=$(git rev-parse "$EVALUATOR_SHA^{tree}")
+          registry_tree=$(git rev-parse "$REGISTRY_SHA^{tree}")
+          test -n "$evaluator_tree"
+          test -n "$registry_tree"
+          printf 'EVALUATOR_TREE=%s\nREGISTRY_TREE=%s\n' "$evaluator_tree" "$registry_tree" \
+            | tee -a /tmp/chain.env
+
+      - name: Build canonical equivalence and integration-decision evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          . /tmp/chain.env
+          python - <<'PY'
+          from __future__ import annotations
+
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+
+          values = {}
+          for line in Path('/tmp/chain.env').read_text(encoding='utf-8').splitlines():
+              key, value = line.split('=', 1)
+              values[key] = value
+
+          evidence = {
+              'status': 'equivalent_tree_canonical_ref_selected',
+              'repository': 'leon36000/NextGen-Memory',
+              'base': {
+                  'branch': 'candidate/bounded-inherited-reranker-v0-20260823',
+                  'sha': values['BASE_SHA'],
+              },
+              'equivalence': {
+                  'tree_sha': values['TREE_SHA'],
+                  'telemetry_20260823': {
+                      'branch': 'candidate/inherited-rerank-telemetry-v0-20260823',
+                      'sha': values['TELEMETRY_23_SHA'],
+                      'role': 'equivalent_duplicate_review_evidence',
+                  },
+                  'telemetry_20260824': {
+                      'branch': 'candidate/inherited-rerank-telemetry-v0-20260824',
+                      'sha': values['TELEMETRY_24_SHA'],
+                      'role': 'canonical_integration_ref',
+                  },
+                  'git_diff_empty': True,
+                  'exact_path_count_each': 9,
+                  'byte_identical_tree': True,
+              },
+              'canonical_decision': {
+                  'branch': 'candidate/inherited-rerank-telemetry-v0-20260824',
+                  'sha': values['TELEMETRY_24_SHA'],
+                  'reason': (
+                      'The paired-policy evaluator and paired-replay registry are '
+                      'immutable descendants of the 20260824 telemetry ref. The '
+                      '20260823 ref has the same Git tree and remains valid review '
+                      'evidence, but is not the integration parent.'
+                  ),
+              },
+              'descendants': {
+                  'paired_policy_evaluator': {
+                      'branch': 'candidate/paired-rerank-policy-evaluation-v0-20260824',
+                      'sha': values['EVALUATOR_SHA'],
+                      'tree_sha': values['EVALUATOR_TREE'],
+                  },
+                  'paired_replay_registry': {
+                      'branch': 'candidate/paired-replay-experiment-registry-v0-20260824',
+                      'sha': values['REGISTRY_SHA'],
+                      'tree_sha': values['REGISTRY_TREE'],
+                  },
+              },
+              'safety': {
+                  'product_branch_modified': False,
+                  'merged': False,
+                  'production_database_contacted': False,
+                  'production_migration_applied': False,
+                  'policy_activated': False,
+                  'release_published': False,
+                  'sol_verdict_fabricated': False,
+              },
+          }
+          raw = json.dumps(
+              evidence,
+              ensure_ascii=False,
+              allow_nan=False,
+              sort_keys=True,
+              separators=(',', ':'),
+          ) + '\n'
+          Path('/tmp/evidence.json').write_text(raw, encoding='utf-8')
+          checkpoint = {
+              'checkpoint_key': 'm-head:inherited-rerank-telemetry:canonical-ref:20260824',
+              'status': evidence['status'],
+              'repository': evidence['repository'],
+              'evidence_sha256': hashlib.sha256(raw.encode('utf-8')).hexdigest(),
+              'base': evidence['base'],
+              'equivalence': evidence['equivalence'],
+              'canonical_decision': evidence['canonical_decision'],
+              'descendants': evidence['descendants'],
+              'safety': evidence['safety'],
+              'next_action': (
+                  'Use candidate/inherited-rerank-telemetry-v0-20260824 as the '
+                  'only integration parent for evaluator and registry. Keep the '
+                  '20260823 ref as equivalent review evidence and do not merge both.'
+              ),
+          }
+          Path('/tmp/checkpoint.json').write_text(
+              json.dumps(
+                  checkpoint,
+                  ensure_ascii=False,
+                  allow_nan=False,
+                  sort_keys=True,
+                  separators=(',', ':'),
+              ) + '\n',
+              encoding='utf-8',
+          )
+          print(Path('/tmp/checkpoint.json').read_text(encoding='utf-8'), end='')
+          PY
+
+      - name: Publish immutable equivalence evidence and checkpoint
+        shell: bash
+        run: |
+          set -euo pipefail
+          . /tmp/chain.env
+          evidence_branch='evidence/inherited-rerank-telemetry-equivalence-20260824'
+          checkpoint_branch='evidence/inherited-rerank-telemetry-canonical-ref-20260824'
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git fetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*'
+
+          if git ls-remote --exit-code --heads origin "$evidence_branch"; then
+            git switch --detach "origin/$evidence_branch"
+            cmp /tmp/evidence.json evidence/inherited-rerank-telemetry-equivalence-20260824.json
+          else
+            git switch -c "$evidence_branch" "$BASE_SHA"
+            mkdir -p evidence
+            cp /tmp/evidence.json evidence/inherited-rerank-telemetry-equivalence-20260824.json
+            git add evidence/inherited-rerank-telemetry-equivalence-20260824.json
+            git diff --cached --check
+            git commit -m 'evidence: prove telemetry candidate tree equivalence'
+            git push origin HEAD:"refs/heads/$evidence_branch"
+          fi
+
+          if git ls-remote --exit-code --heads origin "$checkpoint_branch"; then
+            git switch --detach "origin/$checkpoint_branch"
+            cmp /tmp/checkpoint.json evidence/inherited-rerank-telemetry-canonical-ref-20260824.json
+          else
+            git switch -c "$checkpoint_branch" "origin/$evidence_branch"
+            cp /tmp/checkpoint.json evidence/inherited-rerank-telemetry-canonical-ref-20260824.json
+            git add evidence/inherited-rerank-telemetry-canonical-ref-20260824.json
+            git diff --cached --check
+            git commit -m 'evidence: select canonical telemetry integration ref'
+            git push origin HEAD:"refs/heads/$checkpoint_branch"
+          fi
+
+      - name: Publish durable status and close without merge
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SELF_PR: ${{ github.event.pull_request.number }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          . /tmp/chain.env
+          body=$(cat <<EOF
+          ## Telemetry candidate reconciliation complete
+
+          Git proves that the 20260823 and 20260824 telemetry candidates have the same tree \`$TREE_SHA\`, the same exact nine-path product surface, and an empty byte diff.
+
+          Canonical integration ref: \`candidate/inherited-rerank-telemetry-v0-20260824\` at \`$TELEMETRY_24_SHA\`, because evaluator \`$EVALUATOR_SHA\` and registry \`$REGISTRY_SHA\` are immutable descendants of it.
+
+          The 20260823 ref \`$TELEMETRY_23_SHA\` remains equivalent review evidence and must not also be merged.
+
+          Immutable records:
+          - \`evidence/inherited-rerank-telemetry-equivalence-20260824\`;
+          - \`evidence/inherited-rerank-telemetry-canonical-ref-20260824\`.
+
+          No product branch, merge, deployment, policy activation or release was performed.
+          EOF
+          )
+          gh api "repos/$REPO/issues/23/comments" -f body="$body"
+          gh api --method PATCH "repos/$REPO/pulls/$SELF_PR" -f state=closed >/dev/null
