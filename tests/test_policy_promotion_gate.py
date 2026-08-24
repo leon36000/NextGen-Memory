@@ -34,12 +34,15 @@ def identity(
     version: str = "control-v1",
     fingerprint: str = CURRENT_FP,
     source_sha: str = CURRENT_SHA,
+    **overrides: object,
 ) -> PolicyIdentity:
-    return PolicyIdentity(
-        policy_version=version,
-        policy_fingerprint=fingerprint,
-        source_sha=source_sha,
-    )
+    values: dict[str, object] = {
+        "policy_version": version,
+        "policy_fingerprint": fingerprint,
+        "source_sha": source_sha,
+    }
+    values.update(overrides)
+    return PolicyIdentity(**values)  # type: ignore[arg-type]
 
 
 def paired_evidence(**overrides: object) -> PairedPolicyEvidence:
@@ -169,7 +172,12 @@ def test_all_gates_pass_produces_advisory_promote() -> None:
             PolicyPromotionReason.CANDIDATE_POLICY_IDENTITY_MISMATCH,
         ),
         (
-            request(evaluation=paired_evidence(registry_completed_trial_count=23)),
+            request(
+                evaluation=paired_evidence(
+                    registry_completed_trial_count=23,
+                    registry_active_count=1,
+                )
+            ),
             config(),
             PolicyPromotionReason.REGISTRY_EVALUATION_MISMATCH,
         ),
@@ -184,7 +192,13 @@ def test_all_gates_pass_produces_advisory_promote() -> None:
             PolicyPromotionReason.TOO_COSTLY_VERDICT,
         ),
         (
-            request(evaluation=paired_evidence(mean_score_effect=-0.001)),
+            request(
+                evaluation=paired_evidence(
+                    mean_score_effect=-0.001,
+                    score_confidence_lower_bound=-0.01,
+                    score_confidence_upper_bound=0.01,
+                )
+            ),
             config(),
             PolicyPromotionReason.NEGATIVE_MEAN_EFFECT,
         ),
@@ -221,7 +235,13 @@ def test_each_hard_rejection_condition_is_bounded(
     ("promotion_request", "gate_config", "reason"),
     [
         (
-            request(evaluation=paired_evidence(matched_pair_count=19)),
+            request(
+                evaluation=paired_evidence(
+                    matched_pair_count=19,
+                    registry_pair_count=19,
+                    registry_completed_trial_count=19,
+                )
+            ),
             config(),
             PolicyPromotionReason.INSUFFICIENT_MATCHED_PAIRS,
         ),
@@ -488,3 +508,37 @@ def test_malformed_values_fail_closed_without_decision(
 ) -> None:
     with pytest.raises(PolicyPromotionValidationError):
         factory(**overrides)
+
+
+@pytest.mark.parametrize(
+    "field_name",
+    ("maximum_mean_token_delta", "maximum_mean_latency_delta_ms"),
+)
+def test_cost_thresholds_must_be_nonnegative(field_name: str) -> None:
+    with pytest.raises(PolicyPromotionValidationError, match=field_name):
+        config(**{field_name: -0.001})
+
+
+@pytest.mark.parametrize(
+    "terminal_counts",
+    (
+        {"registry_failed_count": 1},
+        {"registry_cancelled_count": 1},
+    ),
+)
+def test_terminal_non_complete_registry_state_holds(
+    terminal_counts: dict[str, int],
+) -> None:
+    values: dict[str, object] = {
+        "registry_pair_count": 25,
+        "registry_completed_trial_count": 24,
+        "registry_failed_count": 0,
+        "registry_cancelled_count": 0,
+        "registry_active_count": 0,
+    }
+    values.update(terminal_counts)
+
+    record = evaluate(request(evaluation=paired_evidence(**values)))
+
+    assert record.decision is PolicyPromotionDecision.HOLD
+    assert PolicyPromotionReason.REGISTRY_INCOMPLETE in record.reasons
