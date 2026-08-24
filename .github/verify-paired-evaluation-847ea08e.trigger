@@ -1,0 +1,2 @@
+workflow_branch=bootstrap/verify-paired-evaluation-847ea08e-20260824
+candidate_sha=847ea08e9e9a0d9193adac6d465557270da6ef7d
