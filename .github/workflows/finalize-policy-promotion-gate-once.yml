@@ -1,15 +1,21 @@
-name: Finalize advisory policy promotion gate v0 once
+name: Finalize advisory policy promotion gate v0 from verified RED
 
 on:
   pull_request:
 
+concurrency:
+  group: advisory-policy-promotion-gate-v0-finalize
+  cancel-in-progress: true
+
 permissions:
   contents: write
+  issues: write
 
 jobs:
   finalize:
     if: github.event.pull_request.head.ref == 'feat/advisory-policy-promotion-gate-v0-20260824'
     runs-on: ubuntu-24.04
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
         with:
@@ -21,19 +27,99 @@ jobs:
           python-version: '3.12'
           cache: pip
 
-      - name: Resolve immutable registry base
+      - name: Resolve immutable base and true tests-only RED branch
         shell: bash
         run: |
           set -euo pipefail
+          base_branch='candidate/paired-replay-experiment-registry-v0-20260824'
+          red_branch='tdd/advisory-policy-promotion-gate-v0-red-20260824'
           git fetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*'
-          base_sha=$(git rev-parse origin/candidate/paired-replay-experiment-registry-v0-20260824)
-          test -n "$base_sha"
+          base_sha=$(git rev-parse "origin/$base_branch")
           test "$(git merge-base HEAD "$base_sha")" = "$base_sha"
-          echo "BASE_SHA=$base_sha" >> "$GITHUB_ENV"
-          printf 'base_sha=%s\n' "$base_sha"
+
+          red_sha=''
+          for attempt in $(seq 1 80); do
+            git fetch --no-tags origin "+refs/heads/$red_branch:refs/remotes/origin/$red_branch" 2>/dev/null || true
+            red_sha=$(git rev-parse --verify --quiet "origin/$red_branch" || true)
+            printf 'attempt=%s base=%s red=%s\n' "$attempt" "$base_sha" "${red_sha:-pending}"
+            if [ -n "$red_sha" ]; then
+              break
+            fi
+            sleep 15
+          done
+          test -n "$red_sha"
+          test "$(git merge-base "$base_sha" "$red_sha")" = "$base_sha"
+
+          mapfile -t red_paths < <(git diff --name-only "$base_sha"..."$red_sha" | sort)
+          expected_red=(
+            docs/policy-promotion-gate-v0-red.md
+            tests/test_policy_promotion_gate.py
+            tests/test_policy_promotion_gate_properties.py
+            tests/test_policy_promotion_gate_public_api.py
+          )
+          test "${#red_paths[@]}" -eq "${#expected_red[@]}"
+          diff -u <(printf '%s\n' "${expected_red[@]}" | sort) <(printf '%s\n' "${red_paths[@]}")
+          git diff --exit-code "$red_sha" -- \
+            tests/test_policy_promotion_gate.py \
+            tests/test_policy_promotion_gate_properties.py \
+            tests/test_policy_promotion_gate_public_api.py
+          git diff --check "$base_sha"..."$red_sha"
+          test ! -e "$(git rev-parse --show-toplevel)/docs/policy-promotion-gate-v0-red.md"
+
+          printf 'BASE_SHA=%s\nRED_SHA=%s\n' "$base_sha" "$red_sha" | tee -a "$GITHUB_ENV"
 
       - name: Install project and development tools
         run: python -m pip install -e '.[dev]'
+
+      - name: Add regression tests for bounded cost limits and terminal registry states
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('tests/test_policy_promotion_gate.py')
+          source = path.read_text(encoding='utf-8')
+          marker = 'def test_cost_thresholds_must_be_nonnegative() -> None:'
+          if marker not in source:
+              source += '''
+
+
+@pytest.mark.parametrize(
+    "field_name",
+    ("maximum_mean_token_delta", "maximum_mean_latency_delta_ms"),
+)
+def test_cost_thresholds_must_be_nonnegative(field_name: str) -> None:
+    with pytest.raises(PolicyPromotionValidationError, match=field_name):
+        config(**{field_name: -0.001})
+
+
+@pytest.mark.parametrize(
+    "terminal_counts",
+    (
+        {"registry_failed_count": 1},
+        {"registry_cancelled_count": 1},
+    ),
+)
+def test_terminal_non_complete_registry_state_holds(
+    terminal_counts: dict[str, int],
+) -> None:
+    values: dict[str, object] = {
+        "registry_pair_count": 25,
+        "registry_completed_trial_count": 24,
+        "registry_failed_count": 0,
+        "registry_cancelled_count": 0,
+        "registry_active_count": 0,
+    }
+    values.update(terminal_counts)
+
+    record = evaluate(request(evaluation=paired_evidence(**values)))
+
+    assert record.decision is PolicyPromotionDecision.HOLD
+    assert PolicyPromotionReason.REGISTRY_INCOMPLETE in record.reasons
+'''
+          path.write_text(source, encoding='utf-8')
+          PY
 
       - name: Harden bounded thresholds and incomplete-registry handling
         shell: bash
@@ -44,34 +130,36 @@ jobs:
 
           path = Path('src/nextgen_memory/policy_promotion_gate.py')
           source = path.read_text(encoding='utf-8')
-          old = '''        maximum_mean_token_delta = _finite_number(
-              "maximum_mean_token_delta", self.maximum_mean_token_delta
+
+          replacements = (
+              (
+                  'maximum_mean_token_delta = _finite_number(',
+                  'maximum_mean_token_delta = _nonnegative_number(',
+              ),
+              (
+                  'maximum_mean_latency_delta_ms = _finite_number(',
+                  'maximum_mean_latency_delta_ms = _nonnegative_number(',
+              ),
           )
-          maximum_mean_latency_delta_ms = _finite_number(
-              "maximum_mean_latency_delta_ms",
-              self.maximum_mean_latency_delta_ms,
-          )'''
-          new = '''        maximum_mean_token_delta = _nonnegative_number(
-              "maximum_mean_token_delta", self.maximum_mean_token_delta
-          )
-          maximum_mean_latency_delta_ms = _nonnegative_number(
-              "maximum_mean_latency_delta_ms",
-              self.maximum_mean_latency_delta_ms,
-          )'''
-          if old not in source:
-              raise SystemExit('cost-threshold block differs from expected source')
-          source = source.replace(old, new, 1)
+          for old, new in replacements:
+              if new not in source:
+                  if source.count(old) != 1:
+                      raise SystemExit(f'expected exactly one source block: {old}')
+                  source = source.replace(old, new, 1)
+
           old_registry = '''        if evidence.registry_active_count > 0:
-              hold_reasons.append(PolicyPromotionReason.REGISTRY_INCOMPLETE)'''
+            hold_reasons.append(PolicyPromotionReason.REGISTRY_INCOMPLETE)'''
           new_registry = '''        if (
-              evidence.registry_active_count > 0
-              or evidence.registry_failed_count > 0
-              or evidence.registry_cancelled_count > 0
-          ):
-              hold_reasons.append(PolicyPromotionReason.REGISTRY_INCOMPLETE)'''
-          if old_registry not in source:
-              raise SystemExit('registry-incomplete block differs from expected source')
-          source = source.replace(old_registry, new_registry, 1)
+            evidence.registry_active_count > 0
+            or evidence.registry_failed_count > 0
+            or evidence.registry_cancelled_count > 0
+        ):
+            hold_reasons.append(PolicyPromotionReason.REGISTRY_INCOMPLETE)'''
+          if new_registry not in source:
+              if source.count(old_registry) != 1:
+                  raise SystemExit('registry-incomplete block differs from the real source')
+              source = source.replace(old_registry, new_registry, 1)
+
           path.write_text(source, encoding='utf-8')
           PY
 
@@ -121,9 +209,14 @@ jobs:
                   'from .paired_replay_experiment_registry import (',
                   'from .paired_rerank_policy_evaluation import (',
               )
-              marker = next((value for value in markers if source.count(value) == 1), None)
+              marker = next(
+                  (value for value in markers if source.count(value) == 1),
+                  None,
+              )
               if marker is None:
-                  raise SystemExit('no unambiguous insertion marker for policy promotion imports')
+                  raise SystemExit(
+                      'no unambiguous insertion marker for policy promotion imports'
+                  )
               source = source.replace(marker, import_block + marker, 1)
 
           tree = ast.parse(source)
@@ -131,13 +224,17 @@ jobs:
           for statement in tree.body:
               if (
                   isinstance(statement, ast.Assign)
-                  and any(isinstance(target, ast.Name) and target.id == '__all__' for target in statement.targets)
+                  and any(
+                      isinstance(target, ast.Name) and target.id == '__all__'
+                      for target in statement.targets
+                  )
                   and isinstance(statement.value, (ast.List, ast.Tuple))
               ):
                   all_values = [
                       element.value
                       for element in statement.value.elts
-                      if isinstance(element, ast.Constant) and isinstance(element.value, str)
+                      if isinstance(element, ast.Constant)
+                      and isinstance(element.value, str)
                   ]
                   break
           if all_values is None:
@@ -145,17 +242,23 @@ jobs:
           start = source.index('__all__ = [')
           end = source.index('\n]', start) + 2
           replacement = '__all__ = [\n' + ''.join(
-              f'    "{name}",\n' for name in sorted(set(all_values).union(required))
+              f'    "{name}",\n'
+              for name in sorted(set(all_values).union(required))
           ) + ']'
-          source = source[:start] + replacement + source[end:]
-          path.write_text(source, encoding='utf-8')
+          path.write_text(
+              source[:start] + replacement + source[end:],
+              encoding='utf-8',
+          )
           PY
 
-      - name: Add bounded design and implementation plan
+      - name: Add bounded design, plan, and verified RED evidence
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p docs/superpowers/specs docs/superpowers/plans
+          git show "$RED_SHA":docs/policy-promotion-gate-v0-red.md \
+            > docs/policy-promotion-gate-v0-red.md
+
           cat > docs/superpowers/specs/2026-08-24-advisory-policy-promotion-gate-v0-design.md <<'EOF'
           # Advisory Policy Promotion Gate v0 Design
 
@@ -191,9 +294,9 @@ jobs:
           5. negative established mean effect;
           6. excessive token, latency, or harm cost.
 
-          If no rejection exists, the gate returns `hold` for insufficient matched pairs, non-positive lower confidence bound, excessive uncertainty, stale evidence, any unfinished registry state, rollback/test/integration/artifact/reviewer gaps, or evaluator verdict `insufficient_evidence`, `neutral`, or `inconclusive`.
+          If no rejection exists, the gate returns `hold` for insufficient matched pairs, non-positive lower confidence bound, excessive uncertainty, stale evidence, any active, failed, or cancelled registry pair, rollback/test/integration/artifact/reviewer gaps, or evaluator verdict `insufficient_evidence`, `neutral`, or `inconclusive`.
 
-          `promote` is emitted only for evaluator verdict `promising` when every identity, statistical, operational, safety, rollback, artifact, reviewer, freshness, and cost condition passes.
+          `promote` is emitted only for evaluator verdict `promising` when every identity, statistical, operational, safety, rollback, artifact, reviewer, freshness, registry-completion, and non-negative cost-threshold condition passes.
 
           ## Identity and serialization
 
@@ -211,13 +314,13 @@ jobs:
           **Date:** 2026-08-24
           **Base:** `candidate/paired-replay-experiment-registry-v0-20260824`
 
-          1. Record a Ruff-clean tests-only module-absence RED.
+          1. Record a Ruff-clean tests-only module-absence RED from the immutable base.
           2. Add strict immutable policy identity, paired evidence, readiness, threshold, request, and record types.
-          3. Validate UUID, SHA-256, Git SHA, identifier, enum, bool, integer, finite-number, interval, rate, and registry-partition contracts before decision logic.
+          3. Validate UUID, SHA-256, Git SHA, identifier, enum, bool, integer, finite-number, interval, rate, registry-partition, and non-negative cost-threshold contracts before decision logic.
           4. Implement hard rejection in fixed precedence and prevent simultaneous hold reasons from leaking into a reject record.
-          5. Implement bounded hold conditions and permit promotion only for a fully qualified `promising` evaluation.
+          5. Implement bounded hold conditions, including every active, failed, or cancelled registry state, and permit promotion only for a fully qualified `promising` evaluation.
           6. Bind all material inputs to canonical SHA-256 and UUID5 decision identity without echoing free-form content.
-          7. Prove threshold equality and one-ULP neighborhoods, malformed inputs, identity drift, 5,000 generated valid requests, reject precedence, material-input identity sensitivity, process-hash-seed invariance, and package exports.
+          7. Prove threshold equality and one-ULP neighborhoods, malformed inputs, identity drift, terminal registry states, 5,000 generated valid requests, reject precedence, material-input identity sensitivity, process-hash-seed invariance, and package exports.
           8. Run Ruff, compileall, focused/full tests, strict dependency/privacy/stub audit, isolated wheel installation, Python 3.12/3.13 exact-SHA verification, and cross-Python byte-identity evidence.
           9. Publish an immutable candidate and blind GPT-5.6 Sol packet only after every verifier job succeeds.
 
@@ -226,25 +329,19 @@ jobs:
           sed -i 's/^          //' docs/superpowers/plans/2026-08-24-advisory-policy-promotion-gate-v0.md
 
       - name: Normalize bounded product files
+        shell: bash
         run: |
-          ruff format \
-            src/nextgen_memory/__init__.py \
-            src/nextgen_memory/policy_promotion_gate.py \
-            tests/test_policy_promotion_gate.py \
-            tests/test_policy_promotion_gate_properties.py \
+          set -euo pipefail
+          files=(
+            src/nextgen_memory/__init__.py
+            src/nextgen_memory/policy_promotion_gate.py
+            tests/test_policy_promotion_gate.py
+            tests/test_policy_promotion_gate_properties.py
             tests/test_policy_promotion_gate_public_api.py
-          ruff check --fix \
-            src/nextgen_memory/__init__.py \
-            src/nextgen_memory/policy_promotion_gate.py \
-            tests/test_policy_promotion_gate.py \
-            tests/test_policy_promotion_gate_properties.py \
-            tests/test_policy_promotion_gate_public_api.py
-          ruff check \
-            src/nextgen_memory/__init__.py \
-            src/nextgen_memory/policy_promotion_gate.py \
-            tests/test_policy_promotion_gate.py \
-            tests/test_policy_promotion_gate_properties.py \
-            tests/test_policy_promotion_gate_public_api.py
+          )
+          ruff format "${files[@]}"
+          ruff check --fix "${files[@]}"
+          ruff check "${files[@]}"
           git diff --check
 
       - name: Focused promotion-gate contract
@@ -258,7 +355,9 @@ jobs:
             | tee /tmp/promotion-focused.txt
 
       - name: Strict dependency, privacy, side-effect, and stub audit
+        shell: bash
         run: |
+          set -euo pipefail
           python - <<'PY'
           from __future__ import annotations
 
@@ -283,9 +382,11 @@ jobs:
               elif isinstance(node, ast.Raise):
                   exc = node.exc.func if isinstance(node.exc, ast.Call) else node.exc
                   if (
-                      isinstance(exc, ast.Name) and exc.id == 'NotImplementedError'
+                      isinstance(exc, ast.Name)
+                      and exc.id == 'NotImplementedError'
                   ) or (
-                      isinstance(exc, ast.Attribute) and exc.attr == 'NotImplementedError'
+                      isinstance(exc, ast.Attribute)
+                      and exc.attr == 'NotImplementedError'
                   ):
                       violations.append(f'{node.lineno}:NotImplementedError')
               elif isinstance(node, ast.Import):
@@ -294,14 +395,17 @@ jobs:
                       if root not in allowed_roots:
                           violations.append(f'{node.lineno}:import:{alias.name}')
               elif isinstance(node, ast.ImportFrom):
-                  if node.level:
-                      root = (node.module or '').split('.', 1)[0]
-                  else:
-                      root = (node.module or '').split('.', 1)[0]
+                  root = (node.module or '').split('.', 1)[0]
                   if root not in allowed_roots:
                       violations.append(f'{node.lineno}:import:{node.module}')
               elif isinstance(node, ast.Call):
-                  name = node.func.id if isinstance(node.func, ast.Name) else node.func.attr if isinstance(node.func, ast.Attribute) else None
+                  name = (
+                      node.func.id
+                      if isinstance(node.func, ast.Name)
+                      else node.func.attr
+                      if isinstance(node.func, ast.Attribute)
+                      else None
+                  )
                   if name in forbidden_calls:
                       violations.append(f'{node.lineno}:call:{name}')
           lowered = source.lower()
@@ -319,7 +423,9 @@ jobs:
           PY
 
       - name: Repository-wide regression
+        shell: bash
         run: |
+          set -euo pipefail
           ruff check .
           python -m compileall -q src scripts
           python -m pytest -q | tee /tmp/promotion-full.txt
@@ -337,18 +443,23 @@ jobs:
           "$RUNNER_TEMP/promotion-wheel-venv/bin/python" -m pip install --no-deps "$wheel"
           "$RUNNER_TEMP/promotion-wheel-venv/bin/python" - <<'PY'
           import nextgen_memory
-          from nextgen_memory import AdvisoryPolicyPromotionGate, PolicyPromotionDecision
+          from nextgen_memory import (
+              AdvisoryPolicyPromotionGate,
+              PolicyPromotionDecision,
+          )
           assert AdvisoryPolicyPromotionGate is not None
           assert PolicyPromotionDecision.PROMOTE.value == 'promote'
           assert 'AdvisoryPolicyPromotionGate' in nextgen_memory.__all__
           PY
           "$RUNNER_TEMP/promotion-wheel-venv/bin/python" -m pip check
 
-      - name: Remove transport, stage, and prove exact eight-path product surface
+      - name: Remove transports, stage, and prove exact eight-path product surface
         shell: bash
         run: |
           set -euo pipefail
-          rm -f .github/workflows/finalize-policy-promotion-gate-once.yml
+          rm -f \
+            .github/workflows/finalize-policy-promotion-gate-once.yml \
+            .github/workflows/record-policy-promotion-gate-red-once.yml
           git add -A
           mapfile -t changed < <(git diff --cached --name-only "$BASE_SHA" | sort)
           expected=(
@@ -361,18 +472,42 @@ jobs:
             tests/test_policy_promotion_gate_properties.py
             tests/test_policy_promotion_gate_public_api.py
           )
-          printf 'final_product_path_count=%s\n' "${#changed[@]}"
-          printf '%s\n' "${changed[@]}"
           test "${#changed[@]}" -eq "${#expected[@]}"
           diff -u <(printf '%s\n' "${expected[@]}" | sort) <(printf '%s\n' "${changed[@]}")
           test -z "$(git diff --cached --name-only "$BASE_SHA" -- 'migrations/**' '.github/workflows/**' pyproject.toml 'src/nextgen_memory/corrective_retrieval_*')"
           git diff --cached --check
 
-      - name: Commit only the fully verified product
+      - name: Commit only the fully verified product and publish immutable candidate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
         shell: bash
         run: |
           set -euo pipefail
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git commit -m 'feat: add advisory policy promotion gate v0'
+          product_sha=$(git rev-parse HEAD)
           git push origin HEAD:feat/advisory-policy-promotion-gate-v0-20260824
+
+          candidate='candidate/advisory-policy-promotion-gate-v0-20260824'
+          existing=$(git ls-remote --heads origin "$candidate" | awk '{print $1}')
+          if [ -n "$existing" ]; then
+            test "$existing" = "$product_sha"
+          else
+            git push origin "$product_sha:refs/heads/$candidate"
+          fi
+
+          body=$(cat <<EOF
+          ## Advisory policy promotion gate producer GREEN
+
+          - base: \`$BASE_SHA\`;
+          - tests-only RED: \`$RED_SHA\`;
+          - product: \`$product_sha\`;
+          - exact eight-path surface;
+          - focused/full tests, strict audit, and isolated wheel import: green;
+          - activation, persistence, feedback, telemetry emission, migration, and release: none;
+          - merge allowed: false; independent Python 3.12/3.13 exact-SHA verification pending.
+          EOF
+          )
+          gh api "repos/$REPO/issues/23/comments" --raw-field body="$body" >/dev/null
