@@ -1,0 +1,138 @@
+name: Verify policy promotion gate exact RED
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify-red:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 5e5c972da6aa7f8be73a3a7bd3dca07a6074e335
+          fetch-depth: 0
+
+      - name: Prove exact checkout, base ancestry and tests-only scope
+        shell: bash
+        run: |
+          set -euo pipefail
+          base=91d14e9ff9f8c89d05cb2349b012a6681bf3d828
+          test "$(git rev-parse HEAD)" = "5e5c972da6aa7f8be73a3a7bd3dca07a6074e335"
+          test "$(git merge-base HEAD "$base")" = "$base"
+          mapfile -t changed < <(git diff --name-only "$base"...HEAD | sort)
+          expected=(
+            docs/superpowers/plans/2026-08-24-policy-promotion-gate-v0.md
+            docs/superpowers/specs/2026-08-24-policy-promotion-gate-v0-design.md
+            tests/test_policy_promotion.py
+            tests/test_policy_promotion_properties.py
+            tests/test_policy_promotion_public_api.py
+          )
+          test "${#changed[@]}" -eq "${#expected[@]}"
+          diff -u <(printf '%s\n' "${expected[@]}" | sort) <(printf '%s\n' "${changed[@]}")
+          test -z "$(git diff --name-only "$base"...HEAD -- 'src/**' 'migrations/**' '.github/workflows/**' pyproject.toml)"
+          test ! -e src/nextgen_memory/policy_promotion.py
+          if grep -Fq 'from .policy_promotion import' src/nextgen_memory/__init__.py; then
+            echo 'package-root promotion export exists during RED' >&2
+            exit 1
+          fi
+          git diff --check "$base"...HEAD
+          test -z "$(git status --porcelain)"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install project and development tools
+        run: python -m pip install -e '.[dev]'
+
+      - name: Prove Ruff and syntax are clean before RED
+        shell: bash
+        run: |
+          set -euo pipefail
+          ruff check \
+            tests/test_policy_promotion.py \
+            tests/test_policy_promotion_properties.py \
+            tests/test_policy_promotion_public_api.py
+          python -m compileall -q \
+            src \
+            scripts \
+            tests/test_policy_promotion.py \
+            tests/test_policy_promotion_properties.py \
+            tests/test_policy_promotion_public_api.py
+
+      - name: Prove each contract fails only because the module is absent
+        shell: bash
+        run: |
+          set -euo pipefail
+          files=(
+            tests/test_policy_promotion.py
+            tests/test_policy_promotion_properties.py
+            tests/test_policy_promotion_public_api.py
+          )
+          : > /tmp/red-summary.txt
+          for file in "${files[@]}"; do
+            name=$(basename "$file" .py)
+            output="/tmp/${name}.txt"
+            set +e
+            python -m pytest -q "$file" >"$output" 2>&1
+            rc=$?
+            set -e
+            test "$rc" -ne 0
+            test "$(grep -c "ModuleNotFoundError: No module named 'nextgen_memory.policy_promotion'" "$output")" -eq 1
+            if grep -Eq 'SyntaxError|IndentationError|NameError|ImportError:' "$output"; then
+              echo "unintended RED class in $file" >&2
+              cat "$output" >&2
+              exit 1
+            fi
+            if grep -Eq 'FAILED|[1-9][0-9]* failed|ERROR at setup|fixture .* not found' "$output"; then
+              echo "RED advanced beyond the intended import boundary in $file" >&2
+              cat "$output" >&2
+              exit 1
+            fi
+            printf '%s\trc=%s\tmodule_absence=1\n' "$file" "$rc" >> /tmp/red-summary.txt
+          done
+          test "$(wc -l < /tmp/red-summary.txt)" -eq 3
+          cat /tmp/red-summary.txt
+
+      - name: Publish bounded RED evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          evidence = {
+              "base_sha": "91d14e9ff9f8c89d05cb2349b012a6681bf3d828",
+              "candidate_sha": "5e5c972da6aa7f8be73a3a7bd3dca07a6074e335",
+              "changed_path_count": 5,
+              "implementation_present": False,
+              "module_absence_failures": 3,
+              "package_export_present": False,
+              "ruff": "clean",
+              "syntax": "clean",
+              "status": "accepted_tdd_red",
+          }
+          Path("/tmp/policy-promotion-red.json").write_text(
+              json.dumps(
+                  evidence,
+                  ensure_ascii=False,
+                  allow_nan=False,
+                  sort_keys=True,
+                  separators=(",", ":"),
+              ) + "\n",
+              encoding="utf-8",
+          )
+          print(Path("/tmp/policy-promotion-red.json").read_text(), end="")
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: policy-promotion-red-5e5c972
+          path: /tmp/policy-promotion-red.json
+          if-no-files-found: error
+          retention-days: 7
