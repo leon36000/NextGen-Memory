@@ -1,0 +1,612 @@
+name: Certify paired replay registry after M-HEAD rehydration
+
+on:
+  pull_request:
+
+permissions:
+  actions: read
+  contents: write
+  issues: write
+  pull-requests: write
+
+jobs:
+  resolve:
+    if: github.event.pull_request.head.ref == 'audit/probe-paired-registry-20260824'
+    runs-on: ubuntu-24.04
+    outputs:
+      candidate_sha: ${{ steps.resolve.outputs.candidate_sha }}
+      base_sha: ${{ steps.resolve.outputs.base_sha }}
+      source_report_sha: ${{ steps.resolve.outputs.source_report_sha }}
+    steps:
+      - name: Bind certification to the immutable rehydration report
+        id: resolve
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          encode() {
+            python -c 'import sys,urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$1"
+          }
+          fetch_content() {
+            local path=$1 ref=$2 output=$3
+            gh api "repos/$REPO/contents/$path?ref=$(encode "$ref")" \
+              --jq '.content' | tr -d '\n' | base64 -d > "$output"
+          }
+          fetch_content \
+            evidence/m-head-rehydration-20260824.json \
+            evidence/m-head-rehydration-20260824 \
+            /tmp/rehydration.json
+          fetch_content \
+            evidence/m-head-rehydration-20260824.sha256 \
+            evidence/m-head-rehydration-20260824 \
+            /tmp/rehydration.sha256
+          expected=$(awk '{print $1}' /tmp/rehydration.sha256)
+          actual=$(sha256sum /tmp/rehydration.json | awk '{print $1}')
+          test "$actual" = "$expected"
+          jq -e '.schema == "m-head-rehydration-v1"' /tmp/rehydration.json >/dev/null
+          jq -e '.status == "rehydrated_git_truth"' /tmp/rehydration.json >/dev/null
+          first=$(jq -r '.decision.first_uncertified_contract' /tmp/rehydration.json)
+          registry_green=$(jq -r '.decision.paired_registry_green_by_git_audit' /tmp/rehydration.json)
+          if [ "$first" != paired_replay_experiment_registry_v0 ] && [ "$registry_green" != false ]; then
+            echo "rehydration report does not authorize registry certification: first=$first registry_green=$registry_green" >&2
+            exit 1
+          fi
+          base_sha=$(gh api "repos/$REPO/branches/$(encode candidate/paired-rerank-policy-evaluation-v0-20260824)" --jq '.commit.sha')
+          candidate_sha=$(gh api "repos/$REPO/branches/$(encode candidate/paired-replay-experiment-registry-v0-20260824)" --jq '.commit.sha')
+          test "$base_sha" = 847ea08e9e9a0d9193adac6d465557270da6ef7d
+          test -n "$candidate_sha"
+          test "$candidate_sha" != "$base_sha"
+          echo "candidate_sha=$candidate_sha" >> "$GITHUB_OUTPUT"
+          echo "base_sha=$base_sha" >> "$GITHUB_OUTPUT"
+          echo "source_report_sha=$actual" >> "$GITHUB_OUTPUT"
+          jq -n \
+            --arg first "$first" \
+            --arg candidate_sha "$candidate_sha" \
+            --arg base_sha "$base_sha" \
+            --arg source_report_sha "$actual" \
+            '{first_uncertified_contract:$first,candidate_sha:$candidate_sha,base_sha:$base_sha,source_report_sha256:$source_report_sha}' \
+            > /tmp/resolution.json
+          cat /tmp/resolution.json
+
+  verify:
+    needs: resolve
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.candidate_sha }}
+          fetch-depth: 0
+
+      - name: Prove exact checkout, ancestry, and seven-path product scope
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${{ needs.resolve.outputs.candidate_sha }}"
+          test "$(git merge-base HEAD "${{ needs.resolve.outputs.base_sha }}")" = "${{ needs.resolve.outputs.base_sha }}"
+          mapfile -t changed < <(git diff --name-only "${{ needs.resolve.outputs.base_sha }}"...HEAD | sort)
+          expected=(
+            docs/superpowers/plans/2026-08-24-paired-replay-experiment-registry-v0.md
+            docs/superpowers/specs/2026-08-15-paired-replay-experiment-registry-v0-design.md
+            src/nextgen_memory/__init__.py
+            src/nextgen_memory/paired_replay_experiment_registry.py
+            tests/test_paired_replay_experiment_registry.py
+            tests/test_paired_replay_experiment_registry_properties.py
+            tests/test_paired_replay_experiment_registry_public_api.py
+          )
+          test "${#changed[@]}" -eq "${#expected[@]}"
+          diff -u <(printf '%s\n' "${expected[@]}" | sort) <(printf '%s\n' "${changed[@]}")
+          test -z "$(git diff --name-only "${{ needs.resolve.outputs.base_sha }}"...HEAD -- 'migrations/**' '.github/workflows/**' pyproject.toml 'src/nextgen_memory/corrective_retrieval_*')"
+          git diff --check "${{ needs.resolve.outputs.base_sha }}"...HEAD
+          test -z "$(git status --porcelain)"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install project and development tools
+        run: python -m pip install -e '.[dev]'
+
+      - name: Static, focused, and complete exact-candidate verification
+        shell: bash
+        run: |
+          set -euo pipefail
+          ruff check .
+          python -m compileall -q src scripts
+          python -m pytest -q \
+            tests/test_paired_replay_experiment_registry.py \
+            tests/test_paired_replay_experiment_registry_properties.py \
+            tests/test_paired_replay_experiment_registry_public_api.py \
+            | tee /tmp/focused-tests.txt
+          python -m pytest -q | tee /tmp/full-tests.txt
+          git diff --check "${{ needs.resolve.outputs.base_sha }}"...HEAD
+
+      - name: Prove deterministic plan and state identities across process hash seeds
+        shell: bash
+        run: |
+          set -euo pipefail
+          evidence="$RUNNER_TEMP/paired-registry-${{ matrix.python-version }}"
+          mkdir -p "$evidence"
+          cat > /tmp/generate_registry_state.py <<'PY'
+          from __future__ import annotations
+
+          import hashlib
+          import json
+          import sys
+          from pathlib import Path
+          from uuid import UUID
+
+          from nextgen_memory.bounded_inherited_reranker import BoundedInheritedRerankerConfig
+          from nextgen_memory.causal_credit import OutcomeMeasurement
+          from nextgen_memory.inherited_rerank_telemetry import (
+              build_inherited_rerank_telemetry,
+              fingerprint_bounded_inherited_policy,
+          )
+          from nextgen_memory.paired_replay_experiment_registry import (
+              BalancedPairedReplayPlanner,
+              InMemoryPairedReplayExperimentRegistry,
+              PairedReplayArmResult,
+              PairedReplayExperimentSpec,
+              PairedReplayFailureRecord,
+              ReplayArm,
+              ReplayFailureCode,
+          )
+
+          def digest(value: str) -> str:
+              return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+          def config(arm: ReplayArm) -> BoundedInheritedRerankerConfig:
+              return BoundedInheritedRerankerConfig(
+                  policy_version="control-v1" if arm is ReplayArm.CONTROL else "treatment-v1"
+              )
+
+          control = config(ReplayArm.CONTROL)
+          treatment = config(ReplayArm.TREATMENT)
+          spec = PairedReplayExperimentSpec(
+              experiment_id=UUID("00000000-0000-5000-8000-00000000d001"),
+              space_id=UUID("00000000-0000-5000-8000-00000000d002"),
+              control_policy_version=control.policy_version,
+              control_policy_fingerprint=fingerprint_bounded_inherited_policy(control),
+              treatment_policy_version=treatment.policy_version,
+              treatment_policy_fingerprint=fingerprint_bounded_inherited_policy(treatment),
+              continuation_set_hash=digest("continuation"),
+              order_seed_hash=digest("order-seed"),
+              maximum_pairs=8,
+              maximum_tokens_per_arm=100,
+              maximum_latency_ms_per_arm=50.0,
+              maximum_total_tokens=1600,
+              maximum_total_latency_ms=800.0,
+          )
+          contexts = tuple(digest(f"context:{index}") for index in range(4))
+          plan = BalancedPairedReplayPlanner().plan(spec, set(reversed(contexts)))
+          registry = InMemoryPairedReplayExperimentRegistry()
+          registry.register_plan(plan)
+          registry.register_plan(plan)
+          initial = registry.next_steps(spec.experiment_id)
+
+          def arm_result(step, tokens: int, latency_ms: float) -> PairedReplayArmResult:
+              batch = build_inherited_rerank_telemetry(
+                  space_id=step.space_id,
+                  router_decision_id=UUID("00000000-0000-5000-8000-00000000d003"),
+                  config=config(step.arm),
+                  results=(),
+              )
+              return PairedReplayArmResult(
+                  step_id=step.id,
+                  pair_id=step.pair_id,
+                  experiment_id=step.experiment_id,
+                  arm=step.arm,
+                  telemetry_batch=batch,
+                  outcome=OutcomeMeasurement(
+                      score=0.4 if step.arm is ReplayArm.CONTROL else 0.5,
+                      task_success=True,
+                      tokens=tokens,
+                      latency_ms=latency_ms,
+                  ),
+              )
+
+          first = initial[0]
+          registry.record_arm_result(arm_result(first, 11, 2.0))
+          second = next(
+              step
+              for step in registry.next_steps(spec.experiment_id)
+              if step.pair_id == first.pair_id
+          )
+          registry.record_arm_result(arm_result(second, 13, 3.0))
+          failed = initial[1]
+          registry.record_failure(
+              PairedReplayFailureRecord(
+                  step_id=failed.id,
+                  pair_id=failed.pair_id,
+                  experiment_id=failed.experiment_id,
+                  arm=failed.arm,
+                  code=ReplayFailureCode.EXECUTION_FAILED,
+              )
+          )
+          cancelled = initial[2]
+          registry.record_failure(
+              PairedReplayFailureRecord(
+                  step_id=cancelled.id,
+                  pair_id=cancelled.pair_id,
+                  experiment_id=cancelled.experiment_id,
+                  arm=cancelled.arm,
+                  code=ReplayFailureCode.CANCELLED,
+              )
+          )
+          payload = {
+              "candidate_sha": sys.argv[2],
+              "plan": plan.to_dict(),
+              "snapshots": [item.to_dict() for item in registry.pair_snapshots(spec.experiment_id)],
+              "summary": registry.summary(spec.experiment_id).to_dict(),
+              "completed_trial_ids": [
+                  str(item.trial_id) for item in registry.completed_trials(spec.experiment_id)
+              ],
+          }
+          Path(sys.argv[1]).write_text(
+              json.dumps(
+                  payload,
+                  ensure_ascii=False,
+                  allow_nan=False,
+                  sort_keys=True,
+                  separators=(",", ":"),
+              ) + "\n",
+              encoding="utf-8",
+          )
+          PY
+          PYTHONHASHSEED=1 python /tmp/generate_registry_state.py \
+            "$evidence/registry-state.json" "${{ needs.resolve.outputs.candidate_sha }}"
+          PYTHONHASHSEED=999 python /tmp/generate_registry_state.py \
+            /tmp/registry-state-seed-999.json "${{ needs.resolve.outputs.candidate_sha }}"
+          cmp "$evidence/registry-state.json" /tmp/registry-state-seed-999.json
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          path = Path(os.environ["RUNNER_TEMP"]) / "paired-registry-${{ matrix.python-version }}" / "registry-state.json"
+          payload = json.loads(path.read_text(encoding="utf-8"))
+          expected = {
+              "pair_count": 4,
+              "planned_count": 1,
+              "first_arm_recorded_count": 0,
+              "complete_count": 1,
+              "failed_count": 1,
+              "cancelled_count": 1,
+              "recorded_arm_count": 2,
+              "completed_trial_count": 1,
+              "actual_tokens": 24,
+              "actual_latency_ms": 5.0,
+          }
+          for key, value in expected.items():
+              if payload["summary"][key] != value:
+                  raise SystemExit(f"unexpected state summary for {key}")
+          if len(payload["completed_trial_ids"]) != 1:
+              raise SystemExit("completed trial count differs")
+          PY
+          echo "EVIDENCE_ROOT=$evidence" >> "$GITHUB_ENV"
+
+      - name: Audit dependency, privacy, stub, and side-effect surface
+        run: |
+          python - <<'PY'
+          from __future__ import annotations
+
+          import ast
+          from pathlib import Path
+
+          path = Path("src/nextgen_memory/paired_replay_experiment_registry.py")
+          source = path.read_text(encoding="utf-8")
+          tree = ast.parse(source, filename=str(path))
+          forbidden_roots = {
+              "asyncio", "datetime", "httpx", "os", "pathlib", "psycopg",
+              "pymongo", "random", "requests", "socket", "sqlalchemy",
+              "subprocess", "temporalio", "time", "urllib",
+          }
+          forbidden_calls = {
+              "eval", "exec", "open", "sleep", "system", "urlopen",
+              "uuid1", "uuid4", "write_bytes", "write_text",
+          }
+          violations: list[str] = []
+          for node in ast.walk(tree):
+              if isinstance(node, ast.Pass):
+                  violations.append(f"{node.lineno}:pass")
+              elif isinstance(node, ast.Raise):
+                  exc = node.exc.func if isinstance(node.exc, ast.Call) else node.exc
+                  if (
+                      isinstance(exc, ast.Name) and exc.id == "NotImplementedError"
+                  ) or (
+                      isinstance(exc, ast.Attribute) and exc.attr == "NotImplementedError"
+                  ):
+                      violations.append(f"{node.lineno}:NotImplementedError")
+              elif isinstance(node, ast.Import):
+                  for alias in node.names:
+                      if alias.name.split(".", 1)[0] in forbidden_roots:
+                          violations.append(f"{node.lineno}:import:{alias.name}")
+              elif isinstance(node, ast.ImportFrom):
+                  if (node.module or "").split(".", 1)[0] in forbidden_roots:
+                      violations.append(f"{node.lineno}:import:{node.module}")
+              elif isinstance(node, ast.Call):
+                  name = node.func.id if isinstance(node.func, ast.Name) else node.func.attr if isinstance(node.func, ast.Attribute) else None
+                  if name in forbidden_calls:
+                      violations.append(f"{node.lineno}:call:{name}")
+          lowered = source.lower()
+          for marker in (
+              "postgresql://", "mongodb://", "http://", "https://", "password",
+              "credential", "# todo", "# fixme", "raw_query", "raw_prompt",
+              "response_text", "memory_body", "lease_timestamp", "worker_identity",
+              "activate_policy", "write_feedback",
+          ):
+              if marker in lowered:
+                  violations.append(f"text:{marker}")
+          if violations:
+              raise SystemExit("\n".join(violations))
+          print("paired_registry_audit_findings=0")
+          PY
+
+      - name: Build and install exact wheel outside checkout
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf wheelhouse "$RUNNER_TEMP/paired-registry-wheel-venv"
+          python -m pip wheel --no-deps . -w wheelhouse
+          test "$(find wheelhouse -maxdepth 1 -type f -name '*.whl' | wc -l)" -eq 1
+          wheel=$(find wheelhouse -maxdepth 1 -type f -name '*.whl')
+          python -m venv "$RUNNER_TEMP/paired-registry-wheel-venv"
+          "$RUNNER_TEMP/paired-registry-wheel-venv/bin/python" -m pip install --no-deps "$wheel"
+          "$RUNNER_TEMP/paired-registry-wheel-venv/bin/python" - <<'PY'
+          import nextgen_memory
+          from nextgen_memory import (
+              BalancedPairedReplayPlanner,
+              InMemoryPairedReplayExperimentRegistry,
+              ReplayPairStatus,
+          )
+          assert BalancedPairedReplayPlanner is not None
+          assert InMemoryPairedReplayExperimentRegistry is not None
+          assert ReplayPairStatus.COMPLETE.value == "complete"
+          assert "BalancedPairedReplayPlanner" in nextgen_memory.__all__
+          PY
+          "$RUNNER_TEMP/paired-registry-wheel-venv/bin/python" -m pip check
+          sha256sum "$wheel" | awk '{print $1}' > "$EVIDENCE_ROOT/wheel.sha256"
+
+      - name: Write bounded exact-candidate evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import hashlib
+          import json
+          import os
+          import re
+          import sys
+          from pathlib import Path
+
+          def count(path: str) -> int:
+              matches = re.findall(r"(\d+) passed", Path(path).read_text(encoding="utf-8"))
+              if not matches:
+                  raise SystemExit(f"test count missing: {path}")
+              return int(matches[-1])
+
+          root = Path(os.environ["EVIDENCE_ROOT"])
+          state = root / "registry-state.json"
+          report = {
+              "candidate_sha": "${{ needs.resolve.outputs.candidate_sha }}",
+              "focused_test_count": count("/tmp/focused-tests.txt"),
+              "full_test_count": count("/tmp/full-tests.txt"),
+              "hash_seed_invariant": True,
+              "python_version": ".".join(map(str, sys.version_info[:3])),
+              "registry_state_sha256": hashlib.sha256(state.read_bytes()).hexdigest(),
+              "source_rehydration_sha256": "${{ needs.resolve.outputs.source_report_sha }}",
+              "wheel_sha256": (root / "wheel.sha256").read_text().strip(),
+          }
+          (root / "verification.json").write_text(
+              json.dumps(
+                  report,
+                  ensure_ascii=False,
+                  allow_nan=False,
+                  sort_keys=True,
+                  separators=(",", ":"),
+              ) + "\n",
+              encoding="utf-8",
+          )
+          print((root / "verification.json").read_text(), end="")
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: paired-registry-rehydrated-python-${{ matrix.python-version }}
+          path: |
+            ${{ runner.temp }}/paired-registry-${{ matrix.python-version }}/registry-state.json
+            ${{ runner.temp }}/paired-registry-${{ matrix.python-version }}/verification.json
+          if-no-files-found: error
+          retention-days: 7
+
+  compare-and-publish:
+    needs: [resolve, verify]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: paired-registry-rehydrated-python-*
+          path: ${{ runner.temp }}/paired-registry-matrix
+
+      - name: Require cross-Python identical state and evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+
+          root = Path(os.environ["RUNNER_TEMP"]) / "paired-registry-matrix"
+          states = sorted(root.rglob("registry-state.json"))
+          reports = sorted(root.rglob("verification.json"))
+          if len(states) != 2 or len(reports) != 2:
+              raise SystemExit("incomplete paired-registry matrix")
+          if states[0].read_bytes() != states[1].read_bytes():
+              raise SystemExit("registry state differs across Python versions")
+          documents = [json.loads(path.read_text(encoding="utf-8")) for path in reports]
+          if {".".join(item["python_version"].split(".")[:2]) for item in documents} != {"3.12", "3.13"}:
+              raise SystemExit("unexpected Python evidence set")
+          candidate = "${{ needs.resolve.outputs.candidate_sha }}"
+          if {item["candidate_sha"] for item in documents} != {candidate}:
+              raise SystemExit("candidate SHA drift")
+          state_sha = hashlib.sha256(states[0].read_bytes()).hexdigest()
+          if {item["registry_state_sha256"] for item in documents} != {state_sha}:
+              raise SystemExit("registry state hash drift")
+          if len({item["focused_test_count"] for item in documents}) != 1:
+              raise SystemExit("focused test count differs")
+          if len({item["full_test_count"] for item in documents}) != 1:
+              raise SystemExit("full test count differs")
+          if not all(item["hash_seed_invariant"] is True for item in documents):
+              raise SystemExit("hash-seed invariance missing")
+          summary = {
+              "status": "green_review_pending_unmerged",
+              "base_sha": "${{ needs.resolve.outputs.base_sha }}",
+              "candidate_branch": "candidate/paired-replay-experiment-registry-v0-20260824",
+              "candidate_sha": candidate,
+              "source_rehydration_sha256": "${{ needs.resolve.outputs.source_report_sha }}",
+              "cross_python_registry_state_identical": True,
+              "registry_state_sha256": state_sha,
+              "focused_test_count_each": documents[0]["focused_test_count"],
+              "full_test_count_each": documents[0]["full_test_count"],
+              "python_versions": ["3.12", "3.13"],
+              "wheel_sha256_by_python": {
+                  ".".join(item["python_version"].split(".")[:2]): item["wheel_sha256"]
+                  for item in documents
+              },
+              "safety": {
+                  "merged": False,
+                  "production_database_contacted": False,
+                  "production_migration_applied": False,
+                  "production_application_data_written": False,
+                  "model_or_agent_executed": False,
+                  "feedback_written": False,
+                  "policy_activated": False,
+                  "release_published": False,
+                  "corrective_retrieval_changed": False,
+                  "sol_verdict_fabricated": False,
+              },
+          }
+          raw = json.dumps(
+              summary,
+              ensure_ascii=False,
+              allow_nan=False,
+              sort_keys=True,
+              separators=(",", ":"),
+          ) + "\n"
+          (root / "paired-replay-registry-green-20260824.json").write_text(raw, encoding="utf-8")
+          (root / "paired-replay-registry-green-20260824.sha256").write_text(
+              hashlib.sha256(raw.encode("utf-8")).hexdigest()
+              + "  paired-replay-registry-green-20260824.json\n",
+              encoding="utf-8",
+          )
+          print(raw, end="")
+          PY
+
+      - name: Validate or create the canonical draft product PR
+        id: product
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          branch='candidate/paired-replay-experiment-registry-v0-20260824'
+          base='candidate/paired-rerank-policy-evaluation-v0-20260824'
+          sha='${{ needs.resolve.outputs.candidate_sha }}'
+          pulls=$(gh api --method GET "repos/$REPO/pulls" \
+            -f state=all -f head="leon36000:$branch" -f per_page=100)
+          if [ "$(printf '%s' "$pulls" | jq 'length')" -eq 0 ]; then
+            pr_url=$(gh pr create --repo "$REPO" --head "$branch" --base "$base" \
+              --title 'feat: paired replay experiment registry v0' --draft \
+              --body "verification evidence is being finalized for exact SHA \`$sha\`.")
+            pr=${pr_url##*/}
+          else
+            test "$(printf '%s' "$pulls" | jq 'length')" -eq 1
+            pr=$(printf '%s' "$pulls" | jq -r '.[0].number')
+            test "$(printf '%s' "$pulls" | jq -r '.[0].state')" = open
+            test "$(printf '%s' "$pulls" | jq -r '.[0].draft')" = true
+            test "$(printf '%s' "$pulls" | jq -r '.[0].base.ref')" = "$base"
+            test "$(printf '%s' "$pulls" | jq -r '.[0].head.sha')" = "$sha"
+          fi
+          echo "pr=$pr" >> "$GITHUB_OUTPUT"
+
+      - name: Publish immutable evidence and exact blind-review packet
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ steps.product.outputs.pr }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          root="$RUNNER_TEMP/paired-registry-matrix"
+          evidence_branch='evidence/paired-replay-registry-green-20260824'
+          candidate='${{ needs.resolve.outputs.candidate_sha }}'
+          base='${{ needs.resolve.outputs.base_sha }}'
+          git clone --filter=blob:none "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git" /tmp/evidence-repo
+          cd /tmp/evidence-repo
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          if git ls-remote --exit-code --heads origin "$evidence_branch"; then
+            git switch --detach "origin/$evidence_branch"
+            cmp "$root/paired-replay-registry-green-20260824.json" evidence/paired-replay-registry-green-20260824.json
+            cmp "$root/paired-replay-registry-green-20260824.sha256" evidence/paired-replay-registry-green-20260824.sha256
+          else
+            git switch -c "$evidence_branch" "$candidate"
+            mkdir -p evidence
+            cp "$root/paired-replay-registry-green-20260824.json" evidence/
+            cp "$root/paired-replay-registry-green-20260824.sha256" evidence/
+            git add evidence/paired-replay-registry-green-20260824.json evidence/paired-replay-registry-green-20260824.sha256
+            git diff --cached --check
+            git commit -m 'evidence: certify paired replay registry exact SHA'
+            git push origin HEAD:"refs/heads/$evidence_branch"
+          fi
+          focused=$(jq -r '.focused_test_count_each' "$root/paired-replay-registry-green-20260824.json")
+          full=$(jq -r '.full_test_count_each' "$root/paired-replay-registry-green-20260824.json")
+          state_sha=$(jq -r '.registry_state_sha256' "$root/paired-replay-registry-green-20260824.json")
+          body=$(cat <<EOF
+          ## Status
+
+          **GREEN / draft / review_pending / unmerged.** Exact candidate SHA: \`$candidate\`.
+
+          Base paired-policy evaluation SHA: \`$base\`.
+          Exact verifier run: \`${{ github.run_id }}\`.
+          Source rehydration report: \`${{ needs.resolve.outputs.source_report_sha }}\`.
+
+          The seven-path candidate implements a deterministic in-memory paired replay planner and registry. It performs no model/agent execution, persistence, database access, network access, feedback write or policy activation.
+
+          Python 3.12/3.13 exact verification passed Ruff, compileall, \`$focused\` focused tests and \`$full\` full tests per version, 5,000 generated plan/trace properties, process-hash-seed invariance, strict privacy/stub/side-effect audit, isolated wheel imports and cross-Python identical mixed-state evidence. Registry-state SHA-256: \`$state_sha\`.
+
+          Merge is forbidden until PR #134 and all prerequisite candidates are integrated in order and a genuine independent GPT-5.6 Sol review returns \`APPROVE\` for this unchanged SHA. Merge never authorizes execution, persistence, feedback emission or policy activation.
+          EOF
+          )
+          gh api --method PATCH "repos/$REPO/pulls/$PR" --raw-field body="$body" >/dev/null
+          packet=$(cat <<EOF
+          ## Blind GPT-5.6 Sol review request — Paired Replay Experiment Registry v0
+
+          Return exactly one verdict: \`APPROVE\`, \`CHANGES_REQUIRED\`, or \`BLOCKED_BY_EVIDENCE\`.
+
+          Exact boundary: base \`$base\`, candidate \`$candidate\`, branch \`candidate/paired-replay-experiment-registry-v0-20260824\`, verifier run \`${{ github.run_id }}\`. Any SHA movement invalidates this request.
+
+          Review identity domain separation for experiment/plan/pair/step/result/failure/trial; seed-independent pair IDs and seed-dependent balanced arm order; worst-case token/latency preflight; one schedulable arm per pair; immutable retry conflicts; pre-mutation validation ordering; terminal failure/cancellation; matched telemetry/policy/router identity; deterministic snapshot/summary/trial ordering; privacy; and complete absence of execution/persistence/network/activation behavior.
+
+          Evidence: Python 3.12/3.13 exact matrices, Ruff, compileall, \`$focused\` focused and \`$full\` full tests each, 5,000 generated traces, hash-seed invariance, cross-Python identical mixed-state bytes SHA-256 \`$state_sha\`, strict AST privacy/stub audit and isolated wheel import. Inspect the exact seven-file diff and logs; do not rely on this prose as proof.
+          EOF
+          )
+          gh api "repos/$REPO/issues/$PR/comments" -f body="$packet"
+          gh api "repos/$REPO/issues/132/comments" -f body="$packet"
+          gh api "repos/$REPO/issues/23/comments" -f body="$packet"
+
+      - name: Close this verifier without merge
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SELF_PR: ${{ github.event.pull_request.number }}
+        run: gh api --method PATCH "repos/$REPO/pulls/$SELF_PR" -f state=closed >/dev/null
