@@ -1,0 +1,185 @@
+name: Materialize policy promotion exact RED
+
+on:
+  pull_request:
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+jobs:
+  materialize-red:
+    if: github.event.pull_request.head.ref == 'bootstrap/materialize-policy-promotion-red-20260824'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: bootstrap/materialize-policy-promotion-red-20260824
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install project and development tools
+        run: python -m pip install -e '.[dev]'
+
+      - name: Copy and normalize the exact approved tests-only source
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_sha='6a34e6cf5a8dc88ef250b50f4c3e9f2f919de5cd'
+          base_sha='91d14e9ff9f8c89d05cb2349b012a6681bf3d828'
+          target='tdd/policy-promotion-gate-v0-red-20260824'
+          git fetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*'
+          git cat-file -e "$source_sha^{commit}"
+          git cat-file -e "$base_sha^{commit}"
+          if git ls-remote --exit-code --heads origin "$target"; then
+            echo "immutable RED target already exists" >&2
+            exit 1
+          fi
+          rm -rf /tmp/policy-promotion-red
+          mkdir -p /tmp/policy-promotion-red/docs/superpowers/plans
+          mkdir -p /tmp/policy-promotion-red/docs/superpowers/specs
+          mkdir -p /tmp/policy-promotion-red/tests
+          for path in \
+            docs/superpowers/plans/2026-08-24-policy-promotion-gate-v0.md \
+            docs/superpowers/specs/2026-08-24-policy-promotion-gate-v0-design.md \
+            tests/test_policy_promotion.py \
+            tests/test_policy_promotion_properties.py \
+            tests/test_policy_promotion_public_api.py; do
+            git show "$source_sha:$path" > "/tmp/policy-promotion-red/$path"
+          done
+          python - <<'PY'
+          from pathlib import Path
+
+          root = Path('/tmp/policy-promotion-red')
+          for path in root.rglob('*'):
+              if path.is_file():
+                  lines = path.read_text(encoding='utf-8').splitlines()
+                  path.write_text(
+                      '\n'.join(line.rstrip() for line in lines) + '\n',
+                      encoding='utf-8',
+                  )
+          PY
+          git switch -C "$target" "$base_sha"
+          cp -R /tmp/policy-promotion-red/. .
+          files=(
+            tests/test_policy_promotion.py
+            tests/test_policy_promotion_properties.py
+            tests/test_policy_promotion_public_api.py
+          )
+          expected=(
+            docs/superpowers/plans/2026-08-24-policy-promotion-gate-v0.md
+            docs/superpowers/specs/2026-08-24-policy-promotion-gate-v0-design.md
+            tests/test_policy_promotion.py
+            tests/test_policy_promotion_properties.py
+            tests/test_policy_promotion_public_api.py
+          )
+          ruff check --fix "${files[@]}"
+          ruff format "${files[@]}"
+          ruff check "${files[@]}"
+          python -m compileall -q "${files[@]}"
+          git diff --check
+          test ! -e src/nextgen_memory/policy_promotion.py
+          if grep -Fq 'from .policy_promotion import' src/nextgen_memory/__init__.py; then
+            echo 'package-root promotion export exists in RED candidate' >&2
+            exit 1
+          fi
+          git add --intent-to-add "${expected[@]}"
+          mapfile -t changed < <(git diff --name-only "$base_sha" | sort)
+          test "${#changed[@]}" -eq "${#expected[@]}"
+          diff -u <(printf '%s\n' "${expected[@]}" | sort) <(printf '%s\n' "${changed[@]}")
+
+      - name: Prove every test module reaches only the intended module-absence boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          files=(
+            tests/test_policy_promotion.py
+            tests/test_policy_promotion_properties.py
+            tests/test_policy_promotion_public_api.py
+          )
+          : > /tmp/red-modules.txt
+          for file in "${files[@]}"; do
+            output="/tmp/$(basename "$file" .py).txt"
+            set +e
+            python -m pytest --collect-only -q "$file" >"$output" 2>&1
+            rc=$?
+            set -e
+            test "$rc" -ne 0
+            FILE="$file" OUTPUT="$output" python - <<'PY'
+          from __future__ import annotations
+
+          import os
+          import re
+          from pathlib import Path
+
+          file = os.environ['FILE']
+          text = Path(os.environ['OUTPUT']).read_text(encoding='utf-8', errors='replace')
+          modules = set(re.findall(r"ModuleNotFoundError: No module named '([^']+)'", text))
+          if modules != {'nextgen_memory.policy_promotion'}:
+              raise SystemExit(f'{file}: unexpected missing-module set: {sorted(modules)!r}')
+          for marker in (
+              'SyntaxError',
+              'IndentationError',
+              'NameError',
+              'fixture ',
+              'ERROR at setup',
+          ):
+              if marker in text:
+                  raise SystemExit(f'{file}: unintended RED marker: {marker}')
+          PY
+            printf '%s\n' "$file" >> /tmp/red-modules.txt
+          done
+          test "$(wc -l < /tmp/red-modules.txt)" -eq 3
+          cat /tmp/red-modules.txt
+
+      - name: Commit and publish the immutable accepted RED
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          target='tdd/policy-promotion-gate-v0-red-20260824'
+          base_sha='91d14e9ff9f8c89d05cb2349b012a6681bf3d828'
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add \
+            docs/superpowers/plans/2026-08-24-policy-promotion-gate-v0.md \
+            docs/superpowers/specs/2026-08-24-policy-promotion-gate-v0-design.md \
+            tests/test_policy_promotion.py \
+            tests/test_policy_promotion_properties.py \
+            tests/test_policy_promotion_public_api.py
+          git diff --cached --check
+          git commit -m 'test: establish policy promotion gate v0 RED'
+          red_sha=$(git rev-parse HEAD)
+          git push origin HEAD:"refs/heads/$target"
+          cat > /tmp/policy-promotion-red.json <<EOF
+          {"base_sha":"$base_sha","changed_path_count":5,"implementation_present":false,"module_absence_failures":3,"package_export_present":false,"red_branch":"$target","red_sha":"$red_sha","ruff":"clean","status":"accepted_tdd_red","syntax":"clean"}
+          EOF
+          body=$(cat <<EOF
+          ## Accepted exact TDD RED
+
+          - branch: \`$target\`;
+          - SHA: \`$red_sha\`;
+          - base: \`$base_sha\`;
+          - exact design/plan/test paths: 5;
+          - Ruff and compileall: clean;
+          - implementation and package export: absent;
+          - all three test modules fail collection only for \`nextgen_memory.policy_promotion\`.
+
+          This RED is immutable and contains no product implementation or workflow.
+          EOF
+          )
+          gh api "repos/${{ github.repository }}/issues/146/comments" -f body="$body"
+          gh api "repos/${{ github.repository }}/issues/112/comments" -f body="$body"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: policy-promotion-accepted-red
+          path: /tmp/policy-promotion-red.json
+          if-no-files-found: error
+          retention-days: 7
