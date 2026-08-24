@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import math
-from dataclasses import FrozenInstanceError, replace
+from dataclasses import FrozenInstanceError
 from uuid import UUID
 
 import pytest
@@ -152,20 +152,12 @@ def test_all_gates_pass_produces_advisory_promote() -> None:
             PolicyPromotionReason.SAFETY_VIOLATION,
         ),
         (
-            request(
-                evaluation=paired_evidence(
-                    control_policy_fingerprint="e" * 64
-                )
-            ),
+            request(evaluation=paired_evidence(control_policy_fingerprint="e" * 64)),
             config(),
             PolicyPromotionReason.CURRENT_POLICY_IDENTITY_MISMATCH,
         ),
         (
-            request(
-                evaluation=paired_evidence(
-                    treatment_policy_fingerprint="e" * 64
-                )
-            ),
+            request(evaluation=paired_evidence(treatment_policy_fingerprint="e" * 64)),
             config(),
             PolicyPromotionReason.CANDIDATE_POLICY_IDENTITY_MISMATCH,
         ),
@@ -177,29 +169,17 @@ def test_all_gates_pass_produces_advisory_promote() -> None:
             PolicyPromotionReason.CANDIDATE_POLICY_IDENTITY_MISMATCH,
         ),
         (
-            request(
-                evaluation=paired_evidence(
-                    registry_completed_trial_count=23
-                )
-            ),
+            request(evaluation=paired_evidence(registry_completed_trial_count=23)),
             config(),
             PolicyPromotionReason.REGISTRY_EVALUATION_MISMATCH,
         ),
         (
-            request(
-                evaluation=paired_evidence(
-                    verdict=PairedPolicyVerdict.HARMFUL
-                )
-            ),
+            request(evaluation=paired_evidence(verdict=PairedPolicyVerdict.HARMFUL)),
             config(),
             PolicyPromotionReason.HARMFUL_VERDICT,
         ),
         (
-            request(
-                evaluation=paired_evidence(
-                    verdict=PairedPolicyVerdict.TOO_COSTLY
-                )
-            ),
+            request(evaluation=paired_evidence(verdict=PairedPolicyVerdict.TOO_COSTLY)),
             config(),
             PolicyPromotionReason.TOO_COSTLY_VERDICT,
         ),
@@ -214,9 +194,7 @@ def test_all_gates_pass_produces_advisory_promote() -> None:
             PolicyPromotionReason.TOKEN_COST_EXCEEDED,
         ),
         (
-            request(
-                evaluation=paired_evidence(mean_latency_delta_ms=20.01)
-            ),
+            request(evaluation=paired_evidence(mean_latency_delta_ms=20.01)),
             config(),
             PolicyPromotionReason.LATENCY_COST_EXCEEDED,
         ),
@@ -259,9 +237,7 @@ def test_each_hard_rejection_condition_is_bounded(
             PolicyPromotionReason.NON_POSITIVE_CONFIDENCE_LOWER_BOUND,
         ),
         (
-            request(
-                evaluation=paired_evidence(score_standard_error=0.051)
-            ),
+            request(evaluation=paired_evidence(score_standard_error=0.051)),
             config(),
             PolicyPromotionReason.STANDARD_ERROR_EXCEEDED,
         ),
@@ -301,29 +277,17 @@ def test_each_hard_rejection_condition_is_bounded(
             PolicyPromotionReason.REVIEWERS_INSUFFICIENT,
         ),
         (
-            request(
-                evaluation=paired_evidence(
-                    verdict=PairedPolicyVerdict.INSUFFICIENT_EVIDENCE
-                )
-            ),
+            request(evaluation=paired_evidence(verdict=PairedPolicyVerdict.INSUFFICIENT_EVIDENCE)),
             config(),
             PolicyPromotionReason.INSUFFICIENT_EVIDENCE_VERDICT,
         ),
         (
-            request(
-                evaluation=paired_evidence(
-                    verdict=PairedPolicyVerdict.NEUTRAL
-                )
-            ),
+            request(evaluation=paired_evidence(verdict=PairedPolicyVerdict.NEUTRAL)),
             config(),
             PolicyPromotionReason.NEUTRAL_VERDICT,
         ),
         (
-            request(
-                evaluation=paired_evidence(
-                    verdict=PairedPolicyVerdict.INCONCLUSIVE
-                )
-            ),
+            request(evaluation=paired_evidence(verdict=PairedPolicyVerdict.INCONCLUSIVE)),
             config(),
             PolicyPromotionReason.INCONCLUSIVE_VERDICT,
         ),
@@ -402,27 +366,34 @@ def test_one_ulp_around_cost_and_confidence_thresholds() -> None:
     below_lower_bound = math.nextafter(0.0, -math.inf)
     above_lower_bound = math.nextafter(0.0, math.inf)
 
-    assert evaluate(
-        request(evaluation=paired_evidence(mean_token_delta=above_token))
-    ).decision is PolicyPromotionDecision.REJECT
-    assert evaluate(
-        request(
-            evaluation=paired_evidence(
-                mean_score_effect=0.01,
-                score_confidence_lower_bound=below_lower_bound,
-                score_confidence_upper_bound=0.02,
+    assert (
+        evaluate(request(evaluation=paired_evidence(mean_token_delta=above_token))).decision
+        is PolicyPromotionDecision.REJECT
+    )
+    assert (
+        evaluate(
+            request(
+                evaluation=paired_evidence(
+                    mean_score_effect=0.01,
+                    score_confidence_lower_bound=below_lower_bound,
+                    score_confidence_upper_bound=0.02,
+                )
             )
-        )
-    ).decision is PolicyPromotionDecision.HOLD
-    assert evaluate(
-        request(
-            evaluation=paired_evidence(
-                mean_score_effect=0.01,
-                score_confidence_lower_bound=above_lower_bound,
-                score_confidence_upper_bound=0.02,
+        ).decision
+        is PolicyPromotionDecision.HOLD
+    )
+    assert (
+        evaluate(
+            request(
+                evaluation=paired_evidence(
+                    mean_score_effect=0.01,
+                    score_confidence_lower_bound=above_lower_bound,
+                    score_confidence_upper_bound=0.02,
+                )
             )
-        )
-    ).decision is PolicyPromotionDecision.PROMOTE
+        ).decision
+        is PolicyPromotionDecision.PROMOTE
+    )
 
 
 def test_record_identity_and_json_are_deterministic_and_canonical() -> None:
@@ -434,13 +405,17 @@ def test_record_identity_and_json_are_deterministic_and_canonical() -> None:
     assert first.content_hash == second.content_hash
     rendered = first.render_json()
     decoded = json.loads(rendered)
-    assert rendered == json.dumps(
-        decoded,
-        ensure_ascii=False,
-        allow_nan=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    ) + "\n"
+    assert (
+        rendered
+        == json.dumps(
+            decoded,
+            ensure_ascii=False,
+            allow_nan=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        + "\n"
+    )
     assert decoded["advisory_only"] is True
     assert decoded["decision"] == "promote"
 

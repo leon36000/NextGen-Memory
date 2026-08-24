@@ -281,18 +281,75 @@ def test_one_ulp_threshold_neighborhoods_are_stable() -> None:
 
 
 def test_process_hash_seed_does_not_change_record_json() -> None:
-    script = r'''
+    script = r"""
 from uuid import UUID
+
 from nextgen_memory.paired_rerank_policy_evaluation import PairedPolicyVerdict
-from nextgen_memory.policy_promotion_gate import AdvisoryPolicyPromotionGate, PairedPolicyEvidence, PolicyIdentity, PolicyOperationalReadiness, PolicyPromotionGateConfig, PolicyPromotionRequest
-current = PolicyIdentity(policy_version="control-v1", policy_fingerprint="1" * 64, source_sha="3" * 40)
-candidate = PolicyIdentity(policy_version="treatment-v1", policy_fingerprint="2" * 64, source_sha="4" * 40)
-evidence = PairedPolicyEvidence(evaluation_id=UUID("00000000-0000-5000-8000-000000001111"), evaluation_content_hash="5" * 64, control_policy_version=current.policy_version, control_policy_fingerprint=current.policy_fingerprint, treatment_policy_version=candidate.policy_version, treatment_policy_fingerprint=candidate.policy_fingerprint, evaluated_base_sha=current.source_sha, evaluated_candidate_sha=candidate.source_sha, verdict=PairedPolicyVerdict.PROMISING, matched_pair_count=24, mean_score_effect=0.08, score_confidence_lower_bound=0.04, score_confidence_upper_bound=0.12, score_standard_error=0.02, mean_token_delta=4.0, mean_latency_delta_ms=8.0, harm_rate=0.01, registry_summary_content_hash="6" * 64, registry_pair_count=24, registry_completed_trial_count=24, registry_failed_count=0, registry_cancelled_count=0, registry_active_count=0)
-ready = PolicyOperationalReadiness(tests_passed=True, integration_passed=True, artifact_integrity_passed=True, rollback_ready=True, safety_violation=False, reviewer_count=2, evidence_age_seconds=60.0)
-config = PolicyPromotionGateConfig(minimum_matched_pairs=20, minimum_score_lower_bound=0.0, maximum_score_standard_error=0.05, maximum_mean_token_delta=10.0, maximum_mean_latency_delta_ms=20.0, maximum_harm_rate=0.05, maximum_evidence_age_seconds=3600.0, minimum_reviewer_count=2, gate_policy_version="advisory-policy-promotion-gate-v0")
-request = PolicyPromotionRequest(current_policy=current, candidate_policy=candidate, evaluation=evidence, readiness=ready)
+from nextgen_memory.policy_promotion_gate import (
+    AdvisoryPolicyPromotionGate,
+    PairedPolicyEvidence,
+    PolicyIdentity,
+    PolicyOperationalReadiness,
+    PolicyPromotionGateConfig,
+    PolicyPromotionRequest,
+)
+
+current = PolicyIdentity(
+    policy_version="control-v1", policy_fingerprint="1" * 64, source_sha="3" * 40
+)
+candidate = PolicyIdentity(
+    policy_version="treatment-v1", policy_fingerprint="2" * 64, source_sha="4" * 40
+)
+evidence = PairedPolicyEvidence(
+    evaluation_id=UUID("00000000-0000-5000-8000-000000001111"),
+    evaluation_content_hash="5" * 64,
+    control_policy_version=current.policy_version,
+    control_policy_fingerprint=current.policy_fingerprint,
+    treatment_policy_version=candidate.policy_version,
+    treatment_policy_fingerprint=candidate.policy_fingerprint,
+    evaluated_base_sha=current.source_sha,
+    evaluated_candidate_sha=candidate.source_sha,
+    verdict=PairedPolicyVerdict.PROMISING,
+    matched_pair_count=24,
+    mean_score_effect=0.08,
+    score_confidence_lower_bound=0.04,
+    score_confidence_upper_bound=0.12,
+    score_standard_error=0.02,
+    mean_token_delta=4.0,
+    mean_latency_delta_ms=8.0,
+    harm_rate=0.01,
+    registry_summary_content_hash="6" * 64,
+    registry_pair_count=24,
+    registry_completed_trial_count=24,
+    registry_failed_count=0,
+    registry_cancelled_count=0,
+    registry_active_count=0,
+)
+ready = PolicyOperationalReadiness(
+    tests_passed=True,
+    integration_passed=True,
+    artifact_integrity_passed=True,
+    rollback_ready=True,
+    safety_violation=False,
+    reviewer_count=2,
+    evidence_age_seconds=60.0,
+)
+config = PolicyPromotionGateConfig(
+    minimum_matched_pairs=20,
+    minimum_score_lower_bound=0.0,
+    maximum_score_standard_error=0.05,
+    maximum_mean_token_delta=10.0,
+    maximum_mean_latency_delta_ms=20.0,
+    maximum_harm_rate=0.05,
+    maximum_evidence_age_seconds=3600.0,
+    minimum_reviewer_count=2,
+    gate_policy_version="advisory-policy-promotion-gate-v0",
+)
+request = PolicyPromotionRequest(
+    current_policy=current, candidate_policy=candidate, evaluation=evidence, readiness=ready
+)
 print(AdvisoryPolicyPromotionGate().evaluate(request, config).render_json(), end="")
-'''
+"""
     outputs: list[str] = []
     for seed in ("1", "2", "37", "999"):
         environment = dict(os.environ)
