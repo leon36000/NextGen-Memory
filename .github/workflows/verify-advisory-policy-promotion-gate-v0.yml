@@ -4,7 +4,7 @@ on:
   pull_request:
 
 concurrency:
-  group: advisory-policy-promotion-gate-v0-exact-verifier
+  group: advisory-policy-promotion-gate-v0-exact-verifier-v2
   cancel-in-progress: true
 
 permissions:
@@ -87,7 +87,7 @@ jobs:
         env:
           EVIDENCE_ROOT: ${{ runner.temp }}/advisory-policy-promotion-${{ matrix.python-version }}
         run: |
-          bash controller/.github/controllers/verify_advisory_policy_promotion_candidate.sh \
+          bash controller/.github/controllers/verify_advisory_policy_promotion_candidate_v2.sh \
             "$GITHUB_WORKSPACE/product" \
             "$EVIDENCE_ROOT" \
             '${{ needs.resolve.outputs.candidate_sha }}' \
