@@ -1,0 +1,333 @@
+name: Finalize policy promotion gate v0 once
+
+on:
+  pull_request:
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+jobs:
+  finalize:
+    if: github.event.pull_request.head.ref == 'feat/policy-promotion-gate-v0-20260824'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/policy-promotion-gate-v0-20260824
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install project and development tools
+        run: python -m pip install -e '.[dev]'
+
+      - name: Add exact package-root exports idempotently
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from __future__ import annotations
+
+          import ast
+          from pathlib import Path
+
+          path = Path('src/nextgen_memory/__init__.py')
+          source = path.read_text(encoding='utf-8')
+          required = {
+              'PolicyPromotionDecision',
+              'PolicyPromotionDisposition',
+              'PolicyPromotionEvidence',
+              'PolicyPromotionGate',
+              'PolicyPromotionGateConfig',
+              'PolicyPromotionReason',
+              'PolicyPromotionValidationError',
+          }
+          import_block = '''from .policy_promotion_gate import (
+              PolicyPromotionDecision,
+              PolicyPromotionDisposition,
+              PolicyPromotionEvidence,
+              PolicyPromotionGate,
+              PolicyPromotionGateConfig,
+              PolicyPromotionReason,
+              PolicyPromotionValidationError,
+          )
+          '''
+          import_block = '\n'.join(
+              line[10:] if line.startswith('          ') else line
+              for line in import_block.splitlines()
+          ).lstrip('\n')
+          if 'from .policy_promotion_gate import (' not in source:
+              marker = 'from .paired_rerank_policy_evaluation import ('
+              if source.count(marker) != 1:
+                  raise SystemExit(
+                      'paired evaluator import marker is missing or ambiguous'
+                  )
+              source = source.replace(marker, import_block + marker, 1)
+
+          tree = ast.parse(source)
+          values: list[str] | None = None
+          for statement in tree.body:
+              if (
+                  isinstance(statement, ast.Assign)
+                  and any(
+                      isinstance(target, ast.Name) and target.id == '__all__'
+                      for target in statement.targets
+                  )
+                  and isinstance(statement.value, (ast.List, ast.Tuple))
+              ):
+                  values = [
+                      element.value
+                      for element in statement.value.elts
+                      if isinstance(element, ast.Constant)
+                      and isinstance(element.value, str)
+                  ]
+                  break
+          if values is None:
+              raise SystemExit('__all__ must be a literal list or tuple')
+          start = source.index('__all__ = [')
+          end = source.index('\n]', start) + 2
+          replacement = '__all__ = [\n' + ''.join(
+              f'    "{name}",\n' for name in sorted(set(values).union(required))
+          ) + ']'
+          path.write_text(source[:start] + replacement + source[end:], encoding='utf-8')
+          PY
+
+      - name: Add approved bounded design and execution plan
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p docs/superpowers/specs docs/superpowers/plans
+          cat > docs/superpowers/specs/2026-08-24-policy-promotion-gate-v0-design.md <<'EOF'
+          # Policy Promotion Gate v0 Design
+
+          **Date:** 2026-08-24
+          **Status:** advisory-only candidate
+          **Base:** `candidate/paired-replay-experiment-registry-v0-20260824`
+
+          ## Goal
+
+          Convert immutable paired-policy evaluation evidence and bounded operational-readiness facts into one deterministic advisory disposition: `promote`, `hold`, or `reject`.
+
+          The gate does not activate, deploy, persist, write feedback, contact infrastructure, read an environment variable, inspect a clock, or generate a random identifier.
+
+          ## Evidence boundary
+
+          The input contains only:
+
+          - evaluation UUID and SHA-256 identity;
+          - control/treatment versions and fingerprints;
+          - current control/treatment fingerprints for drift detection;
+          - paired evaluator verdict;
+          - pair count, mean score effect, confidence interval, harm rate, token delta, and latency delta;
+          - caller-supplied evidence age;
+          - bounded booleans for security, rollback, tests, integration, and artifact integrity;
+          - unique independent reviewer UUIDs.
+
+          No query, prompt, answer, memory body, review text, error text, command output, path, credential, backend identifier, or arbitrary metadata is accepted.
+
+          ## Decision precedence
+
+          Hard rejection dominates every hold condition:
+
+          1. security violation;
+          2. control/treatment policy identity drift;
+          3. evaluator verdict `harmful` or `too_costly`;
+          4. negative mean score effect;
+          5. excessive harm rate, token delta, or latency delta.
+
+          If no rejection applies, the result is `hold` for insufficient pairs, a lower confidence bound at or below the configured threshold, excessive interval width, stale evidence, missing rollback readiness, incomplete tests/integration/artifact verification, insufficient independent reviews, or a non-promising evaluator verdict.
+
+          `promote` is possible only when no bounded reason exists.
+
+          ## Identity and determinism
+
+          Configuration, evidence, reasons, disposition, and decision use canonical JSON with sorted keys and finite values only. SHA-256 binds immutable content and UUID5 binds the decision identity. Reviewer input order is normalized; duplicate reviewers fail closed.
+
+          ## Non-goals
+
+          V0 does not merge code, activate policy, write a rollout record, contact a database, sample traffic, schedule work, learn thresholds, or treat a recommendation as authorization.
+          EOF
+          sed -i 's/^          //' docs/superpowers/specs/2026-08-24-policy-promotion-gate-v0-design.md
+
+          cat > docs/superpowers/plans/2026-08-24-policy-promotion-gate-v0.md <<'EOF'
+          # Policy Promotion Gate v0 Implementation Plan
+
+          **Date:** 2026-08-24
+          **Base:** `candidate/paired-replay-experiment-registry-v0-20260824`
+
+          1. Record a tests-only module-absence RED with Ruff clean.
+          2. Add strict immutable configuration and evidence contracts.
+          3. Implement canonical validation for UUIDs, hashes, finite numbers, rates, intervals, booleans, and reviewer identities.
+          4. Evaluate all rejection and hold reasons without early mutation.
+          5. Apply deterministic rejection-over-hold precedence.
+          6. Bind evidence, configuration, disposition, and reasons to SHA-256 plus UUID5 identity.
+          7. Prove exact retry, reviewer-order, process-hash-seed, and generated-case determinism.
+          8. Audit imports, calls, source markers, privacy, stubs, and side effects.
+          9. Verify Python 3.12/3.13, full regression, isolated wheel API, exact diff scope, and cross-Python evidence.
+          10. Freeze an immutable candidate and request genuine blind GPT-5.6 Sol review before merge.
+
+          No activation, persistence, database, feedback, migration, dependency, release, or corrective-retrieval operation belongs in this plan.
+          EOF
+          sed -i 's/^          //' docs/superpowers/plans/2026-08-24-policy-promotion-gate-v0.md
+
+      - name: Normalize candidate files
+        run: |
+          ruff format \
+            src/nextgen_memory/__init__.py \
+            src/nextgen_memory/policy_promotion_gate.py \
+            tests/test_policy_promotion_gate.py \
+            tests/test_policy_promotion_gate_properties.py \
+            tests/test_policy_promotion_gate_public_api.py
+          ruff check --fix \
+            src/nextgen_memory/__init__.py \
+            src/nextgen_memory/policy_promotion_gate.py \
+            tests/test_policy_promotion_gate.py \
+            tests/test_policy_promotion_gate_properties.py \
+            tests/test_policy_promotion_gate_public_api.py
+          ruff check \
+            src/nextgen_memory/__init__.py \
+            src/nextgen_memory/policy_promotion_gate.py \
+            tests/test_policy_promotion_gate.py \
+            tests/test_policy_promotion_gate_properties.py \
+            tests/test_policy_promotion_gate_public_api.py
+          git diff --check
+
+      - name: Focused policy-promotion contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pytest -q \
+            tests/test_policy_promotion_gate.py \
+            tests/test_policy_promotion_gate_properties.py \
+            tests/test_policy_promotion_gate_public_api.py \
+            | tee /tmp/policy-promotion-focused.txt
+
+      - name: Strict dependency, privacy, stub, and side-effect audit
+        run: |
+          python - <<'PY'
+          from __future__ import annotations
+
+          import ast
+          from pathlib import Path
+
+          path = Path('src/nextgen_memory/policy_promotion_gate.py')
+          source = path.read_text(encoding='utf-8')
+          tree = ast.parse(source, filename=str(path))
+          forbidden_roots = {
+              'asyncio', 'datetime', 'httpx', 'os', 'pathlib', 'psycopg',
+              'pymongo', 'random', 'requests', 'socket', 'sqlalchemy',
+              'subprocess', 'temporalio', 'time', 'urllib',
+          }
+          forbidden_calls = {
+              'eval', 'exec', 'open', 'sleep', 'system', 'urlopen',
+              'uuid1', 'uuid4', 'write_bytes', 'write_text',
+          }
+          violations: list[str] = []
+          for node in ast.walk(tree):
+              if isinstance(node, ast.Pass):
+                  violations.append(f'{node.lineno}:pass')
+              elif isinstance(node, ast.Raise):
+                  exc = node.exc.func if isinstance(node.exc, ast.Call) else node.exc
+                  if (
+                      isinstance(exc, ast.Name)
+                      and exc.id == 'NotImplementedError'
+                  ) or (
+                      isinstance(exc, ast.Attribute)
+                      and exc.attr == 'NotImplementedError'
+                  ):
+                      violations.append(f'{node.lineno}:NotImplementedError')
+              elif isinstance(node, ast.Import):
+                  for alias in node.names:
+                      if alias.name.split('.', 1)[0] in forbidden_roots:
+                          violations.append(f'{node.lineno}:import:{alias.name}')
+              elif isinstance(node, ast.ImportFrom):
+                  if (node.module or '').split('.', 1)[0] in forbidden_roots:
+                      violations.append(f'{node.lineno}:import:{node.module}')
+              elif isinstance(node, ast.Call):
+                  name = node.func.id if isinstance(node.func, ast.Name) else node.func.attr if isinstance(node.func, ast.Attribute) else None
+                  if name in forbidden_calls:
+                      violations.append(f'{node.lineno}:call:{name}')
+          lowered = source.lower()
+          for marker in (
+              'postgresql://', 'mongodb://', 'http://', 'https://',
+              'password', 'credential', '# todo', '# fixme', 'raw_query',
+              'raw_prompt', 'response_text', 'memory_body', 'review_text',
+              'error_message', 'activate_policy', 'write_feedback',
+          ):
+              if marker in lowered:
+                  violations.append(f'text:{marker}')
+          if violations:
+              raise SystemExit('\n'.join(violations))
+          print('policy_promotion_gate_audit_findings=0')
+          PY
+
+      - name: Complete repository regression
+        shell: bash
+        run: |
+          set -euo pipefail
+          ruff check .
+          python -m compileall -q src scripts
+          python -m pytest -q | tee /tmp/policy-promotion-full.txt
+          git diff --check
+
+      - name: Remove transport, stage, and prove exact seven-path product scope
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm .github/workflows/finalize-policy-promotion-gate-once.yml
+          git add -A
+          mapfile -t changed < <(git diff --cached --name-only "${{ github.event.pull_request.base.sha }}" | sort)
+          expected=(
+            docs/superpowers/plans/2026-08-24-policy-promotion-gate-v0.md
+            docs/superpowers/specs/2026-08-24-policy-promotion-gate-v0-design.md
+            src/nextgen_memory/__init__.py
+            src/nextgen_memory/policy_promotion_gate.py
+            tests/test_policy_promotion_gate.py
+            tests/test_policy_promotion_gate_properties.py
+            tests/test_policy_promotion_gate_public_api.py
+          )
+          test "${#changed[@]}" -eq "${#expected[@]}"
+          diff -u <(printf '%s\n' "${expected[@]}" | sort) <(printf '%s\n' "${changed[@]}")
+          test -z "$(git diff --cached --name-only "${{ github.event.pull_request.base.sha }}" -- 'migrations/**' '.github/workflows/**' pyproject.toml 'src/nextgen_memory/corrective_retrieval_*')"
+          git diff --cached --check
+
+      - name: Commit only the verified product candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'feat: add policy promotion gate v0'
+          git push origin HEAD:feat/policy-promotion-gate-v0-20260824
+
+      - name: Publish producer status
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          head=$(git rev-parse HEAD)
+          focused=$(grep -Eo '[0-9]+ passed' /tmp/policy-promotion-focused.txt | tail -1 | awk '{print $1}')
+          full=$(grep -Eo '[0-9]+ passed' /tmp/policy-promotion-full.txt | tail -1 | awk '{print $1}')
+          body=$(cat <<EOF
+          ## Policy promotion gate producer GREEN
+
+          - development head: \`$head\`;
+          - focused tests: \`$focused\`;
+          - full tests: \`$full\`;
+          - Ruff, compileall, strict AST privacy/stub audit: green;
+          - exact final product paths: 7;
+          - activation, persistence, database, feedback, migration, dependency and corrective-retrieval changes: none.
+
+          Independent Python 3.12/3.13 exact-SHA verification and blind GPT-5.6 Sol review remain mandatory. This producer result does not authorize merge or policy activation.
+          EOF
+          )
+          gh api "repos/$REPO/issues/$PR/comments" -f body="$body"
