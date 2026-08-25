@@ -1,0 +1,57 @@
+name: Implement exact review attestation registry v0
+
+on:
+  pull_request:
+
+concurrency:
+  group: exact-review-attestation-registry-v0-product
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+jobs:
+  implement:
+    if: github.event.pull_request.head.ref == 'bootstrap/implement-exact-review-attestation-registry-v0-20260825'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: bootstrap/implement-exact-review-attestation-registry-v0-20260825
+          path: controller
+          fetch-depth: 0
+
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/exact-sha-review-attestation-registry-v0-20260824
+          path: product
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: product/pyproject.toml
+
+      - name: Execute exact product controller
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          bash controller/.github/controllers/implement_exact_review_attestation_registry_v0.sh \
+            "$GITHUB_WORKSPACE/controller" \
+            "$GITHUB_WORKSPACE/product"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: exact-review-attestation-registry-v0-producer
+          path: |
+            /tmp/exact-review-attestation-producer-summary.json
+            /tmp/exact-review-attestation-product.patch
+            /tmp/exact-review-attestation-wheel.whl
+            /tmp/exact-review-attestation-focused.txt
+            /tmp/exact-review-attestation-full.txt
+          if-no-files-found: error
+          retention-days: 7
