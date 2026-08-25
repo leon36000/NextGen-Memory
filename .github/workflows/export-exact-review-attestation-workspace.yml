@@ -1,0 +1,90 @@
+name: Export exact review attestation workspace
+
+on:
+  push:
+    branches:
+      - bootstrap/export-exact-review-attestation-workspace-20260825
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/exact-sha-review-attestation-registry-v0-20260824
+          path: workspace
+          fetch-depth: 0
+
+      - name: Overlay exact normalized RED and prove source identities
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd workspace
+          git fetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*'
+          feature_sha='40fae50aadc7f77633708d71641018612b08f23b'
+          red_sha='a33775aec1a3c1de75133a92717a5bd7bf664e6e'
+          base_sha='f4f3aca9759b5b7a60691017c2211152c011ea92'
+          test "$(git rev-parse HEAD)" = "$feature_sha"
+          test "$(git merge-base HEAD "$base_sha")" = "$base_sha"
+          git cat-file -e "$red_sha^{commit}"
+          test "$(git merge-base "$base_sha" "$red_sha")" = "$base_sha"
+          git checkout "$red_sha" -- \
+            docs/exact-sha-review-attestation-registry-v0-red.md \
+            tests/test_review_attestation_registry.py \
+            tests/test_review_attestation_registry_properties.py \
+            tests/test_review_attestation_registry_public_api.py
+          ruff check \
+            tests/test_review_attestation_registry.py \
+            tests/test_review_attestation_registry_properties.py \
+            tests/test_review_attestation_registry_public_api.py
+          ruff format --check \
+            tests/test_review_attestation_registry.py \
+            tests/test_review_attestation_registry_properties.py \
+            tests/test_review_attestation_registry_public_api.py
+          python -m py_compile \
+            tests/test_review_attestation_registry.py \
+            tests/test_review_attestation_registry_properties.py \
+            tests/test_review_attestation_registry_public_api.py
+          cat > .mhead-workspace-source.json <<EOF
+          {
+            "base_sha": "$base_sha",
+            "feature_branch": "feat/exact-sha-review-attestation-registry-v0-20260824",
+            "feature_sha": "$feature_sha",
+            "red_branch": "tdd/exact-sha-review-attestation-registry-v0-red-20260824",
+            "red_sha": "$red_sha"
+          }
+          EOF
+          sed -i 's/^          //' .mhead-workspace-source.json
+
+      - name: Build deterministic source snapshot
+        shell: bash
+        run: |
+          set -euo pipefail
+          tar \
+            --exclude='.git' \
+            --exclude='.pytest_cache' \
+            --exclude='.ruff_cache' \
+            --exclude='__pycache__' \
+            --sort=name \
+            --mtime='UTC 2026-08-25' \
+            --owner=0 \
+            --group=0 \
+            --numeric-owner \
+            -czf exact-review-attestation-workspace.tar.gz \
+            -C workspace .
+          sha256sum exact-review-attestation-workspace.tar.gz \
+            > exact-review-attestation-workspace.tar.gz.sha256
+          cat exact-review-attestation-workspace.tar.gz.sha256
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: exact-review-attestation-workspace
+          path: |
+            exact-review-attestation-workspace.tar.gz
+            exact-review-attestation-workspace.tar.gz.sha256
+          if-no-files-found: error
+          retention-days: 7
