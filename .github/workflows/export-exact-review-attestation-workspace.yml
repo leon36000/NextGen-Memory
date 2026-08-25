@@ -19,6 +19,17 @@ jobs:
           path: workspace
           fetch-depth: 0
 
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: workspace/pyproject.toml
+
+      - name: Install project development tools
+        run: |
+          cd workspace
+          python -m pip install -e '.[dev]'
+
       - name: Overlay exact normalized RED and prove source identities
         shell: bash
         run: |
