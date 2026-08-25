@@ -56,10 +56,6 @@ identity_replacements = (
     ("red-v3", "red-v4"),
     ("RED v3", "RED v4"),
     ("RED-v3", "RED-v4"),
-    (
-        "0a8e193269e425dd51f740b495579f949a237ce1",
-        "130db57eaa2fe0f9809bfa672c0467ce087a8089",
-    ),
 )
 for old, new in identity_replacements:
     if old not in source:
