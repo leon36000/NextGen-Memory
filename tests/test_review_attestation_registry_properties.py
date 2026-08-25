@@ -8,7 +8,6 @@ import sys
 from pathlib import Path
 
 import pytest
-
 from nextgen_memory.review_attestation_registry import (
     ExactShaReviewAttestation,
     ExactShaReviewRequest,
@@ -17,8 +16,8 @@ from nextgen_memory.review_attestation_registry import (
     ReviewAttestationConflictError,
     ReviewAttestationValidationError,
     ReviewAttestationVerdict,
-    ReviewFindingCode,
     ReviewerIdentity,
+    ReviewFindingCode,
     ReviewModel,
 )
 
@@ -88,9 +87,7 @@ def values_for_mode(
     index: int,
     mode: int,
 ) -> tuple[ExactShaReviewAttestation, ...]:
-    reviewer_a, reviewer_b, reviewer_c, reviewer_d = (
-        review_request.trusted_reviewer_fingerprints
-    )
+    reviewer_a, reviewer_b, reviewer_c, reviewer_d = review_request.trusted_reviewer_fingerprints
     values = [attestation_for(review_request, reviewer_a, f"{index}:a")]
     if mode in {1, 2, 3}:
         values.append(attestation_for(review_request, reviewer_b, f"{index}:b"))
@@ -146,9 +143,7 @@ def test_five_thousand_generated_traces_preserve_state_and_retry_invariants() ->
         assert summary.registered_attestation_count == len(values)
         assert summary.distinct_reviewer_count == len(values)
         assert (
-            summary.approval_count
-            + summary.changes_required_count
-            + summary.evidence_blocked_count
+            summary.approval_count + summary.changes_required_count + summary.evidence_blocked_count
             == len(values)
         )
         state_counts[decision.state] += 1
@@ -274,22 +269,18 @@ def test_changed_reviewer_retry_conflicts_without_partial_mutation() -> None:
     fingerprint = review_request.trusted_reviewer_fingerprints[0]
     registry = InMemoryExactShaReviewAttestationRegistry()
     registry.register_request(review_request)
-    first = registry.record_attestation(
-        attestation_for(review_request, fingerprint, "first")
-    )
+    first = registry.record_attestation(attestation_for(review_request, fingerprint, "first"))
     before = registry.summary(review_request.id)
 
     with pytest.raises(ReviewAttestationConflictError):
-        registry.record_attestation(
-            attestation_for(review_request, fingerprint, "changed")
-        )
+        registry.record_attestation(attestation_for(review_request, fingerprint, "changed"))
 
     assert registry.summary(review_request.id) == before
     assert registry.attestations(review_request.id) == (first,)
 
 
 def test_process_hash_seed_does_not_change_summary_or_decision_json() -> None:
-    script = r'''
+    script = r"""
 import hashlib
 import json
 from nextgen_memory.review_attestation_registry import (
@@ -348,7 +339,7 @@ payload = {
     "decision": json.loads(registry.decision(request.id).render_json()),
 }
 print(json.dumps(payload, sort_keys=True, separators=(",", ":")))
-'''
+"""
     outputs: list[str] = []
     for seed in ("1", "37", "999"):
         environment = dict(os.environ)

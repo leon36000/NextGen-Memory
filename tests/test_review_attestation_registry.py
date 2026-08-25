@@ -5,7 +5,6 @@ from dataclasses import FrozenInstanceError, replace
 from uuid import UUID
 
 import pytest
-
 from nextgen_memory.review_attestation_registry import (
     ExactShaReviewAttestation,
     ExactShaReviewRequest,
@@ -15,8 +14,8 @@ from nextgen_memory.review_attestation_registry import (
     ReviewAttestationStateError,
     ReviewAttestationValidationError,
     ReviewAttestationVerdict,
-    ReviewFindingCode,
     ReviewerIdentity,
+    ReviewFindingCode,
     ReviewModel,
 )
 
@@ -122,10 +121,7 @@ def test_pending_approved_evidence_blocked_and_blocked_precedence() -> None:
             suffix="c",
         )
     )
-    assert (
-        registry.decision(review_request.id).state
-        is ReviewAdvisoryState.EVIDENCE_BLOCKED
-    )
+    assert registry.decision(review_request.id).state is ReviewAdvisoryState.EVIDENCE_BLOCKED
 
     registry.record_attestation(
         attestation(
@@ -168,9 +164,7 @@ def test_changed_request_or_reviewer_retry_conflicts_without_mutation() -> None:
         ReviewAttestationConflictError,
         match="reviewer attestation conflict",
     ):
-        registry.record_attestation(
-            attestation(review_request, review_artifact_sha256="f" * 64)
-        )
+        registry.record_attestation(attestation(review_request, review_artifact_sha256="f" * 64))
 
     assert registry.summary(review_request.id) == before
     assert registry.attestations(review_request.id) == (value,)
@@ -398,12 +392,8 @@ def test_collection_iterators_are_hard_bounded() -> None:
 
 
 def test_collection_permutations_are_identity_invariant() -> None:
-    first_request = request(
-        trusted_reviewer_fingerprints=(REVIEWER_A, REVIEWER_B, REVIEWER_C)
-    )
-    second_request = request(
-        trusted_reviewer_fingerprints={REVIEWER_C, REVIEWER_A, REVIEWER_B}
-    )
+    first_request = request(trusted_reviewer_fingerprints=(REVIEWER_A, REVIEWER_B, REVIEWER_C))
+    second_request = request(trusted_reviewer_fingerprints={REVIEWER_C, REVIEWER_A, REVIEWER_B})
     assert first_request == second_request
 
     first = attestation(
