@@ -1,0 +1,232 @@
+name: Qualify exact review attestation registry RED v2
+
+on:
+  pull_request:
+
+concurrency:
+  group: exact-review-attestation-red-v2
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+jobs:
+  qualify:
+    if: github.event.pull_request.head.ref == 'bootstrap/qualify-exact-review-attestation-red-v2-20260825'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: tdd/exact-sha-review-attestation-registry-v0-red-v2-20260825
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Resolve exact immutable RED v1 and product base
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*'
+          base_sha='f4f3aca9759b5b7a60691017c2211152c011ea92'
+          red_v1_sha='a33775aec1a3c1de75133a92717a5bd7bf664e6e'
+          test "$(git rev-parse HEAD)" = "$red_v1_sha"
+          test "$(git merge-base "$base_sha" HEAD)" = "$base_sha"
+          printf 'BASE_SHA=%s\nRED_V1_SHA=%s\n' \
+            "$base_sha" "$red_v1_sha" | tee -a "$GITHUB_ENV"
+
+      - name: Install project and development tools
+        run: python -m pip install -e '.[dev]'
+
+      - name: Correct only the lowercase authenticated-envelope fixture
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+
+          test_path = Path('tests/test_review_attestation_registry.py')
+          source = test_path.read_text(encoding='utf-8')
+          old = '"authenticated_envelope_sha256": suffix.upper() * 64,'
+          new = '"authenticated_envelope_sha256": suffix * 64,'
+          if source.count(old) != 1 or new in source:
+              raise SystemExit('expected exactly one uppercase envelope fixture')
+          test_path.write_text(source.replace(old, new, 1), encoding='utf-8')
+
+          doc_path = Path('docs/exact-sha-review-attestation-registry-v0-red.md')
+          document = doc_path.read_text(encoding='utf-8')
+          document = document.replace(
+              '# Exact-SHA Review Attestation Registry v0 — TDD RED Evidence',
+              '# Exact-SHA Review Attestation Registry v0 — TDD RED v2 Evidence',
+              1,
+          )
+          document = document.replace(
+              '**TDD branch:** `tdd/exact-sha-review-attestation-registry-v0-red-20260824`',
+              '**TDD branch:** `tdd/exact-sha-review-attestation-registry-v0-red-v2-20260825`',
+              1,
+          )
+          document += '''
+
+          ## Fixture correction
+
+          RED v2 preserves the complete accepted test contract and corrects one invalid fixture from RED v1: authenticated-envelope SHA-256 values derived from suffixes `a` through `d` remain lowercase instead of being uppercased. This aligns the fixture with the explicit lowercase SHA-256 validation contract. No behavior assertion is removed or weakened.
+          '''
+          document = '\n'.join(
+              line[10:] if line.startswith('          ') else line
+              for line in document.splitlines()
+          ) + '\n'
+          doc_path.write_text(document, encoding='utf-8')
+          PY
+
+      - name: Prove exact two-line semantic delta from accepted RED v1
+        shell: bash
+        run: |
+          set -euo pipefail
+          files=(
+            tests/test_review_attestation_registry.py
+            tests/test_review_attestation_registry_properties.py
+            tests/test_review_attestation_registry_public_api.py
+          )
+          ruff check "${files[@]}"
+          ruff format --check "${files[@]}"
+          python -m py_compile "${files[@]}"
+          git diff --check
+          mapfile -t modified < <(git diff --name-only | sort)
+          expected=(
+            docs/exact-sha-review-attestation-registry-v0-red.md
+            tests/test_review_attestation_registry.py
+          )
+          test "${#modified[@]}" -eq "${#expected[@]}"
+          diff -u \
+            <(printf '%s\n' "${expected[@]}" | sort) \
+            <(printf '%s\n' "${modified[@]}")
+          git diff -- tests/test_review_attestation_registry.py \
+            | grep -F -- '-        "authenticated_envelope_sha256": suffix.upper() * 64,' >/dev/null
+          git diff -- tests/test_review_attestation_registry.py \
+            | grep -F -- '+        "authenticated_envelope_sha256": suffix * 64,' >/dev/null
+          test "$(git diff --numstat -- tests/test_review_attestation_registry.py | awk '{print $1}')" -eq 1
+          test "$(git diff --numstat -- tests/test_review_attestation_registry.py | awk '{print $2}')" -eq 1
+
+      - name: Prove each RED v2 test reaches only the missing-module boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          red_root="$RUNNER_TEMP/exact-review-attestation-red-v2"
+          rm -rf "$red_root"
+          git worktree add --detach "$red_root" "$BASE_SHA"
+          mkdir -p "$red_root/tests" "$red_root/docs"
+          files=(
+            tests/test_review_attestation_registry.py
+            tests/test_review_attestation_registry_properties.py
+            tests/test_review_attestation_registry_public_api.py
+          )
+          for file in "${files[@]}"; do
+            cp "$file" "$red_root/$file"
+          done
+          cp docs/exact-sha-review-attestation-registry-v0-red.md \
+            "$red_root/docs/exact-sha-review-attestation-registry-v0-red.md"
+          cd "$red_root"
+          test ! -e src/nextgen_memory/review_attestation_registry.py
+          if grep -F 'review_attestation_registry' src/nextgen_memory/__init__.py; then
+            echo 'base package root unexpectedly exports the absent module' >&2
+            exit 1
+          fi
+          for file in "${files[@]}"; do
+            output="/tmp/$(basename "$file" .py)-red-v2.txt"
+            set +e
+            PYTHONPATH="$PWD/src" python -m pytest --collect-only -q "$file" \
+              > "$output" 2>&1
+            rc=$?
+            set -e
+            test "$rc" -ne 0
+            FILE="$file" OUTPUT="$output" python - <<'PY'
+          from __future__ import annotations
+
+          import os
+          import re
+          from pathlib import Path
+
+          text = Path(os.environ['OUTPUT']).read_text(
+              encoding='utf-8',
+              errors='replace',
+          )
+          modules = set(
+              re.findall(
+                  r"ModuleNotFoundError: No module named '([^']+)'",
+                  text,
+              )
+          )
+          if modules != {'nextgen_memory.review_attestation_registry'}:
+              raise SystemExit(
+                  f"{os.environ['FILE']}: unexpected missing modules {sorted(modules)!r}"
+              )
+          for marker in (
+              'SyntaxError',
+              'IndentationError',
+              'NameError',
+              'ERROR at setup',
+              'fixture ',
+          ):
+              if marker in text:
+                  raise SystemExit(
+                      f"{os.environ['FILE']}: unintended RED marker {marker}"
+                  )
+          PY
+          done
+
+      - name: Commit and publish immutable RED v2
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$GITHUB_WORKSPACE"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add \
+            docs/exact-sha-review-attestation-registry-v0-red.md \
+            tests/test_review_attestation_registry.py
+          git diff --cached --check
+          git commit -m 'test: correct exact review attestation envelope fixture'
+          red_v2_sha=$(git rev-parse HEAD)
+          mapfile -t changed < <(git diff --name-only "$BASE_SHA"...HEAD | sort)
+          expected=(
+            docs/exact-sha-review-attestation-registry-v0-red.md
+            tests/test_review_attestation_registry.py
+            tests/test_review_attestation_registry_properties.py
+            tests/test_review_attestation_registry_public_api.py
+          )
+          test "${#changed[@]}" -eq "${#expected[@]}"
+          diff -u \
+            <(printf '%s\n' "${expected[@]}" | sort) \
+            <(printf '%s\n' "${changed[@]}")
+          git push origin HEAD:tdd/exact-sha-review-attestation-registry-v0-red-v2-20260825
+          printf 'RED_V2_SHA=%s\n' "$red_v2_sha" | tee -a "$GITHUB_ENV"
+
+      - name: Publish durable RED v2 status and close without merge
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SELF_PR: ${{ github.event.pull_request.number }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          body=$(cat <<EOF
+          ## Exact-SHA review attestation RED v2 accepted
+
+          - base: \`$BASE_SHA\`;
+          - accepted RED v1: \`$RED_V1_SHA\`;
+          - corrected RED v2: \`$RED_V2_SHA\`;
+          - product-test delta: one lowercase authenticated-envelope fixture line;
+          - assertions removed or weakened: none;
+          - exact surface: four paths;
+          - Ruff, formatting, syntax, and independent missing-module collection proof: green;
+          - implementation and package export: absent;
+          - merge allowed: false.
+          EOF
+          )
+          gh api "repos/$REPO/issues/165/comments" --raw-field body="$body" >/dev/null
+          gh api --method PATCH "repos/$REPO/pulls/$SELF_PR" -f state=closed >/dev/null
