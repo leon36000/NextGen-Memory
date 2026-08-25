@@ -1,8 +1,8 @@
 # Exact-SHA Review Attestation Registry v0 — TDD RED v4 Evidence
 
-**Date:** 2026-08-24  
-**Base branch:** `candidate/advisory-policy-promotion-gate-v0-20260824`  
-**Base SHA:** `f4f3aca9759b5b7a60691017c2211152c011ea92`  
+**Date:** 2026-08-24
+**Base branch:** `candidate/advisory-policy-promotion-gate-v0-20260824`
+**Base SHA:** `f4f3aca9759b5b7a60691017c2211152c011ea92`
 **TDD branch:** `tdd/exact-sha-review-attestation-registry-v0-red-v4-20260825`
 
 The tests-only contract defines:
