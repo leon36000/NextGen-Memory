@@ -4,7 +4,7 @@ on:
   pull_request:
 
 concurrency:
-  group: exact-review-attestation-registry-v0-product-v3
+  group: exact-review-attestation-registry-v0-product-v4
   cancel-in-progress: true
 
 permissions:
@@ -36,11 +36,11 @@ jobs:
           cache: pip
           cache-dependency-path: product/pyproject.toml
 
-      - name: Execute exact product controller v3
+      - name: Execute exact product controller v4
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          bash controller/.github/controllers/run_implement_exact_review_attestation_registry_v0_v3.sh \
+          bash controller/.github/controllers/run_implement_exact_review_attestation_registry_v0_v4.sh \
             "$GITHUB_WORKSPACE/controller" \
             "$GITHUB_WORKSPACE/product"
 
