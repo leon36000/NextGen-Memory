@@ -1,0 +1,418 @@
+name: Qualify exact review attestation registry RED v5b
+
+on:
+  pull_request:
+
+concurrency:
+  group: exact-review-attestation-red-v5b
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+jobs:
+  qualify:
+    if: github.event.pull_request.head.ref == 'bootstrap/qualify-exact-review-attestation-red-v5-20260825'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: tdd/exact-sha-review-attestation-registry-v0-red-v5-20260825
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install exact qualification toolchain
+        run: |
+          python -m pip install -e '.[dev]'
+          python -m pip install 'ruff==0.16.4'
+          ruff --version
+
+      - name: Resolve exact immutable identities
+        id: identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*'
+          base_sha='f4f3aca9759b5b7a60691017c2211152c011ea92'
+          red_v4_sha='130db57eaa2fe0f9809bfa672c0467ce087a8089'
+          test "$(git rev-parse HEAD)" = "$red_v4_sha"
+          test "$(git merge-base "$base_sha" HEAD)" = "$base_sha"
+          printf 'base_sha=%s\nred_v4_sha=%s\n' \
+            "$base_sha" "$red_v4_sha" | tee -a "$GITHUB_OUTPUT"
+
+      - name: Build Ruff-stable context-invariant imports
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from __future__ import annotations
+
+          import ast
+          from pathlib import Path
+
+          target_module = 'nextgen_memory.review_attestation_registry'
+          paths = (
+              Path('tests/test_review_attestation_registry.py'),
+              Path('tests/test_review_attestation_registry_properties.py'),
+          )
+
+          def assignment(name: str) -> str:
+              single = f'{name} = _review_attestation_registry.{name}'
+              if len(single) <= 100:
+                  return single + '\n'
+              return (
+                  f'{name} = (\n'
+                  f'    _review_attestation_registry.{name}\n'
+                  ')\n'
+              )
+
+          for path in paths:
+              source = path.read_text(encoding='utf-8')
+              tree = ast.parse(source, filename=str(path))
+              target_imports = [
+                  node
+                  for node in tree.body
+                  if isinstance(node, ast.ImportFrom)
+                  and node.module == target_module
+              ]
+              if len(target_imports) != 1:
+                  raise SystemExit(
+                      f'{path}: expected one static target-module import'
+                  )
+              node = target_imports[0]
+              names = tuple(alias.name for alias in node.names)
+              if (
+                  not names
+                  or len(set(names)) != len(names)
+                  or any(alias.asname is not None for alias in node.names)
+              ):
+                  raise SystemExit(f'{path}: target import inventory differs')
+              anchor = 'from __future__ import annotations\n\n'
+              if 'import importlib\n' not in source:
+                  if source.count(anchor) != 1:
+                      raise SystemExit(f'{path}: future-import anchor differs')
+                  source = source.replace(anchor, anchor + 'import importlib\n', 1)
+                  tree = ast.parse(source, filename=str(path))
+                  target_imports = [
+                      item
+                      for item in tree.body
+                      if isinstance(item, ast.ImportFrom)
+                      and item.module == target_module
+                  ]
+                  if len(target_imports) != 1:
+                      raise SystemExit(f'{path}: target import moved unexpectedly')
+                  node = target_imports[0]
+              lines = source.splitlines(keepends=True)
+              replacement = (
+                  '\n_review_attestation_registry = importlib.import_module(\n'
+                  '    "nextgen_memory.review_attestation_registry"\n'
+                  ')\n'
+                  + ''.join(assignment(name) for name in names)
+              )
+              lines[node.lineno - 1 : node.end_lineno] = [replacement]
+              rewritten = ''.join(lines)
+              path.write_text(rewritten, encoding='utf-8')
+
+          document = Path(
+              'docs/exact-sha-review-attestation-registry-v0-red.md'
+          )
+          source = document.read_text(encoding='utf-8')
+          source = source.replace(
+              '# Exact-SHA Review Attestation Registry v0 — TDD RED v4 Evidence',
+              '# Exact-SHA Review Attestation Registry v0 — TDD RED v5 Evidence',
+              1,
+          )
+          source = source.replace(
+              '**TDD branch:** `tdd/exact-sha-review-attestation-registry-v0-red-v4-20260825`',
+              '**TDD branch:** `tdd/exact-sha-review-attestation-registry-v0-red-v5-20260825`',
+              1,
+          )
+          section = '''
+
+          ## Context-invariant focused and property bootstrap
+
+          RED v5 removes the remaining Ruff classification dependency from the focused and property test modules. Each module loads `nextgen_memory.review_attestation_registry` through standard-library `importlib` at module initialization and then binds the exact same unique public-name inventory. Long aliases use parenthesized multiline assignments while preserving the same assignment AST. All helper, fixture, class, test-function, assertion, generated-trace, expected-state, exception, retry, conflict, and determinism definition ASTs remain identical to RED v4. Collection against the immutable base still fails only because the target module is absent. No lint exemption, skip, xfail, stub, assertion weakening, or product behavior is introduced.
+          '''
+          section = '\n'.join(
+              line[10:] if line.startswith('          ') else line
+              for line in section.splitlines()
+          ) + '\n'
+          if '## Context-invariant focused and property bootstrap' not in source:
+              source += section
+          document.write_text(source, encoding='utf-8')
+          PY
+
+      - name: Normalize and prove exact modified paths
+        shell: bash
+        run: |
+          set -euo pipefail
+          files=(
+            tests/test_review_attestation_registry.py
+            tests/test_review_attestation_registry_properties.py
+            tests/test_review_attestation_registry_public_api.py
+          )
+          ruff check --fix "${files[@]}"
+          ruff format "${files[@]}"
+          ruff check "${files[@]}"
+          ruff format --check "${files[@]}"
+          python -m py_compile "${files[@]}"
+          git diff --check
+          mapfile -t modified < <(git diff --name-only | sort)
+          expected=(
+            docs/exact-sha-review-attestation-registry-v0-red.md
+            tests/test_review_attestation_registry.py
+            tests/test_review_attestation_registry_properties.py
+          )
+          test "${#modified[@]}" -eq "${#expected[@]}"
+          diff -u <(printf '%s\n' "${expected[@]}" | sort) \
+            <(printf '%s\n' "${modified[@]}")
+
+      - name: Prove definition ASTs and unique symbol inventories unchanged
+        env:
+          RED_V4_SHA: ${{ steps.identity.outputs.red_v4_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --exit-code "$RED_V4_SHA" -- \
+            tests/test_review_attestation_registry_public_api.py
+          python - <<'PY'
+          from __future__ import annotations
+
+          import ast
+          import os
+          import subprocess
+          from pathlib import Path
+
+          target_module = 'nextgen_memory.review_attestation_registry'
+          paths = (
+              Path('tests/test_review_attestation_registry.py'),
+              Path('tests/test_review_attestation_registry_properties.py'),
+          )
+
+          def definitions(tree: ast.Module) -> tuple[tuple[str, str, str], ...]:
+              values = []
+              for node in tree.body:
+                  if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                      values.append(
+                          (
+                              type(node).__name__,
+                              node.name,
+                              ast.dump(
+                                  node,
+                                  annotate_fields=True,
+                                  include_attributes=False,
+                              ),
+                          )
+                      )
+              return tuple(values)
+
+          def imported_names(tree: ast.Module) -> tuple[str, ...]:
+              imports = [
+                  node
+                  for node in tree.body
+                  if isinstance(node, ast.ImportFrom)
+                  and node.module == target_module
+              ]
+              if len(imports) != 1:
+                  raise SystemExit('RED v4 target import differs')
+              values = tuple(alias.name for alias in imports[0].names)
+              if len(values) != len(set(values)):
+                  raise SystemExit('RED v4 imported names are not unique')
+              return values
+
+          def bound_names(tree: ast.Module) -> tuple[str, ...]:
+              names = []
+              calls = 0
+              for node in tree.body:
+                  if (
+                      isinstance(node, ast.Assign)
+                      and len(node.targets) == 1
+                      and isinstance(node.targets[0], ast.Name)
+                  ):
+                      target = node.targets[0].id
+                      if target == '_review_attestation_registry':
+                          if not (
+                              isinstance(node.value, ast.Call)
+                              and isinstance(node.value.func, ast.Attribute)
+                              and isinstance(node.value.func.value, ast.Name)
+                              and node.value.func.value.id == 'importlib'
+                              and node.value.func.attr == 'import_module'
+                              and len(node.value.args) == 1
+                              and isinstance(node.value.args[0], ast.Constant)
+                              and node.value.args[0].value == target_module
+                          ):
+                              raise SystemExit('dynamic module bootstrap differs')
+                          calls += 1
+                      elif (
+                          isinstance(node.value, ast.Attribute)
+                          and isinstance(node.value.value, ast.Name)
+                          and node.value.value.id == '_review_attestation_registry'
+                          and node.value.attr == target
+                      ):
+                          names.append(target)
+              if calls != 1:
+                  raise SystemExit('dynamic module bootstrap is absent or duplicated')
+              if len(names) != len(set(names)):
+                  raise SystemExit('dynamic public bindings are not unique')
+              return tuple(names)
+
+          for path in paths:
+              before_source = subprocess.check_output(
+                  ('git', 'show', f'{os.environ["RED_V4_SHA"]}:{path.as_posix()}'),
+                  text=True,
+              )
+              after_source = path.read_text(encoding='utf-8')
+              before = ast.parse(before_source, filename=str(path))
+              after = ast.parse(after_source, filename=str(path))
+              if definitions(before) != definitions(after):
+                  raise SystemExit(f'{path}: helper/test definition ASTs changed')
+              before_names = imported_names(before)
+              after_names = bound_names(after)
+              if len(before_names) != len(after_names):
+                  raise SystemExit(f'{path}: public symbol count changed')
+              if sorted(before_names) != sorted(after_names):
+                  raise SystemExit(f'{path}: public symbol inventory changed')
+              if any(
+                  isinstance(node, ast.ImportFrom) and node.module == target_module
+                  for node in after.body
+              ):
+                  raise SystemExit(f'{path}: static target import remains')
+              importlib_imports = [
+                  node
+                  for node in after.body
+                  if isinstance(node, ast.Import)
+                  and any(alias.name == 'importlib' for alias in node.names)
+              ]
+              if len(importlib_imports) != 1:
+                  raise SystemExit(f'{path}: importlib import differs')
+              for marker in ('# noqa', 'pytest.mark.skip', 'pytest.mark.xfail'):
+                  if marker in after_source:
+                      raise SystemExit(f'{path}: forbidden weakening marker {marker}')
+          PY
+
+      - name: Prove each file reaches only the intended module-absence RED
+        env:
+          BASE_SHA: ${{ steps.identity.outputs.base_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          red_root="$RUNNER_TEMP/exact-review-attestation-red-v5b"
+          rm -rf "$red_root"
+          git worktree add --detach "$red_root" "$BASE_SHA"
+          mkdir -p "$red_root/tests" "$red_root/docs"
+          files=(
+            tests/test_review_attestation_registry.py
+            tests/test_review_attestation_registry_properties.py
+            tests/test_review_attestation_registry_public_api.py
+          )
+          for file in "${files[@]}"; do cp "$file" "$red_root/$file"; done
+          cp docs/exact-sha-review-attestation-registry-v0-red.md "$red_root/docs/"
+          cd "$red_root"
+          test ! -e src/nextgen_memory/review_attestation_registry.py
+          if grep -F 'review_attestation_registry' src/nextgen_memory/__init__.py; then
+            echo 'base package root unexpectedly exports the absent module' >&2
+            exit 1
+          fi
+          for file in "${files[@]}"; do
+            output="/tmp/$(basename "$file" .py)-red-v5b.txt"
+            set +e
+            PYTHONPATH="$PWD/src" python -m pytest --collect-only -q "$file" \
+              > "$output" 2>&1
+            rc=$?
+            set -e
+            test "$rc" -ne 0
+            FILE="$file" OUTPUT="$output" python - <<'PY'
+          from __future__ import annotations
+
+          import os
+          import re
+          from pathlib import Path
+
+          text = Path(os.environ['OUTPUT']).read_text(
+              encoding='utf-8', errors='replace'
+          )
+          modules = set(
+              re.findall(
+                  r"ModuleNotFoundError: No module named '([^']+)'",
+                  text,
+              )
+          )
+          if modules != {'nextgen_memory.review_attestation_registry'}:
+              raise SystemExit(
+                  f"{os.environ['FILE']}: unexpected missing modules {sorted(modules)!r}"
+              )
+          for marker in (
+              'SyntaxError', 'IndentationError', 'NameError',
+              'ERROR at setup', 'fixture ',
+          ):
+              if marker in text:
+                  raise SystemExit(
+                      f"{os.environ['FILE']}: unintended RED marker {marker}"
+                  )
+          PY
+          done
+
+      - name: Commit immutable RED v5 and prove exact scope
+        id: publish
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add \
+            docs/exact-sha-review-attestation-registry-v0-red.md \
+            tests/test_review_attestation_registry.py \
+            tests/test_review_attestation_registry_properties.py
+          git diff --cached --check
+          git commit -m 'test: make review attestation RED fully context-invariant'
+          red_v5_sha=$(git rev-parse HEAD)
+          mapfile -t changed < <(
+            git diff --name-only '${{ steps.identity.outputs.base_sha }}'...HEAD \
+              | sort
+          )
+          expected=(
+            docs/exact-sha-review-attestation-registry-v0-red.md
+            tests/test_review_attestation_registry.py
+            tests/test_review_attestation_registry_properties.py
+            tests/test_review_attestation_registry_public_api.py
+          )
+          test "${#changed[@]}" -eq "${#expected[@]}"
+          diff -u <(printf '%s\n' "${expected[@]}" | sort) \
+            <(printf '%s\n' "${changed[@]}")
+          test -z "$(git diff --name-only '${{ steps.identity.outputs.base_sha }}'...HEAD -- '.github/workflows/**' 'migrations/**' pyproject.toml 'src/**')"
+          git push origin HEAD:tdd/exact-sha-review-attestation-registry-v0-red-v5-20260825
+          echo "red_v5_sha=$red_v5_sha" >> "$GITHUB_OUTPUT"
+
+      - name: Publish durable status and close without merge
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SELF_PR: ${{ github.event.pull_request.number }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          body=$(cat <<EOF
+          ## Fully context-invariant Exact-SHA review attestation RED v5 accepted
+
+          - base: \`${{ steps.identity.outputs.base_sha }}\`;
+          - accepted RED v4: \`${{ steps.identity.outputs.red_v4_sha }}\`;
+          - RED v5: \`${{ steps.publish.outputs.red_v5_sha }}\`;
+          - exact surface: four paths;
+          - Ruff 0.16.4, formatting, and syntax: clean;
+          - public API test: byte-identical to v4;
+          - every focused/property helper, fixture, class and test definition AST: identical to v4;
+          - unique imported public symbol inventories: identical to v4;
+          - each file independently reaches only \`ModuleNotFoundError: nextgen_memory.review_attestation_registry\`;
+          - lint exemptions, skipped tests, stubs, implementation and exports: absent;
+          - merge allowed: false.
+          EOF
+          )
+          gh api "repos/$REPO/issues/165/comments" --raw-field body="$body" >/dev/null
+          gh api --method PATCH "repos/$REPO/pulls/$SELF_PR" -f state=closed >/dev/null
