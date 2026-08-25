@@ -1,23 +1,26 @@
 from __future__ import annotations
 
+import importlib
 import json
 from dataclasses import FrozenInstanceError, replace
 from uuid import UUID
 
 import pytest
-from nextgen_memory.review_attestation_registry import (
-    ExactShaReviewAttestation,
-    ExactShaReviewRequest,
-    InMemoryExactShaReviewAttestationRegistry,
-    ReviewAdvisoryState,
-    ReviewAttestationConflictError,
-    ReviewAttestationStateError,
-    ReviewAttestationValidationError,
-    ReviewAttestationVerdict,
-    ReviewerIdentity,
-    ReviewFindingCode,
-    ReviewModel,
+
+_review_attestation_registry = importlib.import_module("nextgen_memory.review_attestation_registry")
+ExactShaReviewAttestation = _review_attestation_registry.ExactShaReviewAttestation
+ExactShaReviewRequest = _review_attestation_registry.ExactShaReviewRequest
+InMemoryExactShaReviewAttestationRegistry = (
+    _review_attestation_registry.InMemoryExactShaReviewAttestationRegistry
 )
+ReviewAdvisoryState = _review_attestation_registry.ReviewAdvisoryState
+ReviewAttestationConflictError = _review_attestation_registry.ReviewAttestationConflictError
+ReviewAttestationStateError = _review_attestation_registry.ReviewAttestationStateError
+ReviewAttestationValidationError = _review_attestation_registry.ReviewAttestationValidationError
+ReviewAttestationVerdict = _review_attestation_registry.ReviewAttestationVerdict
+ReviewerIdentity = _review_attestation_registry.ReviewerIdentity
+ReviewFindingCode = _review_attestation_registry.ReviewFindingCode
+ReviewModel = _review_attestation_registry.ReviewModel
 
 BASE_SHA = "1" * 40
 CANDIDATE_SHA = "2" * 40

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib
 import json
 import os
 import subprocess
@@ -8,18 +9,20 @@ import sys
 from pathlib import Path
 
 import pytest
-from nextgen_memory.review_attestation_registry import (
-    ExactShaReviewAttestation,
-    ExactShaReviewRequest,
-    InMemoryExactShaReviewAttestationRegistry,
-    ReviewAdvisoryState,
-    ReviewAttestationConflictError,
-    ReviewAttestationValidationError,
-    ReviewAttestationVerdict,
-    ReviewerIdentity,
-    ReviewFindingCode,
-    ReviewModel,
+
+_review_attestation_registry = importlib.import_module("nextgen_memory.review_attestation_registry")
+ExactShaReviewAttestation = _review_attestation_registry.ExactShaReviewAttestation
+ExactShaReviewRequest = _review_attestation_registry.ExactShaReviewRequest
+InMemoryExactShaReviewAttestationRegistry = (
+    _review_attestation_registry.InMemoryExactShaReviewAttestationRegistry
 )
+ReviewAdvisoryState = _review_attestation_registry.ReviewAdvisoryState
+ReviewAttestationConflictError = _review_attestation_registry.ReviewAttestationConflictError
+ReviewAttestationValidationError = _review_attestation_registry.ReviewAttestationValidationError
+ReviewAttestationVerdict = _review_attestation_registry.ReviewAttestationVerdict
+ReviewerIdentity = _review_attestation_registry.ReviewerIdentity
+ReviewFindingCode = _review_attestation_registry.ReviewFindingCode
+ReviewModel = _review_attestation_registry.ReviewModel
 
 ROOT = Path(__file__).resolve().parents[1]
 

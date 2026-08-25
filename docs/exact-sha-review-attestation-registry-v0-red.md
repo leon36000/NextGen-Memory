@@ -1,9 +1,9 @@
-# Exact-SHA Review Attestation Registry v0 — TDD RED v4 Evidence
+# Exact-SHA Review Attestation Registry v0 — TDD RED v5 Evidence
 
 **Date:** 2026-08-24
 **Base branch:** `candidate/advisory-policy-promotion-gate-v0-20260824`
 **Base SHA:** `f4f3aca9759b5b7a60691017c2211152c011ea92`
-**TDD branch:** `tdd/exact-sha-review-attestation-registry-v0-red-v4-20260825`
+**TDD branch:** `tdd/exact-sha-review-attestation-registry-v0-red-v5-20260825`
 
 The tests-only contract defines:
 
@@ -36,3 +36,8 @@ RED v3 preserves the exact parsed AST of all three RED-v2 test files while norma
 ## Context-invariant public API bootstrap
 
 RED v4 removes one toolchain-dependent import classification from the public API test. The package root is loaded with standard-library `importlib` inside the test after the intentionally absent submodule import. The same export-object identity assertions, exact `__all__` cardinality assertions, imported public symbols, test name, and missing-module collection boundary are preserved. The source is therefore Ruff-clean both when `nextgen_memory.review_attestation_registry` is absent in RED and when it exists in the product candidate; no lint exception, `noqa`, skip, xfail, stub, fixture weakening, or product behavior is introduced.
+
+
+## Context-invariant focused and property bootstrap
+
+RED v5 removes the remaining Ruff classification dependency from the focused and property test modules. Each module loads `nextgen_memory.review_attestation_registry` through standard-library `importlib` at module initialization and then binds the exact same unique public-name inventory. Long aliases use parenthesized multiline assignments while preserving the same assignment AST. All helper, fixture, class, test-function, assertion, generated-trace, expected-state, exception, retry, conflict, and determinism definition ASTs remain identical to RED v4. Collection against the immutable base still fails only because the target module is absent. No lint exemption, skip, xfail, stub, assertion weakening, or product behavior is introduced.
