@@ -41,7 +41,7 @@ jobs:
           set -euo pipefail
           base_sha='f4f3aca9759b5b7a60691017c2211152c011ea92'
           red_v3_sha='0a8e193269e425dd51f740b495579f949a237ce1'
-          red_v4_sha='54966cca4af918ec2be7f3da158d21b82cefaaa9'
+          red_v4_sha='130db57eaa2fe0f9809bfa672c0467ce087a8089'
           test "$(git rev-parse HEAD)" = "$red_v4_sha"
           test "$(git merge-base "$base_sha" HEAD)" = "$base_sha"
           test "$(git merge-base "$red_v3_sha" HEAD)" = "$red_v3_sha"
