@@ -32,6 +32,18 @@ for old, new in replacements:
         raise SystemExit(f"expected producer-v7 marker is absent: {old}")
     source = source.replace(old, new)
 
+checkout_literal = '''                'git checkout "$RED_V4_SHA" -- "${RED_PATHS[@]}"',
+'''
+docs_literal = '''                'python "$CONTROLLER_ROOT/.github/controllers/update_exact_review_attestation_docs_v4.py" --plan docs/superpowers/plans/2026-08-24-exact-sha-review-attestation-registry-v0.md --spec docs/superpowers/specs/2026-08-24-exact-sha-review-attestation-registry-v0-design.md --red-sha "$RED_V4_SHA"',
+'''
+if source.count(checkout_literal) != 1:
+    raise SystemExit(
+        "expected one RED-v4 overlay literal, "
+        f"found {source.count(checkout_literal)}"
+    )
+if docs_literal not in source:
+    source = source.replace(checkout_literal, checkout_literal + docs_literal, 1)
+
 start_marker = "new_post_ruff = '''run python -m compileall -q src scripts\n"
 end_marker = "\nif rendered.count(old_post_ruff) != 1:"
 start = source.index(start_marker)
@@ -40,6 +52,12 @@ replacement = """new_post_ruff = '''run python -m compileall -q src scripts
 run python "$CONTROLLER_ROOT/.github/controllers/prove_exact_review_attestation_red_v4.py" --red-sha "$RED_V4_SHA" --output /tmp/exact-review-attestation-red-v4-preservation.json
 RED_AST_SHA=$(sha256sum /tmp/exact-review-attestation-red-v4-preservation.json | awk '{print $1}')
 test -n "$RED_AST_SHA"
+test "$(grep -Foc 'tdd/exact-sha-review-attestation-registry-v0-red-v4-20260825' docs/superpowers/plans/2026-08-24-exact-sha-review-attestation-registry-v0.md)" -ge 1
+test "$(grep -Foc '130db57eaa2fe0f9809bfa672c0467ce087a8089' docs/superpowers/specs/2026-08-24-exact-sha-review-attestation-registry-v0-design.md)" -ge 1
+if grep -F 'tdd/exact-sha-review-attestation-registry-v0-red-v2-20260825' docs/superpowers/plans/2026-08-24-exact-sha-review-attestation-registry-v0.md docs/superpowers/specs/2026-08-24-exact-sha-review-attestation-registry-v0-design.md; then
+  echo 'qualified RED-v2 branch remains in product documentation' >&2
+  exit 1
+fi
 '''"""
 source = source[:start] + replacement + source[end:]
 
@@ -62,6 +80,26 @@ if source.count(old_guard) != 1:
     )
 source = source.replace(old_guard, new_guard, 1)
 
+docs_guard_anchor = 'path.write_text(rendered, encoding="utf-8")\n'
+docs_guard = '''docs_updater_call = (
+    'python "$CONTROLLER_ROOT/.github/controllers/'
+    'update_exact_review_attestation_docs_v4.py" '
+    '--plan docs/superpowers/plans/'
+    '2026-08-24-exact-sha-review-attestation-registry-v0.md '
+    '--spec docs/superpowers/specs/'
+    '2026-08-24-exact-sha-review-attestation-registry-v0-design.md '
+    '--red-sha "$RED_V4_SHA"'
+)
+if rendered.count(docs_updater_call) != 1:
+    raise SystemExit("bounded RED-v4 documentation updater is absent")
+'''
+if source.count(docs_guard_anchor) != 1:
+    raise SystemExit(
+        "expected one generated-controller write anchor, "
+        f"found {source.count(docs_guard_anchor)}"
+    )
+source = source.replace(docs_guard_anchor, docs_guard + docs_guard_anchor, 1)
+
 for forbidden in (
     "RED_V3_SHA",
     "red_v3",
@@ -73,15 +111,20 @@ for forbidden in (
 ):
     if forbidden in source:
         raise SystemExit(f"obsolete RED-v3 producer marker remains: {forbidden}")
-if source.count("130db57eaa2fe0f9809bfa672c0467ce087a8089") != 2:
+if source.count("130db57eaa2fe0f9809bfa672c0467ce087a8089") < 4:
     raise SystemExit(
-        "RED-v4 SHA is absent or duplicated unexpectedly: "
+        "RED-v4 SHA is not fully bound: "
         f"{source.count('130db57eaa2fe0f9809bfa672c0467ce087a8089')}"
     )
 if source.count("prove_exact_review_attestation_red_v4.py") != 2:
     raise SystemExit(
         "RED-v4 source prover call/guard is absent or duplicated: "
         f"{source.count('prove_exact_review_attestation_red_v4.py')}"
+    )
+if source.count("update_exact_review_attestation_docs_v4.py") != 2:
+    raise SystemExit(
+        "RED-v4 docs updater call/guard is absent or duplicated: "
+        f"{source.count('update_exact_review_attestation_docs_v4.py')}"
     )
 if source.count("exact-review-attestation-red-v4-preservation.json") < 3:
     raise SystemExit("RED-v4 preservation evidence is not fully bound")
@@ -90,5 +133,6 @@ PY
 
 bash -n "$TARGET"
 python -m py_compile \
-  "$GITHUB_WORKSPACE/controller/.github/controllers/prove_exact_review_attestation_red_v4.py"
+  "$GITHUB_WORKSPACE/controller/.github/controllers/prove_exact_review_attestation_red_v4.py" \
+  "$GITHUB_WORKSPACE/controller/.github/controllers/update_exact_review_attestation_docs_v4.py"
 bash "$TARGET" "$@"
