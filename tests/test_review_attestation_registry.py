@@ -75,7 +75,7 @@ def attestation(
         "finding_codes": findings,
         "review_artifact_sha256": suffix * 64,
         "evidence_artifact_sha256s": ("7" * 64, "8" * 64),
-        "authenticated_envelope_sha256": suffix.upper() * 64,
+        "authenticated_envelope_sha256": suffix * 64,
     }
     values.update(overrides)
     return ExactShaReviewAttestation(**values)  # type: ignore[arg-type]
