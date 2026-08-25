@@ -46,20 +46,25 @@ path = Path(os.environ["RUNNER_TEMP"]) / (
 )
 source = path.read_text(encoding="utf-8")
 
-identity_replacements = (
+required_identity_replacements = (
     (
         "RED_V3_SHA='0a8e193269e425dd51f740b495579f949a237ce1'",
         "RED_V4_SHA='130db57eaa2fe0f9809bfa672c0467ce087a8089'",
     ),
     ("$RED_V3_SHA", "$RED_V4_SHA"),
+)
+for old, new in required_identity_replacements:
+    if old not in source:
+        raise SystemExit(f"required generated-v7 marker is absent: {old}")
+    source = source.replace(old, new)
+
+optional_identity_replacements = (
     ("red_v3", "red_v4"),
     ("red-v3", "red-v4"),
     ("RED v3", "RED v4"),
     ("RED-v3", "RED-v4"),
 )
-for old, new in identity_replacements:
-    if old not in source:
-        raise SystemExit(f"generated v7 target marker is absent: {old}")
+for old, new in optional_identity_replacements:
     source = source.replace(old, new)
 
 checkout_line = 'git checkout "$RED_V4_SHA" -- "${RED_PATHS[@]}"\n'
