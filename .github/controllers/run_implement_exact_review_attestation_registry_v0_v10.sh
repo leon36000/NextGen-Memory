@@ -45,11 +45,13 @@ path = Path(os.environ["RUNNER_TEMP"]) / (
     "implement_exact_review_attestation_registry_v0_v10.sh"
 )
 source = path.read_text(encoding="utf-8")
+old_red_sha = "0a8e193269e425dd51f740b495579f949a237ce1"
+new_red_sha = "130db57eaa2fe0f9809bfa672c0467ce087a8089"
 
 required_identity_replacements = (
     (
-        "RED_V3_SHA='0a8e193269e425dd51f740b495579f949a237ce1'",
-        "RED_V4_SHA='130db57eaa2fe0f9809bfa672c0467ce087a8089'",
+        f"RED_V3_SHA='{old_red_sha}'",
+        f"RED_V4_SHA='{new_red_sha}'",
     ),
     ("$RED_V3_SHA", "$RED_V4_SHA"),
 )
@@ -58,6 +60,7 @@ for old, new in required_identity_replacements:
         raise SystemExit(f"required generated-v7 marker is absent: {old}")
     source = source.replace(old, new)
 
+source = source.replace(old_red_sha, new_red_sha)
 optional_identity_replacements = (
     ("red_v3", "red_v4"),
     ("red-v3", "red-v4"),
@@ -115,14 +118,14 @@ for forbidden in (
     "red-v3",
     "RED v3",
     "RED-v3",
-    "0a8e193269e425dd51f740b495579f949a237ce1",
+    old_red_sha,
     "python - <<'PYAST'",
     "all_test_asts_identical",
     "red-v3-doc.md",
 ):
     if forbidden in source:
         raise SystemExit(f"obsolete RED-v3 target marker remains: {forbidden}")
-if source.count("RED_V4_SHA='130db57eaa2fe0f9809bfa672c0467ce087a8089'") != 1:
+if source.count(f"RED_V4_SHA='{new_red_sha}'") != 1:
     raise SystemExit("exact RED-v4 variable binding is absent or duplicated")
 if source.count("prove_exact_review_attestation_red_v4.py") != 1:
     raise SystemExit("exact RED-v4 source prover call is absent or duplicated")
