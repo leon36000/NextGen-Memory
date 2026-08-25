@@ -1,9 +1,9 @@
-# Exact-SHA Review Attestation Registry v0 — TDD RED v2 Evidence
+# Exact-SHA Review Attestation Registry v0 — TDD RED v3 Evidence
 
 **Date:** 2026-08-24  
 **Base branch:** `candidate/advisory-policy-promotion-gate-v0-20260824`  
 **Base SHA:** `f4f3aca9759b5b7a60691017c2211152c011ea92`  
-**TDD branch:** `tdd/exact-sha-review-attestation-registry-v0-red-v2-20260825`
+**TDD branch:** `tdd/exact-sha-review-attestation-registry-v0-red-v3-20260825`
 
 The tests-only contract defines:
 
@@ -28,3 +28,8 @@ No implementation, stub, workflow product, migration, dependency, persistence ad
 ## Fixture correction
 
 RED v2 preserves the complete accepted test contract and corrects one invalid fixture from RED v1: authenticated-envelope SHA-256 values derived from suffixes `a` through `d` remain lowercase instead of being uppercased. This aligns the fixture with the explicit lowercase SHA-256 validation contract. No behavior assertion is removed or weakened.
+
+
+## Toolchain normalization
+
+RED v3 preserves the exact parsed AST of all three RED-v2 test files while normalizing only import grouping and source formatting with Ruff 0.16.4. Pre- and post-normalization AST SHA-256 values are compared by the qualifier. No fixture, assertion, test name, generated trace, expected state, exception expectation, or package API requirement changes.
