@@ -61,9 +61,10 @@ fi
 '''"""
 source = source[:start] + replacement + source[end:]
 
-old_guard = '''if rendered.count('all_test_asts_identical') != 1:
-    raise SystemExit("RED-v4 AST preservation proof is absent")
-'''
+guard_start_marker = "if rendered.count('all_test_asts_identical') != 1:\n"
+guard_end_marker = 'path.write_text(rendered, encoding="utf-8")\n'
+guard_start = source.index(guard_start_marker)
+guard_end = source.index(guard_end_marker, guard_start)
 new_guard = '''source_prover_call = (
     'run python "$CONTROLLER_ROOT/.github/controllers/'
     'prove_exact_review_attestation_red_v4.py" '
@@ -72,16 +73,8 @@ new_guard = '''source_prover_call = (
 )
 if rendered.count(source_prover_call) != 1:
     raise SystemExit("exact RED-v4 source/AST preservation proof is absent")
-'''
-if source.count(old_guard) != 1:
-    raise SystemExit(
-        "expected one embedded RED-v4 AST guard after identity upgrade, "
-        f"found {source.count(old_guard)}"
-    )
-source = source.replace(old_guard, new_guard, 1)
 
-docs_guard_anchor = 'path.write_text(rendered, encoding="utf-8")\n'
-docs_guard = '''docs_updater_call = (
+docs_updater_call = (
     'python "$CONTROLLER_ROOT/.github/controllers/'
     'update_exact_review_attestation_docs_v4.py" '
     '--plan docs/superpowers/plans/'
@@ -93,12 +86,7 @@ docs_guard = '''docs_updater_call = (
 if rendered.count(docs_updater_call) != 1:
     raise SystemExit("bounded RED-v4 documentation updater is absent")
 '''
-if source.count(docs_guard_anchor) != 1:
-    raise SystemExit(
-        "expected one generated-controller write anchor, "
-        f"found {source.count(docs_guard_anchor)}"
-    )
-source = source.replace(docs_guard_anchor, docs_guard + docs_guard_anchor, 1)
+source = source[:guard_start] + new_guard + source[guard_end:]
 
 for forbidden in (
     "RED_V3_SHA",
@@ -108,10 +96,11 @@ for forbidden in (
     "RED-v3",
     "0a8e193269e425dd51f740b495579f949a237ce1",
     "python - <<'PYAST'",
+    "all_test_asts_identical",
 ):
     if forbidden in source:
         raise SystemExit(f"obsolete RED-v3 producer marker remains: {forbidden}")
-if source.count("130db57eaa2fe0f9809bfa672c0467ce087a8089") < 4:
+if source.count("130db57eaa2fe0f9809bfa672c0467ce087a8089") < 3:
     raise SystemExit(
         "RED-v4 SHA is not fully bound: "
         f"{source.count('130db57eaa2fe0f9809bfa672c0467ce087a8089')}"
