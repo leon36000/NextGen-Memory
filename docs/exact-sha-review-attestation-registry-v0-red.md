@@ -1,9 +1,9 @@
-# Exact-SHA Review Attestation Registry v0 — TDD RED v3 Evidence
+# Exact-SHA Review Attestation Registry v0 — TDD RED v4 Evidence
 
 **Date:** 2026-08-24  
 **Base branch:** `candidate/advisory-policy-promotion-gate-v0-20260824`  
 **Base SHA:** `f4f3aca9759b5b7a60691017c2211152c011ea92`  
-**TDD branch:** `tdd/exact-sha-review-attestation-registry-v0-red-v3-20260825`
+**TDD branch:** `tdd/exact-sha-review-attestation-registry-v0-red-v4-20260825`
 
 The tests-only contract defines:
 
@@ -29,7 +29,10 @@ No implementation, stub, workflow product, migration, dependency, persistence ad
 
 RED v2 preserves the complete accepted test contract and corrects one invalid fixture from RED v1: authenticated-envelope SHA-256 values derived from suffixes `a` through `d` remain lowercase instead of being uppercased. This aligns the fixture with the explicit lowercase SHA-256 validation contract. No behavior assertion is removed or weakened.
 
-
 ## Toolchain normalization
 
 RED v3 preserves the exact parsed AST of all three RED-v2 test files while normalizing only import grouping and source formatting with Ruff 0.16.4. Pre- and post-normalization AST SHA-256 values are compared by the qualifier. No fixture, assertion, test name, generated trace, expected state, exception expectation, or package API requirement changes.
+
+## Context-invariant public API bootstrap
+
+RED v4 removes one toolchain-dependent import classification from the public API test. The package root is loaded with standard-library `importlib` inside the test after the intentionally absent submodule import. The same export-object identity assertions, exact `__all__` cardinality assertions, imported public symbols, test name, and missing-module collection boundary are preserved. The source is therefore Ruff-clean both when `nextgen_memory.review_attestation_registry` is absent in RED and when it exists in the product candidate; no lint exception, `noqa`, skip, xfail, stub, fixture weakening, or product behavior is introduced.
