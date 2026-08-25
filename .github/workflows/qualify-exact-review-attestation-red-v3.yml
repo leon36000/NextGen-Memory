@@ -1,0 +1,321 @@
+name: Qualify exact review attestation registry RED v3
+
+on:
+  pull_request:
+
+concurrency:
+  group: exact-review-attestation-red-v3
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+jobs:
+  qualify:
+    if: github.event.pull_request.head.ref == 'bootstrap/qualify-exact-review-attestation-red-v3-20260825'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: tdd/exact-sha-review-attestation-registry-v0-red-v3-20260825
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Resolve immutable base and accepted RED v2
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*'
+          base_sha='f4f3aca9759b5b7a60691017c2211152c011ea92'
+          red_v2_sha='4f0a74e0d39a181b682d2b135012184c255928bc'
+          test "$(git rev-parse HEAD)" = "$red_v2_sha"
+          test "$(git merge-base "$base_sha" HEAD)" = "$base_sha"
+          printf 'BASE_SHA=%s\nRED_V2_SHA=%s\n' \
+            "$base_sha" "$red_v2_sha" | tee -a "$GITHUB_ENV"
+
+      - name: Install exact qualification toolchain
+        run: |
+          python -m pip install -e '.[dev]'
+          python -m pip install 'ruff==0.16.4'
+          ruff --version | grep -F 'ruff 0.16.4'
+
+      - name: Record pre-normalization semantic ASTs
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from __future__ import annotations
+
+          import ast
+          import hashlib
+          import json
+          from pathlib import Path
+
+          files = (
+              Path('tests/test_review_attestation_registry.py'),
+              Path('tests/test_review_attestation_registry_properties.py'),
+              Path('tests/test_review_attestation_registry_public_api.py'),
+          )
+          manifest: dict[str, object] = {}
+          for path in files:
+              source = path.read_text(encoding='utf-8')
+              dump = ast.dump(
+                  ast.parse(source, filename=str(path)),
+                  annotate_fields=True,
+                  include_attributes=False,
+              )
+              destination = Path('/tmp') / f'{path.name}.ast-before.txt'
+              destination.write_text(dump + '\n', encoding='utf-8')
+              manifest[str(path)] = {
+                  'source_sha256': hashlib.sha256(
+                      source.encode('utf-8')
+                  ).hexdigest(),
+                  'ast_sha256': hashlib.sha256(dump.encode('utf-8')).hexdigest(),
+              }
+          Path('/tmp/red-v2-ast-manifest.json').write_text(
+              json.dumps(
+                  manifest,
+                  ensure_ascii=False,
+                  allow_nan=False,
+                  sort_keys=True,
+                  separators=(',', ':'),
+              ) + '\n',
+              encoding='utf-8',
+          )
+          PY
+
+      - name: Normalize imports and formatting with Ruff 0.16.4 only
+        shell: bash
+        run: |
+          set -euo pipefail
+          files=(
+            tests/test_review_attestation_registry.py
+            tests/test_review_attestation_registry_properties.py
+            tests/test_review_attestation_registry_public_api.py
+          )
+          ruff check --fix "${files[@]}"
+          ruff format "${files[@]}"
+          ruff check "${files[@]}"
+          ruff format --check "${files[@]}"
+          python -m py_compile "${files[@]}"
+          git diff --check
+
+      - name: Prove normalization preserves every test AST
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from __future__ import annotations
+
+          import ast
+          import hashlib
+          import json
+          from pathlib import Path
+
+          before_manifest = json.loads(
+              Path('/tmp/red-v2-ast-manifest.json').read_text(encoding='utf-8')
+          )
+          after_manifest: dict[str, object] = {}
+          for relative in sorted(before_manifest):
+              path = Path(relative)
+              source = path.read_text(encoding='utf-8')
+              dump = ast.dump(
+                  ast.parse(source, filename=str(path)),
+                  annotate_fields=True,
+                  include_attributes=False,
+              )
+              before_dump = (
+                  Path('/tmp') / f'{path.name}.ast-before.txt'
+              ).read_text(encoding='utf-8').rstrip('\n')
+              if dump != before_dump:
+                  raise SystemExit(f'AST changed during import normalization: {path}')
+              after_manifest[relative] = {
+                  'source_sha256': hashlib.sha256(
+                      source.encode('utf-8')
+                  ).hexdigest(),
+                  'ast_sha256': hashlib.sha256(dump.encode('utf-8')).hexdigest(),
+              }
+          Path('/tmp/red-v3-ast-manifest.json').write_text(
+              json.dumps(
+                  after_manifest,
+                  ensure_ascii=False,
+                  allow_nan=False,
+                  sort_keys=True,
+                  separators=(',', ':'),
+              ) + '\n',
+              encoding='utf-8',
+          )
+          PY
+
+      - name: Record exact Ruff toolchain normalization in RED evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('docs/exact-sha-review-attestation-registry-v0-red.md')
+          source = path.read_text(encoding='utf-8')
+          source = source.replace(
+              '# Exact-SHA Review Attestation Registry v0 — TDD RED v2 Evidence',
+              '# Exact-SHA Review Attestation Registry v0 — TDD RED v3 Evidence',
+              1,
+          )
+          source = source.replace(
+              '**TDD branch:** `tdd/exact-sha-review-attestation-registry-v0-red-v2-20260825`',
+              '**TDD branch:** `tdd/exact-sha-review-attestation-registry-v0-red-v3-20260825`',
+              1,
+          )
+          marker = '## Toolchain normalization\n'
+          if marker not in source:
+              source += '''
+
+          ## Toolchain normalization
+
+          RED v3 preserves the exact parsed AST of all three RED-v2 test files while normalizing only import grouping and source formatting with Ruff 0.16.4. Pre- and post-normalization AST SHA-256 values are compared by the qualifier. No fixture, assertion, test name, generated trace, expected state, exception expectation, or package API requirement changes.
+          '''
+              source = '\n'.join(
+                  line[10:] if line.startswith('          ') else line
+                  for line in source.splitlines()
+              ) + '\n'
+          path.write_text(source, encoding='utf-8')
+          PY
+          git diff --check
+
+      - name: Prove each RED v3 file reaches only the missing-module boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          red_root="$RUNNER_TEMP/exact-review-attestation-red-v3"
+          rm -rf "$red_root"
+          git worktree add --detach "$red_root" "$BASE_SHA"
+          mkdir -p "$red_root/tests" "$red_root/docs"
+          files=(
+            tests/test_review_attestation_registry.py
+            tests/test_review_attestation_registry_properties.py
+            tests/test_review_attestation_registry_public_api.py
+          )
+          for file in "${files[@]}"; do
+            cp "$file" "$red_root/$file"
+          done
+          cp docs/exact-sha-review-attestation-registry-v0-red.md \
+            "$red_root/docs/exact-sha-review-attestation-registry-v0-red.md"
+          cd "$red_root"
+          test ! -e src/nextgen_memory/review_attestation_registry.py
+          if grep -F 'review_attestation_registry' src/nextgen_memory/__init__.py; then
+            echo 'base package root unexpectedly exports the absent module' >&2
+            exit 1
+          fi
+          for file in "${files[@]}"; do
+            output="/tmp/$(basename "$file" .py)-red-v3.txt"
+            set +e
+            PYTHONPATH="$PWD/src" python -m pytest --collect-only -q "$file" \
+              > "$output" 2>&1
+            rc=$?
+            set -e
+            test "$rc" -ne 0
+            FILE="$file" OUTPUT="$output" python - <<'PY'
+          from __future__ import annotations
+
+          import os
+          import re
+          from pathlib import Path
+
+          text = Path(os.environ['OUTPUT']).read_text(
+              encoding='utf-8',
+              errors='replace',
+          )
+          modules = set(
+              re.findall(
+                  r"ModuleNotFoundError: No module named '([^']+)'",
+                  text,
+              )
+          )
+          if modules != {'nextgen_memory.review_attestation_registry'}:
+              raise SystemExit(
+                  f"{os.environ['FILE']}: unexpected missing modules {sorted(modules)!r}"
+              )
+          for marker in (
+              'SyntaxError',
+              'IndentationError',
+              'NameError',
+              'ERROR at setup',
+              'fixture ',
+          ):
+              if marker in text:
+                  raise SystemExit(
+                      f"{os.environ['FILE']}: unintended RED marker {marker}"
+                  )
+          PY
+          done
+
+      - name: Commit and publish immutable RED v3
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$GITHUB_WORKSPACE"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add \
+            docs/exact-sha-review-attestation-registry-v0-red.md \
+            tests/test_review_attestation_registry.py \
+            tests/test_review_attestation_registry_properties.py \
+            tests/test_review_attestation_registry_public_api.py
+          git diff --cached --check
+          git commit -m 'test: normalize exact review attestation RED for Ruff 0.16.4'
+          red_v3_sha=$(git rev-parse HEAD)
+          mapfile -t changed < <(git diff --name-only "$BASE_SHA"...HEAD | sort)
+          expected=(
+            docs/exact-sha-review-attestation-registry-v0-red.md
+            tests/test_review_attestation_registry.py
+            tests/test_review_attestation_registry_properties.py
+            tests/test_review_attestation_registry_public_api.py
+          )
+          test "${#changed[@]}" -eq "${#expected[@]}"
+          diff -u \
+            <(printf '%s\n' "${expected[@]}" | sort) \
+            <(printf '%s\n' "${changed[@]}")
+          test -z "$(git diff --name-only "$BASE_SHA"...HEAD -- '.github/workflows/**' 'migrations/**' pyproject.toml 'src/nextgen_memory/corrective_retrieval_*')"
+          git push origin HEAD:tdd/exact-sha-review-attestation-registry-v0-red-v3-20260825
+          printf 'RED_V3_SHA=%s\n' "$red_v3_sha" | tee -a "$GITHUB_ENV"
+
+      - name: Publish durable RED v3 status and close without merge
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SELF_PR: ${{ github.event.pull_request.number }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          body=$(cat <<EOF
+          ## Exact-SHA review attestation RED v3 accepted
+
+          - base: \`$BASE_SHA\`;
+          - accepted RED v2: \`$RED_V2_SHA\`;
+          - Ruff version: \`0.16.4\`;
+          - normalized RED v3: \`$RED_V3_SHA\`;
+          - AST changes across all three tests: \`0\`;
+          - exact surface: four paths;
+          - independent missing-module collection proof: green;
+          - implementation and package export: absent;
+          - merge allowed: false.
+          EOF
+          )
+          gh api "repos/$REPO/issues/165/comments" --raw-field body="$body" >/dev/null
+          gh api --method PATCH "repos/$REPO/pulls/$SELF_PR" -f state=closed >/dev/null
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: exact-review-attestation-red-v3-evidence
+          path: |
+            /tmp/red-v2-ast-manifest.json
+            /tmp/red-v3-ast-manifest.json
+          if-no-files-found: error
+          retention-days: 7
