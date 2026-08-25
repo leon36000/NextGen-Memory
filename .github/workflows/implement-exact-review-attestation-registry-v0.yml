@@ -4,7 +4,7 @@ on:
   pull_request:
 
 concurrency:
-  group: exact-review-attestation-registry-v0-product-v6
+  group: exact-review-attestation-registry-v0-product-v7
   cancel-in-progress: true
 
 permissions:
@@ -36,11 +36,11 @@ jobs:
           cache: pip
           cache-dependency-path: product/pyproject.toml
 
-      - name: Execute exact product controller v6
+      - name: Execute exact product controller v7
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          bash controller/.github/controllers/run_implement_exact_review_attestation_registry_v0_v6.sh \
+          bash controller/.github/controllers/run_implement_exact_review_attestation_registry_v0_v7.sh \
             "$GITHUB_WORKSPACE/controller" \
             "$GITHUB_WORKSPACE/product"
 
@@ -53,5 +53,6 @@ jobs:
             /tmp/exact-review-attestation-wheel.whl
             /tmp/exact-review-attestation-focused.txt
             /tmp/exact-review-attestation-full.txt
+            /tmp/exact-review-attestation-red-v3-ast-preservation.json
           if-no-files-found: error
           retention-days: 7
