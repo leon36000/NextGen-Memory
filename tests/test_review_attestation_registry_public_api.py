@@ -24,9 +24,7 @@ def test_review_attestation_registry_contract_is_exported_from_package_root() ->
     expected = {
         "ExactShaReviewAttestation": ExactShaReviewAttestation,
         "ExactShaReviewRequest": ExactShaReviewRequest,
-        "InMemoryExactShaReviewAttestationRegistry": (
-            InMemoryExactShaReviewAttestationRegistry
-        ),
+        "InMemoryExactShaReviewAttestationRegistry": (InMemoryExactShaReviewAttestationRegistry),
         "ReviewAdvisoryState": ReviewAdvisoryState,
         "ReviewAttestationConflictError": ReviewAttestationConflictError,
         "ReviewAttestationDecision": ReviewAttestationDecision,
