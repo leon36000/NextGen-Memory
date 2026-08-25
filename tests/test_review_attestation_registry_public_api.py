@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import importlib
+
 from nextgen_memory.review_attestation_registry import (
     ExactShaReviewAttestation,
     ExactShaReviewRequest,
@@ -16,14 +18,15 @@ from nextgen_memory.review_attestation_registry import (
     ReviewModel,
 )
 
-import nextgen_memory
-
 
 def test_review_attestation_registry_contract_is_exported_from_package_root() -> None:
+    nextgen_memory = importlib.import_module("nextgen_memory")
     expected = {
         "ExactShaReviewAttestation": ExactShaReviewAttestation,
         "ExactShaReviewRequest": ExactShaReviewRequest,
-        "InMemoryExactShaReviewAttestationRegistry": (InMemoryExactShaReviewAttestationRegistry),
+        "InMemoryExactShaReviewAttestationRegistry": (
+            InMemoryExactShaReviewAttestationRegistry
+        ),
         "ReviewAdvisoryState": ReviewAdvisoryState,
         "ReviewAttestationConflictError": ReviewAttestationConflictError,
         "ReviewAttestationDecision": ReviewAttestationDecision,
