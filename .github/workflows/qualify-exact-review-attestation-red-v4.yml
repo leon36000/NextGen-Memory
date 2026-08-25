@@ -1,0 +1,236 @@
+name: Qualify exact review attestation registry RED v4
+
+on:
+  pull_request:
+
+concurrency:
+  group: exact-review-attestation-red-v4
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+jobs:
+  qualify:
+    if: github.event.pull_request.head.ref == 'bootstrap/qualify-exact-review-attestation-red-v4-20260825'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: tdd/exact-sha-review-attestation-registry-v0-red-v4-20260825
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install exact qualification toolchain
+        run: |
+          python -m pip install -e '.[dev]'
+          python -m pip install 'ruff==0.16.4'
+          ruff --version
+
+      - name: Prove exact base, v3 parent, and four-path surface
+        id: identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          base_sha='f4f3aca9759b5b7a60691017c2211152c011ea92'
+          red_v3_sha='0a8e193269e425dd51f740b495579f949a237ce1'
+          red_v4_sha='50646a0ea47a5bc796a223d8b223687528c68d17'
+          test "$(git rev-parse HEAD)" = "$red_v4_sha"
+          test "$(git merge-base "$base_sha" HEAD)" = "$base_sha"
+          test "$(git merge-base "$red_v3_sha" HEAD)" = "$red_v3_sha"
+          mapfile -t changed < <(git diff --name-only "$base_sha"...HEAD | sort)
+          expected=(
+            docs/exact-sha-review-attestation-registry-v0-red.md
+            tests/test_review_attestation_registry.py
+            tests/test_review_attestation_registry_properties.py
+            tests/test_review_attestation_registry_public_api.py
+          )
+          test "${#changed[@]}" -eq "${#expected[@]}"
+          diff -u <(printf '%s\n' "${expected[@]}" | sort) <(printf '%s\n' "${changed[@]}")
+          test -z "$(git diff --name-only "$base_sha"...HEAD -- '.github/workflows/**' 'migrations/**' pyproject.toml 'src/**')"
+          git diff --check "$base_sha"...HEAD
+          printf 'base_sha=%s\nred_v3_sha=%s\nred_v4_sha=%s\n' \
+            "$base_sha" "$red_v3_sha" "$red_v4_sha" | tee -a "$GITHUB_OUTPUT"
+
+      - name: Prove standard Ruff and syntax are context-invariant
+        shell: bash
+        run: |
+          set -euo pipefail
+          files=(
+            tests/test_review_attestation_registry.py
+            tests/test_review_attestation_registry_properties.py
+            tests/test_review_attestation_registry_public_api.py
+          )
+          ruff check "${files[@]}"
+          ruff format --check "${files[@]}"
+          python -m py_compile "${files[@]}"
+
+      - name: Prove v4 changes only public-API bootstrap, not assertions
+        shell: bash
+        env:
+          RED_V3_SHA: ${{ steps.identity.outputs.red_v3_sha }}
+        run: |
+          set -euo pipefail
+          git diff --exit-code "$RED_V3_SHA" -- \
+            tests/test_review_attestation_registry.py \
+            tests/test_review_attestation_registry_properties.py
+          python - <<'PY'
+          from __future__ import annotations
+
+          import ast
+          import os
+          import subprocess
+          from pathlib import Path
+
+          path = Path('tests/test_review_attestation_registry_public_api.py')
+          before_source = subprocess.check_output(
+              ('git', 'show', f'{os.environ["RED_V3_SHA"]}:{path.as_posix()}'),
+              text=True,
+          )
+          after_source = path.read_text(encoding='utf-8')
+          before = ast.parse(before_source)
+          after = ast.parse(after_source)
+
+          def imported_api(tree: ast.Module) -> tuple[str, ...]:
+              for node in tree.body:
+                  if (
+                      isinstance(node, ast.ImportFrom)
+                      and node.module == 'nextgen_memory.review_attestation_registry'
+                  ):
+                      return tuple(alias.name for alias in node.names)
+              raise SystemExit('target module import is absent')
+
+          def test_function(tree: ast.Module) -> ast.FunctionDef:
+              functions = [
+                  node
+                  for node in tree.body
+                  if isinstance(node, ast.FunctionDef)
+                  and node.name.startswith('test_')
+              ]
+              if len(functions) != 1:
+                  raise SystemExit('public API test inventory differs')
+              return functions[0]
+
+          def assertion_asts(function: ast.FunctionDef) -> tuple[str, ...]:
+              return tuple(
+                  ast.dump(node, annotate_fields=True, include_attributes=False)
+                  for node in ast.walk(function)
+                  if isinstance(node, ast.Assert)
+              )
+
+          def expected_keys(function: ast.FunctionDef) -> tuple[str, ...]:
+              for node in function.body:
+                  if (
+                      isinstance(node, ast.Assign)
+                      and any(
+                          isinstance(target, ast.Name) and target.id == 'expected'
+                          for target in node.targets
+                      )
+                      and isinstance(node.value, ast.Dict)
+                  ):
+                      keys = []
+                      for key in node.value.keys:
+                          if not isinstance(key, ast.Constant) or not isinstance(key.value, str):
+                              raise SystemExit('public API expected key is not literal')
+                          keys.append(key.value)
+                      return tuple(keys)
+              raise SystemExit('public API expected mapping is absent')
+
+          before_function = test_function(before)
+          after_function = test_function(after)
+          if imported_api(before) != imported_api(after):
+              raise SystemExit('imported public API names changed')
+          if before_function.name != after_function.name:
+              raise SystemExit('public API test name changed')
+          if assertion_asts(before_function) != assertion_asts(after_function):
+              raise SystemExit('public API assertions changed')
+          if expected_keys(before_function) != expected_keys(after_function):
+              raise SystemExit('public API expected names changed')
+          if 'import importlib' not in after_source:
+              raise SystemExit('context-invariant importlib bootstrap is absent')
+          if 'importlib.import_module("nextgen_memory")' not in after_source:
+              raise SystemExit('package-root dynamic import is absent')
+          for marker in ('# noqa', 'pytest.mark.skip', 'pytest.mark.xfail'):
+              if marker in after_source:
+                  raise SystemExit(f'forbidden test weakening marker: {marker}')
+          PY
+
+      - name: Prove each file reaches only the intended missing-module RED
+        shell: bash
+        env:
+          BASE_SHA: ${{ steps.identity.outputs.base_sha }}
+        run: |
+          set -euo pipefail
+          red_root="$RUNNER_TEMP/exact-review-attestation-red-v4"
+          rm -rf "$red_root"
+          git worktree add --detach "$red_root" "$BASE_SHA"
+          mkdir -p "$red_root/tests" "$red_root/docs"
+          files=(
+            tests/test_review_attestation_registry.py
+            tests/test_review_attestation_registry_properties.py
+            tests/test_review_attestation_registry_public_api.py
+          )
+          for file in "${files[@]}"; do cp "$file" "$red_root/$file"; done
+          cp docs/exact-sha-review-attestation-registry-v0-red.md "$red_root/docs/"
+          cd "$red_root"
+          test ! -e src/nextgen_memory/review_attestation_registry.py
+          if grep -F 'review_attestation_registry' src/nextgen_memory/__init__.py; then
+            echo 'base package root unexpectedly exports the absent module' >&2
+            exit 1
+          fi
+          for file in "${files[@]}"; do
+            output="/tmp/$(basename "$file" .py)-red-v4.txt"
+            set +e
+            PYTHONPATH="$PWD/src" python -m pytest --collect-only -q "$file" > "$output" 2>&1
+            rc=$?
+            set -e
+            test "$rc" -ne 0
+            FILE="$file" OUTPUT="$output" python - <<'PY'
+          from __future__ import annotations
+
+          import os
+          import re
+          from pathlib import Path
+
+          text = Path(os.environ['OUTPUT']).read_text(encoding='utf-8', errors='replace')
+          modules = set(re.findall(r"ModuleNotFoundError: No module named '([^']+)'", text))
+          if modules != {'nextgen_memory.review_attestation_registry'}:
+              raise SystemExit(
+                  f"{os.environ['FILE']}: unexpected missing modules {sorted(modules)!r}"
+              )
+          for marker in ('SyntaxError', 'IndentationError', 'NameError', 'ERROR at setup', 'fixture '):
+              if marker in text:
+                  raise SystemExit(f"{os.environ['FILE']}: unintended RED marker {marker}")
+          PY
+          done
+
+      - name: Publish qualified status and close transport without merge
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SELF_PR: ${{ github.event.pull_request.number }}
+        run: |
+          body=$(cat <<EOF
+          ## Context-invariant Exact-SHA review attestation RED v4 accepted
+
+          - base: `${{ steps.identity.outputs.base_sha }}`;
+          - RED v3 parent: `${{ steps.identity.outputs.red_v3_sha }}`;
+          - RED v4: `${{ steps.identity.outputs.red_v4_sha }}`;
+          - exact surface: four paths;
+          - standard Ruff 0.16.4 and syntax: clean;
+          - focused/properties tests: byte-identical to v3;
+          - public API imported names, expected names, test name and assertion ASTs: identical to v3;
+          - each file independently reaches only `ModuleNotFoundError: nextgen_memory.review_attestation_registry`;
+          - lint exemptions, skipped tests, stubs, implementation and exports: absent;
+          - merge allowed: false.
+          EOF
+          )
+          gh api "repos/$REPO/issues/165/comments" --raw-field body="$body" >/dev/null
+          gh api --method PATCH "repos/$REPO/pulls/$SELF_PR" -f state=closed >/dev/null
