@@ -1,0 +1,1 @@
+Candidate branch `candidate/exact-sha-review-attestation-registry-v0-r3-20260826` is published. Resolve its live SHA and verify it fail-closed.
