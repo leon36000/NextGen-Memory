@@ -1,9 +1,9 @@
 # Exact-SHA Review Attestation Registry v0 Design
 
-**Date:** 2026-08-24  
-**Status:** approved under the project owner's standing autonomous-development delegation  
-**Issue:** #165  
-**Base branch:** `candidate/advisory-policy-promotion-gate-v0-20260824`  
+**Date:** 2026-08-24
+**Status:** approved under the project owner's standing autonomous-development delegation
+**Issue:** #165
+**Base branch:** `candidate/advisory-policy-promotion-gate-v0-20260824`
 **Base SHA:** `f4f3aca9759b5b7a60691017c2211152c011ea92`
 **Qualified RED branch:** `tdd/exact-sha-review-attestation-registry-v0-red-v5-20260825`
 **Qualified RED SHA:** `849df204e899d7570ef469d52307786cf242695a`
