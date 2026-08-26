@@ -14,6 +14,8 @@
 
 - Exact base branch: `candidate/advisory-policy-promotion-gate-v0-20260824`.
 - Exact base SHA: `f4f3aca9759b5b7a60691017c2211152c011ea92`.
+- Qualified tests-only RED branch: `tdd/exact-sha-review-attestation-registry-v0-red-v5-20260825`.
+- Qualified tests-only RED SHA: `849df204e899d7570ef469d52307786cf242695a`.
 - Final product scope is exactly the nine paths listed in issue #165 and the design spec.
 - Runtime dependencies remain empty.
 - The registry is advisory only; `approved` never authorizes merge, deployment, migration, feedback, activation, or release.
@@ -26,7 +28,7 @@
 
 ---
 
-### Task 1: Record the complete tests-only module-absence RED
+### Task 1: Record the complete tests-only module-absence RED v5
 
 **Files:**
 - Create: `docs/exact-sha-review-attestation-registry-v0-red.md`
@@ -276,7 +278,7 @@ git commit -m "test: define exact-SHA review attestation registry v0"
 Publish a fresh immutable branch:
 
 ```text
-tdd/exact-sha-review-attestation-registry-v0-red-20260824
+tdd/exact-sha-review-attestation-registry-v0-red-v5-20260825
 ```
 
 ---

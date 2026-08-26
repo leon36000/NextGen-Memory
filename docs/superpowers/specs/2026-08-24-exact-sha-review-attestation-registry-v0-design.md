@@ -5,6 +5,8 @@
 **Issue:** #165  
 **Base branch:** `candidate/advisory-policy-promotion-gate-v0-20260824`  
 **Base SHA:** `f4f3aca9759b5b7a60691017c2211152c011ea92`
+**Qualified RED branch:** `tdd/exact-sha-review-attestation-registry-v0-red-v5-20260825`
+**Qualified RED SHA:** `849df204e899d7570ef469d52307786cf242695a`
 
 ## 1. Goal
 
@@ -366,7 +368,7 @@ tests/test_review_attestation_registry_properties.py
 tests/test_review_attestation_registry_public_api.py
 ```
 
-All test files must be Ruff-clean and syntactically valid. Each independent collection must fail only because `nextgen_memory.review_attestation_registry` does not exist.
+All test files must be Ruff-clean and syntactically valid. Each independent collection must fail only because `nextgen_memory.review_attestation_registry` does not exist. RED v5 preserves the accepted behavior and assertion contract while making all three test-module bootstraps context-invariant under the exact Ruff 0.16.4 product toolchain. The qualified immutable RED is `tdd/exact-sha-review-attestation-registry-v0-red-v5-20260825` at SHA `849df204e899d7570ef469d52307786cf242695a`; it preserves the complete RED v1 contract while correcting the authenticated-envelope fixture to lowercase SHA-256.
 
 ### 11.2 Focused behavior coverage
 
