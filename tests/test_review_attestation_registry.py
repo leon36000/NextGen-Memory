@@ -456,3 +456,147 @@ def test_public_values_are_frozen_and_canonical() -> None:
     with pytest.raises((AttributeError, FrozenInstanceError)):
         decision.content_hash = "0" * 64  # type: ignore[misc]
     assert replace(review_request, diff_sha256="f" * 64).id != review_request.id
+
+
+class ExplodingCollection:
+    def __iter__(self) -> ExplodingCollection:
+        return self
+
+    def __next__(self) -> object:
+        raise RuntimeError("SECRET-ITERATOR-SENTINEL")
+
+
+class RawPayloadReviewer(ReviewerIdentity):
+    def to_dict(self) -> dict[str, object]:
+        return {"raw_review": "SECRET-REVIEW-SENTINEL"}
+
+
+class RequestSubclass(ExactShaReviewRequest):
+    pass
+
+
+class AttestationSubclass(ExactShaReviewAttestation):
+    pass
+
+
+class ExplosiveRepository(str):
+    def strip(self, chars: str | None = None) -> str:
+        del chars
+        raise RuntimeError("SECRET-REPOSITORY-SENTINEL")
+
+
+class ExplosiveInteger(int):
+    def __le__(self, other: object) -> bool:
+        del other
+        raise RuntimeError("SECRET-INTEGER-SENTINEL")
+
+
+@pytest.mark.parametrize(
+    ("factory", "message"),
+    [
+        (
+            lambda: request(trusted_reviewer_fingerprints=ExplodingCollection()),
+            "trusted reviewers must be a bounded iterable",
+        ),
+        (
+            lambda: attestation(
+                request(),
+                verdict=ReviewAttestationVerdict.CHANGES_REQUIRED,
+                findings=ExplodingCollection(),
+            ),
+            "finding codes must be a bounded iterable",
+        ),
+        (
+            lambda: attestation(
+                request(),
+                evidence_artifact_sha256s=ExplodingCollection(),
+            ),
+            "evidence artifacts must be a bounded iterable",
+        ),
+    ],
+)
+def test_collection_iteration_failures_are_bounded_and_privacy_safe(
+    factory: object,
+    message: str,
+) -> None:
+    with pytest.raises(ReviewAttestationValidationError) as caught:
+        factory()  # type: ignore[operator]
+    assert str(caught.value) == message
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
+    assert "SECRET" not in str(caught.value)
+
+
+def test_reviewer_subclass_cannot_inject_raw_payload() -> None:
+    review_request = request()
+    malicious = RawPayloadReviewer(
+        model=ReviewModel.GPT_5_6_SOL,
+        reviewer_key_fingerprint=REVIEWER_A,
+    )
+    with pytest.raises(
+        ReviewAttestationValidationError,
+        match="reviewer must be an exact ReviewerIdentity",
+    ):
+        attestation(review_request, reviewer=malicious)
+
+
+def test_registry_rejects_contract_subclasses_before_mutation() -> None:
+    registry = InMemoryExactShaReviewAttestationRegistry()
+    review_request = request()
+    request_subclass = RequestSubclass(
+        repository=review_request.repository,
+        pull_request_number=review_request.pull_request_number,
+        base_sha=review_request.base_sha,
+        candidate_sha=review_request.candidate_sha,
+        diff_sha256=review_request.diff_sha256,
+        review_packet_sha256=review_request.review_packet_sha256,
+        acceptance_criteria_sha256=(review_request.acceptance_criteria_sha256),
+        required_model=review_request.required_model,
+        trusted_reviewer_fingerprints=(review_request.trusted_reviewer_fingerprints),
+        minimum_approvals=review_request.minimum_approvals,
+    )
+    with pytest.raises(
+        ReviewAttestationValidationError,
+        match="request must be an exact ExactShaReviewRequest",
+    ):
+        registry.register_request(request_subclass)
+    with pytest.raises(ReviewAttestationStateError):
+        registry.get_request(review_request.id)
+
+    registry.register_request(review_request)
+    value = attestation(review_request)
+    attestation_subclass = AttestationSubclass(
+        request_id=value.request_id,
+        request_content_hash=value.request_content_hash,
+        repository=value.repository,
+        pull_request_number=value.pull_request_number,
+        candidate_sha=value.candidate_sha,
+        reviewer=value.reviewer,
+        verdict=value.verdict,
+        finding_codes=value.finding_codes,
+        review_artifact_sha256=value.review_artifact_sha256,
+        evidence_artifact_sha256s=value.evidence_artifact_sha256s,
+        authenticated_envelope_sha256=(value.authenticated_envelope_sha256),
+    )
+    with pytest.raises(
+        ReviewAttestationValidationError,
+        match=("attestation must be an exact ExactShaReviewAttestation"),
+    ):
+        registry.record_attestation(attestation_subclass)
+    assert registry.attestations(review_request.id) == ()
+
+
+def test_primitive_subclasses_are_rejected_before_overridden_behavior() -> None:
+    with pytest.raises(
+        ReviewAttestationValidationError,
+        match="repository is invalid",
+    ) as repository_error:
+        request(repository=ExplosiveRepository("leon36000/NextGen-Memory"))
+    assert repository_error.value.__context__ is None
+
+    with pytest.raises(
+        ReviewAttestationValidationError,
+        match=("pull request number must be a positive integer"),
+    ) as integer_error:
+        request(pull_request_number=ExplosiveInteger(172))
+    assert integer_error.value.__context__ is None
