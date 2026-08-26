@@ -21,7 +21,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: 58a22e66ab7132bc7f5b24bbad6d59e0080ce21d
+          ref: 8c09ee5c284c1118962b4824495e6ecb34b6d197
           path: controller
           fetch-depth: 0
 
