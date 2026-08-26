@@ -1,0 +1,396 @@
+name: Publish exact review attestation registry r3 technical review
+
+on:
+  push:
+    branches:
+      - bootstrap/publish-review-attestation-r3-review-20260826
+
+concurrency:
+  group: exact-review-attestation-r3-technical-review
+  cancel-in-progress: false
+
+permissions:
+  actions: read
+  contents: write
+  issues: write
+  pull-requests: write
+
+jobs:
+  review:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: candidate/exact-sha-review-attestation-registry-v0-r3-20260826
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Resolve exact candidate, PR, evidence and checkpoint
+        id: identity
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          candidate_branch='candidate/exact-sha-review-attestation-registry-v0-r3-20260826'
+          base_branch='candidate/advisory-policy-promotion-gate-v0-20260824'
+          base_sha='f4f3aca9759b5b7a60691017c2211152c011ea92'
+          red_sha='7a59141d6e532ed7a83f0d6204b451893944ae72'
+          candidate_sha=$(git rev-parse HEAD)
+          test "$(git rev-parse HEAD^)" = "$red_sha"
+          test "$(git merge-base "$base_sha" HEAD)" = "$base_sha"
+          short=${candidate_sha:0:8}
+          evidence_branch="evidence/exact-sha-review-attestation-registry-v0-r3-$short-green-20260826"
+          checkpoint_branch="evidence/exact-sha-review-attestation-registry-v0-r3-$short-checkpoint-20260826"
+          evidence_path="evidence/exact-sha-review-attestation-registry-v0-r3-$short-green-20260826.json"
+          checkpoint_path="evidence/exact-sha-review-attestation-registry-v0-r3-$short-checkpoint-20260826.json"
+          git fetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*'
+          test "$(git rev-parse "origin/$candidate_branch")" = "$candidate_sha"
+          test "$(git rev-parse origin/feat/exact-sha-review-attestation-registry-v0-20260824)" = "$candidate_sha"
+          git show "origin/$evidence_branch:$evidence_path" > /tmp/evidence.json
+          git show "origin/$checkpoint_branch:$checkpoint_path" > /tmp/checkpoint.json
+          jq -e --arg sha "$candidate_sha" '.status == "green_review_pending_unmerged" and .candidate.sha == $sha and .verification.focused_tests_each == 67 and .verification.full_tests_each == 521 and .verification.generated_traces_each == 5000 and .verification.audit_findings == 0 and .review.verdict == "pending" and .review.merge_allowed == false' /tmp/evidence.json >/dev/null
+          jq -e --arg sha "$candidate_sha" '.candidate.sha == $sha and .review.verdict == "pending" and .review.merge_allowed == false' /tmp/checkpoint.json >/dev/null
+          evidence_digest=$(sha256sum /tmp/evidence.json | awk '{print $1}')
+          test "$(jq -r '.evidence.sha256' /tmp/checkpoint.json)" = "$evidence_digest"
+          verifier_run=$(jq -r '.verification.run_id' /tmp/evidence.json)
+          jobs=$(gh api "repos/$REPO/actions/runs/$verifier_run/jobs?per_page=100")
+          test "$(printf '%s' "$jobs" | jq '.jobs | length')" -ge 5
+          test "$(printf '%s' "$jobs" | jq '[.jobs[] | select(.status != "completed" or .conclusion != "success")] | length')" -eq 0
+          pulls=$(gh api --method GET "repos/$REPO/pulls" \
+            -f state=open -f head="leon36000:$candidate_branch" -f per_page=20)
+          test "$(printf '%s' "$pulls" | jq 'length')" -eq 1
+          pr=$(printf '%s' "$pulls" | jq -r '.[0].number')
+          test "$(printf '%s' "$pulls" | jq -r '.[0].head.sha')" = "$candidate_sha"
+          test "$(printf '%s' "$pulls" | jq -r '.[0].base.ref')" = "$base_branch"
+          test "$(printf '%s' "$pulls" | jq -r '.[0].base.sha')" = "$base_sha"
+          test "$(printf '%s' "$pulls" | jq -r '.[0].draft')" = true
+          printf 'candidate_sha=%s\ncandidate_short=%s\npr=%s\nverifier_run=%s\nevidence_branch=%s\ncheckpoint_branch=%s\nevidence_digest=%s\n' \
+            "$candidate_sha" "$short" "$pr" "$verifier_run" "$evidence_branch" "$checkpoint_branch" "$evidence_digest" \
+            | tee -a "$GITHUB_OUTPUT"
+
+      - name: Fresh exact-SHA technical review verification
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install -e '.[dev]'
+          python -m pip install 'ruff==0.16.4'
+          ruff check .
+          ruff format --check \
+            src/nextgen_memory/__init__.py \
+            src/nextgen_memory/review_attestation_registry.py \
+            tests/test_review_attestation_registry.py \
+            tests/test_review_attestation_registry_properties.py \
+            tests/test_review_attestation_registry_public_api.py
+          python -m compileall -q src scripts
+          set -o pipefail
+          python -m pytest -q tests/test_review_attestation_registry.py \
+            2>&1 | tee /tmp/review-focused.txt
+          grep -F '67 passed' /tmp/review-focused.txt >/dev/null
+          python -m pytest -q 2>&1 | tee /tmp/review-full.txt
+          grep -F '521 passed' /tmp/review-full.txt >/dev/null
+          git diff --check 'f4f3aca9759b5b7a60691017c2211152c011ea92'...HEAD
+          test "$(git diff --name-only HEAD^...HEAD)" = \
+            src/nextgen_memory/review_attestation_registry.py
+
+      - name: Run independent adversarial boundary probes
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from __future__ import annotations
+
+          import inspect
+
+          from nextgen_memory import (
+              ExactShaReviewAttestation,
+              ExactShaReviewRequest,
+              InMemoryExactShaReviewAttestationRegistry,
+              ReviewAttestationValidationError,
+              ReviewAttestationVerdict,
+              ReviewerIdentity,
+              ReviewModel,
+          )
+
+          sha40_a = 'a' * 40
+          sha40_b = 'b' * 40
+          hashes = tuple(str(index) * 64 for index in range(1, 8))
+
+          def kwargs_for(cls, overrides=None):
+              overrides = dict(overrides or {})
+              values = {
+                  'model': next(iter(ReviewModel)),
+                  'reviewer_key_fingerprint': hashes[0],
+                  'repository': 'owner/repository',
+                  'pull_request': 1,
+                  'pull_request_number': 1,
+                  'base_sha': sha40_a,
+                  'candidate_sha': sha40_b,
+                  'diff_sha256': hashes[1],
+                  'review_packet_sha256': hashes[2],
+                  'acceptance_criteria_sha256': hashes[3],
+                  'required_model': next(iter(ReviewModel)),
+                  'trusted_reviewer_key_fingerprints': (hashes[0],),
+                  'minimum_approval_count': 1,
+                  'minimum_approvals': 1,
+              }
+              values.update(overrides)
+              result = {}
+              missing = []
+              for name, parameter in inspect.signature(cls).parameters.items():
+                  if name in values:
+                      result[name] = values[name]
+                  elif parameter.default is inspect.Parameter.empty:
+                      missing.append(name)
+              if missing:
+                  raise AssertionError((cls.__name__, missing))
+              return result
+
+          reviewer = ReviewerIdentity(**kwargs_for(ReviewerIdentity))
+          request = ExactShaReviewRequest(**kwargs_for(ExactShaReviewRequest))
+          attestation_values = {
+              'request_id': request.id,
+              'request_content_hash': request.content_hash,
+              'repository': request.repository,
+              'pull_request': getattr(request, 'pull_request', 1),
+              'pull_request_number': getattr(request, 'pull_request_number', 1),
+              'candidate_sha': request.candidate_sha,
+              'reviewer': reviewer,
+              'verdict': ReviewAttestationVerdict.APPROVE,
+              'finding_codes': (),
+              'findings': (),
+              'review_artifact_sha256': hashes[4],
+              'evidence_artifact_sha256s': (hashes[5],),
+              'evidence_artifacts': (hashes[5],),
+              'authenticated_envelope_sha256': hashes[6],
+          }
+          attestation = ExactShaReviewAttestation(
+              **kwargs_for(ExactShaReviewAttestation, attestation_values)
+          )
+          registry = InMemoryExactShaReviewAttestationRegistry()
+          assert registry.register_request(request) == request
+          assert registry.record_attestation(attestation) == attestation
+
+          class ExplodingIterator:
+              def __iter__(self):
+                  return self
+
+              def __next__(self):
+                  raise RuntimeError('SECRET-REVIEW-ITERATOR-SENTINEL')
+
+          try:
+              ExactShaReviewRequest(
+                  **kwargs_for(
+                      ExactShaReviewRequest,
+                      {'trusted_reviewer_key_fingerprints': ExplodingIterator()},
+                  )
+              )
+          except ReviewAttestationValidationError as exc:
+              assert str(exc) == 'trusted reviewers must be a bounded iterable'
+              assert exc.__context__ is None
+              assert exc.__cause__ is None
+              assert 'SECRET' not in str(exc)
+          else:
+              raise AssertionError('exploding iterator accepted')
+
+          class ExplodingRepository(str):
+              def strip(self):
+                  raise RuntimeError('SECRET-REPOSITORY-SENTINEL')
+
+          try:
+              ExactShaReviewRequest(
+                  **kwargs_for(
+                      ExactShaReviewRequest,
+                      {'repository': ExplodingRepository('owner/repository')},
+                  )
+              )
+          except ReviewAttestationValidationError as exc:
+              assert str(exc) == 'repository must be a string'
+              assert exc.__context__ is None
+              assert exc.__cause__ is None
+          else:
+              raise AssertionError('string subclass accepted')
+
+          class InjectingReviewer(ReviewerIdentity):
+              def to_dict(self):
+                  raise RuntimeError('SECRET-REVIEWER-PAYLOAD-SENTINEL')
+
+          try:
+              ExactShaReviewAttestation(
+                  **kwargs_for(
+                      ExactShaReviewAttestation,
+                      {
+                          **attestation_values,
+                          'reviewer': InjectingReviewer(
+                              **kwargs_for(ReviewerIdentity)
+                          ),
+                      },
+                  )
+              )
+          except ReviewAttestationValidationError as exc:
+              assert str(exc) == 'reviewer must be an exact ReviewerIdentity'
+              assert exc.__context__ is None
+              assert exc.__cause__ is None
+          else:
+              raise AssertionError('reviewer subclass accepted')
+
+          class RequestSubclass(ExactShaReviewRequest):
+              pass
+
+          try:
+              registry.register_request(
+                  RequestSubclass(**kwargs_for(ExactShaReviewRequest))
+              )
+          except ReviewAttestationValidationError as exc:
+              assert str(exc) == 'request must be an exact ExactShaReviewRequest'
+          else:
+              raise AssertionError('request subclass accepted')
+
+          class AttestationSubclass(ExactShaReviewAttestation):
+              pass
+
+          try:
+              registry.record_attestation(
+                  AttestationSubclass(
+                      **kwargs_for(
+                          ExactShaReviewAttestation,
+                          attestation_values,
+                      )
+                  )
+              )
+          except ReviewAttestationValidationError as exc:
+              assert str(exc) == (
+                  'attestation must be an exact ExactShaReviewAttestation'
+              )
+          else:
+              raise AssertionError('attestation subclass accepted')
+
+          assert registry.get_request(request.id) == request
+          assert registry.attestations(request.id) == (attestation,)
+          PY
+
+      - name: Build canonical technical review evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          jq -n \
+            --arg schema 'm-head-exact-review-attestation-r3-technical-review-v1' \
+            --arg status 'technical_approve_external_model_gate_pending_unmerged' \
+            --arg repository '${{ github.repository }}' \
+            --arg candidate_branch 'candidate/exact-sha-review-attestation-registry-v0-r3-20260826' \
+            --arg candidate_sha '${{ steps.identity.outputs.candidate_sha }}' \
+            --arg candidate_tree_sha "$(git rev-parse HEAD^{tree})" \
+            --arg base_branch 'candidate/advisory-policy-promotion-gate-v0-20260824' \
+            --arg base_sha 'f4f3aca9759b5b7a60691017c2211152c011ea92' \
+            --arg red_sha '7a59141d6e532ed7a83f0d6204b451893944ae72' \
+            --arg evidence_branch '${{ steps.identity.outputs.evidence_branch }}' \
+            --arg checkpoint_branch '${{ steps.identity.outputs.checkpoint_branch }}' \
+            --arg evidence_sha256 '${{ steps.identity.outputs.evidence_digest }}' \
+            --argjson product_pr '${{ steps.identity.outputs.pr }}' \
+            --argjson verifier_run '${{ steps.identity.outputs.verifier_run }}' \
+            '{schema:$schema,status:$status,repository:$repository,boundary:{candidate_branch:$candidate_branch,candidate_sha:$candidate_sha,candidate_tree_sha:$candidate_tree_sha,base_branch:$base_branch,base_sha:$base_sha,adversarial_red_sha:$red_sha,product_pull_request:$product_pr},evidence:{green_branch:$evidence_branch,checkpoint_branch:$checkpoint_branch,green_sha256:$evidence_sha256,verifier_run:$verifier_run},review:{reviewer_runtime:"GPT-5.6 Pro",requested_external_model_gate:"GPT-5.6 Sol",external_model_gate_satisfied:false,technical_verdict:"APPROVE",findings:[],evidence_checked:["exact diff","Ruff 0.16.4","format","compileall","67 focused tests","521 full tests","5,000 generated traces per Python","Python 3.12/3.13 cross-semantic identity","strict audit","isolated wheels","fresh adversarial subclass and iterator probes"],merge_authorized:false},hardening:{iterator_exception_sanitization:true,exact_public_contract_types:true,primitive_subclass_rejection:true,state_unchanged_after_rejected_inputs:true},safety:{actual_product_merge_performed:false,merged:false,production_database_contacted:false,production_migration_applied:false,production_application_data_written:false,feedback_written:false,policy_activated:false,release_published:false,tests_weakened:false,stubs_added:false,sol_verdict_fabricated:false},next_action:"A separately authenticated reviewer identity may satisfy the external model gate. Technical approval alone authorizes no merge, deployment, migration, feedback, activation, or release."}' \
+            > /tmp/technical-review.json
+          sha256sum /tmp/technical-review.json > /tmp/technical-review.sha256
+          cat /tmp/technical-review.json
+
+      - name: Publish immutable technical review branch
+        id: publish
+        shell: bash
+        run: |
+          set -euo pipefail
+          candidate_sha='${{ steps.identity.outputs.candidate_sha }}'
+          short='${{ steps.identity.outputs.candidate_short }}'
+          branch="evidence/exact-sha-review-attestation-registry-v0-r3-$short-technical-review-20260826"
+          path="evidence/exact-sha-review-attestation-registry-v0-r3-$short-technical-review-20260826.json"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git fetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*'
+          if git ls-remote --exit-code --heads origin "$branch"; then
+            git switch --detach "origin/$branch"
+            cmp /tmp/technical-review.json "$path"
+          else
+            git switch -c "$branch" "$candidate_sha"
+            mkdir -p evidence
+            cp /tmp/technical-review.json "$path"
+            git add "$path"
+            git diff --cached --check
+            git commit -m 'evidence: publish exact review registry r3 technical review'
+            git push origin HEAD:"refs/heads/$branch"
+          fi
+          printf 'review_branch=%s\n' "$branch" | tee -a "$GITHUB_OUTPUT"
+
+      - name: Publish exact-SHA PR review and supersede r2
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          pr='${{ steps.identity.outputs.pr }}'
+          candidate_sha='${{ steps.identity.outputs.candidate_sha }}'
+          marker="MHEAD_TECHNICAL_REVIEW_APPROVE_V1:$candidate_sha"
+          reviews=$(gh api "repos/$REPO/pulls/$pr/reviews?per_page=100")
+          if [ "$(printf '%s' "$reviews" | jq --arg marker "$marker" '[.[] | select(.body != null and (.body | contains($marker)))] | length')" -eq 0 ]; then
+            body=$(cat <<EOF
+          <!-- $marker -->
+          ## Independent exact-SHA technical review — APPROVE
+
+          - candidate: \`$candidate_sha\`;
+          - exact product delta from adversarial RED: one module;
+          - fresh review verification: Ruff 0.16.4, format, compileall, 67 focused tests, 521 full tests;
+          - independent matrix: Python 3.12/3.13, 5,000 generated traces per Python, cross-Python semantic identity, zero audit findings, isolated wheel imports;
+          - fresh adversarial probes: bounded iterator failures, no exception context, exact reviewer/request/attestation types, primitive subclass rejection, unchanged registry state;
+          - findings: none;
+          - technical verdict: \`APPROVE\`;
+          - reviewer runtime: \`GPT-5.6 Pro\`;
+          - separate requested external model gate: \`GPT-5.6 Sol\` — not authenticated by this review;
+          - merge authorized: \`false\`;
+          - immutable review evidence: \`${{ steps.publish.outputs.review_branch }}\`.
+
+          This technical approval authorizes no merge, migration, deployment, feedback write, policy activation, or release.
+          EOF
+            )
+            body=$(printf '%s\n' "$body" | sed 's/^          //')
+            gh api --method POST "repos/$REPO/pulls/$pr/reviews" \
+              -f event=COMMENT \
+              -f commit_id="$candidate_sha" \
+              --raw-field body="$body" >/dev/null
+          fi
+
+          old_pr=184
+          old=$(gh api "repos/$REPO/pulls/$old_pr")
+          if [ "$(printf '%s' "$old" | jq -r '.state')" = open ]; then
+            old_body=$(cat <<EOF
+          ## Superseded without merge
+
+          Candidate r2 \`008005072f412ecda1bf461f4e875de72c5b808f\` is superseded by r3 \`$candidate_sha\`, which addresses the exact iterator/subclass findings from the r2 review and has fresh immutable verification plus technical approval.
+
+          This PR is closed without merge. Its immutable candidate and review history remain evidence.
+          EOF
+            )
+            old_body=$(printf '%s\n' "$old_body" | sed 's/^          //')
+            gh api "repos/$REPO/issues/$old_pr/comments" \
+              --raw-field body="$old_body" >/dev/null
+            gh api --method PATCH "repos/$REPO/pulls/$old_pr" \
+              -f state=closed >/dev/null
+          fi
+
+          gh api "repos/$REPO/issues/165/comments" \
+            --raw-field body="Exact-SHA technical review for r3 \`$candidate_sha\`: \`APPROVE\`, no findings, immutable evidence \`${{ steps.publish.outputs.review_branch }}\`. Reviewer runtime is GPT-5.6 Pro; the separate external GPT-5.6 Sol identity gate remains unauthenticated. \`merge_allowed=false\`." >/dev/null
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: exact-review-attestation-r3-technical-review
+          path: |
+            /tmp/technical-review.json
+            /tmp/technical-review.sha256
+            /tmp/review-focused.txt
+            /tmp/review-full.txt
+          if-no-files-found: error
+          retention-days: 7
