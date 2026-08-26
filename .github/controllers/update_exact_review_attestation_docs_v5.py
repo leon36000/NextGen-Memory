@@ -65,13 +65,20 @@ def _require_no_obsolete_identity(source: str, *, label: str) -> None:
 
 def _update_plan(path: Path) -> None:
     source = _replace_old_identities(path.read_text(encoding="utf-8"))
-    if _PLAN_HEADING_V5 not in source:
-        matching = [heading for heading in _PLAN_HEADINGS if heading in source]
-        if len(matching) != 1:
-            raise SystemExit(
-                "plan must contain exactly one original or pre-v5 RED heading"
-            )
-        source = source.replace(matching[0], _PLAN_HEADING_V5, 1)
+    lines = source.splitlines(keepends=True)
+    heading_indexes = [
+        index
+        for index, line in enumerate(lines)
+        if line.rstrip("\r\n") in (*_PLAN_HEADINGS, _PLAN_HEADING_V5)
+    ]
+    if len(heading_indexes) != 1:
+        raise SystemExit(
+            "plan must contain exactly one original, pre-v5, or v5 RED heading"
+        )
+    heading_index = heading_indexes[0]
+    ending = "\n" if lines[heading_index].endswith("\n") else ""
+    lines[heading_index] = _PLAN_HEADING_V5 + ending
+    source = "".join(lines)
     if _PLAN_IDENTITY_LINES not in source:
         if source.count(_PLAN_BASE_ANCHOR) != 1:
             raise SystemExit("plan exact-base anchor is absent or duplicated")
