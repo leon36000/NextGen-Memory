@@ -1,0 +1,286 @@
+name: Materialize exact review attestation adversarial RED
+
+on:
+  push:
+    branches:
+      - bootstrap/materialize-review-attestation-adversarial-red-20260826
+
+concurrency:
+  group: exact-review-attestation-adversarial-red-single-writer
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  red:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: tdd/exact-sha-review-attestation-registry-v0-adversarial-red-20260826
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Prove exact candidate parent and append only adversarial tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          parent='008005072f412ecda1bf461f4e875de72c5b808f'
+          test "$(git rev-parse HEAD)" = "$parent"
+          test ! -e /tmp/review-attestation-adversarial-tests.txt
+          cat > /tmp/review-attestation-adversarial-tests.txt <<'PY'
+
+
+          class ExplodingCollection:
+              def __iter__(self) -> ExplodingCollection:
+                  return self
+
+              def __next__(self) -> object:
+                  raise RuntimeError("SECRET-ITERATOR-SENTINEL")
+
+
+          class RawPayloadReviewer(ReviewerIdentity):
+              def to_dict(self) -> dict[str, object]:
+                  return {"raw_review": "SECRET-REVIEW-SENTINEL"}
+
+
+          class RequestSubclass(ExactShaReviewRequest):
+              pass
+
+
+          class AttestationSubclass(ExactShaReviewAttestation):
+              pass
+
+
+          class ExplosiveRepository(str):
+              def strip(self, chars: str | None = None) -> str:
+                  del chars
+                  raise RuntimeError("SECRET-REPOSITORY-SENTINEL")
+
+
+          class ExplosiveInteger(int):
+              def __le__(self, other: object) -> bool:
+                  del other
+                  raise RuntimeError("SECRET-INTEGER-SENTINEL")
+
+
+          @pytest.mark.parametrize(
+              ("factory", "message"),
+              [
+                  (
+                      lambda: request(
+                          trusted_reviewer_fingerprints=ExplodingCollection()
+                      ),
+                      "trusted reviewers must be a bounded iterable",
+                  ),
+                  (
+                      lambda: attestation(
+                          request(),
+                          verdict=ReviewAttestationVerdict.CHANGES_REQUIRED,
+                          findings=ExplodingCollection(),
+                      ),
+                      "finding codes must be a bounded iterable",
+                  ),
+                  (
+                      lambda: attestation(
+                          request(),
+                          evidence_artifact_sha256s=ExplodingCollection(),
+                      ),
+                      "evidence artifacts must be a bounded iterable",
+                  ),
+              ],
+          )
+          def test_collection_iteration_failures_are_bounded_and_privacy_safe(
+              factory: object,
+              message: str,
+          ) -> None:
+              with pytest.raises(ReviewAttestationValidationError) as caught:
+                  factory()  # type: ignore[operator]
+              assert str(caught.value) == message
+              assert caught.value.__cause__ is None
+              assert caught.value.__context__ is None
+              assert "SECRET" not in str(caught.value)
+
+
+          def test_reviewer_subclass_cannot_inject_raw_payload() -> None:
+              review_request = request()
+              malicious = RawPayloadReviewer(
+                  model=ReviewModel.GPT_5_6_SOL,
+                  reviewer_key_fingerprint=REVIEWER_A,
+              )
+              with pytest.raises(
+                  ReviewAttestationValidationError,
+                  match="reviewer must be an exact ReviewerIdentity",
+              ):
+                  attestation(review_request, reviewer=malicious)
+
+
+          def test_registry_rejects_contract_subclasses_before_mutation() -> None:
+              registry = InMemoryExactShaReviewAttestationRegistry()
+              review_request = request()
+              request_subclass = RequestSubclass(
+                  repository=review_request.repository,
+                  pull_request_number=review_request.pull_request_number,
+                  base_sha=review_request.base_sha,
+                  candidate_sha=review_request.candidate_sha,
+                  diff_sha256=review_request.diff_sha256,
+                  review_packet_sha256=review_request.review_packet_sha256,
+                  acceptance_criteria_sha256=(
+                      review_request.acceptance_criteria_sha256
+                  ),
+                  required_model=review_request.required_model,
+                  trusted_reviewer_fingerprints=(
+                      review_request.trusted_reviewer_fingerprints
+                  ),
+                  minimum_approvals=review_request.minimum_approvals,
+              )
+              with pytest.raises(
+                  ReviewAttestationValidationError,
+                  match="request must be an exact ExactShaReviewRequest",
+              ):
+                  registry.register_request(request_subclass)
+              with pytest.raises(ReviewAttestationStateError):
+                  registry.get_request(review_request.id)
+
+              registry.register_request(review_request)
+              value = attestation(review_request)
+              attestation_subclass = AttestationSubclass(
+                  request_id=value.request_id,
+                  request_content_hash=value.request_content_hash,
+                  repository=value.repository,
+                  pull_request_number=value.pull_request_number,
+                  candidate_sha=value.candidate_sha,
+                  reviewer=value.reviewer,
+                  verdict=value.verdict,
+                  finding_codes=value.finding_codes,
+                  review_artifact_sha256=value.review_artifact_sha256,
+                  evidence_artifact_sha256s=value.evidence_artifact_sha256s,
+                  authenticated_envelope_sha256=(
+                      value.authenticated_envelope_sha256
+                  ),
+              )
+              with pytest.raises(
+                  ReviewAttestationValidationError,
+                  match=(
+                      "attestation must be an exact "
+                      "ExactShaReviewAttestation"
+                  ),
+              ):
+                  registry.record_attestation(attestation_subclass)
+              assert registry.attestations(review_request.id) == ()
+
+
+          def test_primitive_subclasses_are_rejected_before_overridden_behavior() -> None:
+              with pytest.raises(
+                  ReviewAttestationValidationError,
+                  match="repository is invalid",
+              ) as repository_error:
+                  request(
+                      repository=ExplosiveRepository(
+                          "leon36000/NextGen-Memory"
+                      )
+                  )
+              assert repository_error.value.__context__ is None
+
+              with pytest.raises(
+                  ReviewAttestationValidationError,
+                  match=(
+                      "pull request number must be a positive integer"
+                  ),
+              ) as integer_error:
+                  request(pull_request_number=ExplosiveInteger(172))
+              assert integer_error.value.__context__ is None
+          PY
+          sed -i 's/^          //' /tmp/review-attestation-adversarial-tests.txt
+          cat /tmp/review-attestation-adversarial-tests.txt \
+            >> tests/test_review_attestation_registry.py
+          mapfile -t modified < <(git diff --name-only | sort)
+          test "${#modified[@]}" -eq 1
+          test "${modified[0]}" = tests/test_review_attestation_registry.py
+          git diff --check
+
+      - name: Install exact test toolchain and normalize only the test file
+        run: |
+          python -m pip install -e '.[dev]'
+          python -m pip install 'ruff==0.16.4'
+          ruff check --fix tests/test_review_attestation_registry.py
+          ruff format tests/test_review_attestation_registry.py
+          ruff check tests/test_review_attestation_registry.py
+          ruff format --check tests/test_review_attestation_registry.py
+          python -m py_compile tests/test_review_attestation_registry.py
+          git diff --check
+
+      - name: Prove exact adversarial RED without unrelated regressions
+        shell: bash
+        run: |
+          set -euo pipefail
+          set +e
+          PYTHONPATH="$PWD/src" python -m pytest -q \
+            tests/test_review_attestation_registry.py \
+            > /tmp/review-attestation-adversarial-red.txt 2>&1
+          rc=$?
+          set -e
+          test "$rc" -ne 0
+          grep -F '6 failed, 55 passed' \
+            /tmp/review-attestation-adversarial-red.txt >/dev/null
+          grep -F 'SECRET-ITERATOR-SENTINEL' \
+            /tmp/review-attestation-adversarial-red.txt >/dev/null
+          grep -F 'SECRET-REPOSITORY-SENTINEL' \
+            /tmp/review-attestation-adversarial-red.txt >/dev/null
+          grep -F 'DID NOT RAISE' \
+            /tmp/review-attestation-adversarial-red.txt >/dev/null
+          cat /tmp/review-attestation-adversarial-red.txt
+
+      - name: Commit immutable adversarial RED
+        id: publish
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add tests/test_review_attestation_registry.py
+          git diff --cached --check
+          git commit -m 'test: expose review attestation privacy boundary bypasses'
+          red_sha=$(git rev-parse HEAD)
+          test "$(git rev-parse HEAD^)" = \
+            '008005072f412ecda1bf461f4e875de72c5b808f'
+          test "$(git diff --name-only HEAD^...HEAD)" = \
+            tests/test_review_attestation_registry.py
+          git push origin HEAD:tdd/exact-sha-review-attestation-registry-v0-adversarial-red-20260826
+          echo "red_sha=$red_sha" >> "$GITHUB_OUTPUT"
+
+      - name: Publish bounded RED status
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          body=$(cat <<EOF
+          ## Exact-SHA Review Attestation Registry adversarial RED accepted
+
+          - parent candidate: \`008005072f412ecda1bf461f4e875de72c5b808f\`;
+          - adversarial RED: \`${{ steps.publish.outputs.red_sha }}\`;
+          - exact delta: \`tests/test_review_attestation_registry.py\` only;
+          - existing tests passed: \`55\`;
+          - new failures: \`6\`;
+          - failures prove iterator-message disclosure, reviewer subclass payload injection, contract-subclass acceptance, and primitive-subclass method execution;
+          - implementation changed: \`false\`;
+          - merge allowed: \`false\`.
+          EOF
+          )
+          gh api "repos/$REPO/issues/165/comments" --raw-field body="$body" >/dev/null
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: exact-review-attestation-adversarial-red
+          path: /tmp/review-attestation-adversarial-red.txt
+          if-no-files-found: error
+          retention-days: 7
