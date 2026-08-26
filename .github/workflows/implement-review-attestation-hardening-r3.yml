@@ -1,0 +1,471 @@
+name: Implement exact review attestation privacy hardening r3
+
+on:
+  push:
+    branches:
+      - bootstrap/implement-review-attestation-hardening-r3-20260826
+
+concurrency:
+  group: exact-review-attestation-registry-r3-single-writer
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  implement:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 7a59141d6e532ed7a83f0d6204b451893944ae72
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Prove immutable RED and current product refs
+        id: identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          red_sha='7a59141d6e532ed7a83f0d6204b451893944ae72'
+          candidate_r2='008005072f412ecda1bf461f4e875de72c5b808f'
+          base_sha='f4f3aca9759b5b7a60691017c2211152c011ea92'
+          red_branch='tdd/exact-sha-review-attestation-registry-v0-adversarial-red-20260826'
+          r2_branch='candidate/exact-sha-review-attestation-registry-v0-r2-20260826'
+          feature_branch='feat/exact-sha-review-attestation-registry-v0-20260824'
+          destination_branch='candidate/exact-sha-review-attestation-registry-v0-r3-20260826'
+          test "$(git rev-parse HEAD)" = "$red_sha"
+          test "$(git rev-parse HEAD^)" = "$candidate_r2"
+          test "$(git merge-base "$base_sha" "$red_sha")" = "$base_sha"
+          git fetch --no-tags origin \
+            "+refs/heads/$red_branch:refs/remotes/origin/$red_branch" \
+            "+refs/heads/$r2_branch:refs/remotes/origin/$r2_branch" \
+            "+refs/heads/$feature_branch:refs/remotes/origin/$feature_branch"
+          test "$(git rev-parse "origin/$red_branch")" = "$red_sha"
+          test "$(git rev-parse "origin/$r2_branch")" = "$candidate_r2"
+          test "$(git rev-parse "origin/$feature_branch")" = "$candidate_r2"
+          if git ls-remote --exit-code --heads origin "$destination_branch"; then
+            echo 'immutable r3 candidate branch already exists' >&2
+            exit 1
+          fi
+          printf 'red_sha=%s\ncandidate_r2=%s\nbase_sha=%s\ndestination_branch=%s\nfeature_branch=%s\n' \
+            "$red_sha" "$candidate_r2" "$base_sha" "$destination_branch" "$feature_branch" \
+            | tee -a "$GITHUB_OUTPUT"
+
+      - name: Install exact development toolchain
+        run: |
+          python -m pip install -e '.[dev]'
+          python -m pip install 'ruff==0.16.4'
+          ruff --version
+
+      - name: Prove accepted adversarial RED
+        shell: bash
+        run: |
+          set -euo pipefail
+          set +e
+          python -m pytest -q tests/test_review_attestation_registry.py \
+            > /tmp/exact-review-attestation-r3-red.txt 2>&1
+          rc=$?
+          set -e
+          test "$rc" -ne 0
+          grep -F '6 failed, 55 passed' \
+            /tmp/exact-review-attestation-r3-red.txt >/dev/null
+          grep -F 'SECRET-ITERATOR-SENTINEL' \
+            /tmp/exact-review-attestation-r3-red.txt >/dev/null
+          grep -F 'SECRET-REPOSITORY-SENTINEL' \
+            /tmp/exact-review-attestation-r3-red.txt >/dev/null
+          grep -F 'DID NOT RAISE' \
+            /tmp/exact-review-attestation-r3-red.txt >/dev/null
+
+      - name: Apply minimal iterator and exact-type hardening
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > /tmp/patch_review_registry_r3.py <<'PY'
+          from __future__ import annotations
+
+          import ast
+          from pathlib import Path
+
+          path = Path('src/nextgen_memory/review_attestation_registry.py')
+          source = path.read_text(encoding='utf-8')
+          original = source
+
+          tree = ast.parse(source)
+          parent: dict[ast.AST, ast.AST] = {}
+          for node in ast.walk(tree):
+              for child in ast.iter_child_nodes(node):
+                  parent[child] = node
+
+          bounded = next(
+              node for node in tree.body
+              if isinstance(node, ast.FunctionDef)
+              and node.name == '_bounded_unique'
+          )
+          iter_assignment = next(
+              node for node in ast.walk(bounded)
+              if isinstance(node, (ast.Assign, ast.AnnAssign))
+              and isinstance(node.value, ast.Call)
+              and isinstance(node.value.func, ast.Name)
+              and node.value.func.id == 'iter'
+          )
+          islice_assignment = next(
+              node for node in ast.walk(bounded)
+              if isinstance(node, (ast.Assign, ast.AnnAssign))
+              and isinstance(node.value, ast.Call)
+              and isinstance(node.value.func, ast.Name)
+              and node.value.func.id in {'tuple', 'list'}
+              and any(
+                  isinstance(inner, ast.Call)
+                  and isinstance(inner.func, ast.Name)
+                  and inner.func.id == 'islice'
+                  for inner in ast.walk(node.value)
+              )
+          )
+          try_node = parent[iter_assignment]
+          while not isinstance(try_node, ast.Try):
+              try_node = parent[try_node]
+          raise_node = next(
+              child
+              for handler in try_node.handlers
+              for child in ast.walk(handler)
+              if isinstance(child, ast.Raise)
+          )
+          if raise_node.exc is None:
+              raise SystemExit('bounded iterator error has no exception expression')
+          iter_text = ast.get_source_segment(source, iter_assignment)
+          islice_text = ast.get_source_segment(source, islice_assignment)
+          error_text = ast.get_source_segment(source, raise_node.exc)
+          if not all((iter_text, islice_text, error_text)):
+              raise SystemExit('unable to recover bounded iterator source')
+          lines = source.splitlines(keepends=True)
+          start = min(try_node.lineno, islice_assignment.lineno)
+          end = max(
+              try_node.end_lineno or try_node.lineno,
+              islice_assignment.end_lineno or islice_assignment.lineno,
+          )
+          indent = ' ' * try_node.col_offset
+          replacement = (
+              f'{indent}iteration_failed = False\n'
+              f'{indent}try:\n'
+              f'{indent}    {iter_text.strip()}\n'
+              f'{indent}    {islice_text.strip()}\n'
+              f'{indent}except Exception:\n'
+              f'{indent}    iteration_failed = True\n'
+              f'{indent}if iteration_failed:\n'
+              f'{indent}    raise {error_text.strip()}\n'
+          )
+          lines[start - 1:end] = [replacement]
+          source = ''.join(lines)
+
+          tree = ast.parse(source)
+          parent = {}
+          for node in ast.walk(tree):
+              for child in ast.iter_child_nodes(node):
+                  parent[child] = node
+          exact_names = {
+              'str', 'int', 'bool', 'UUID', 'ReviewModel',
+              'ReviewAttestationVerdict', 'ReviewFindingCode',
+              'ReviewerIdentity', 'ExactShaReviewRequest',
+              'ExactShaReviewAttestation',
+          }
+          line_offsets = []
+          total = 0
+          for line in source.splitlines(keepends=True):
+              line_offsets.append(total)
+              total += len(line)
+
+          def offset(line: int, column: int) -> int:
+              return line_offsets[line - 1] + column
+
+          replacements: list[tuple[int, int, str]] = []
+          for node in ast.walk(tree):
+              if not (
+                  isinstance(node, ast.Call)
+                  and isinstance(node.func, ast.Name)
+                  and node.func.id == 'isinstance'
+                  and len(node.args) == 2
+                  and isinstance(node.args[1], ast.Name)
+                  and node.args[1].id in exact_names
+              ):
+                  continue
+              target_text = ast.get_source_segment(source, node.args[0])
+              if target_text is None:
+                  raise SystemExit('cannot recover isinstance target')
+              type_name = node.args[1].id
+              outer = parent.get(node)
+              if isinstance(outer, ast.UnaryOp) and isinstance(outer.op, ast.Not):
+                  start_offset = offset(outer.lineno, outer.col_offset)
+                  end_offset = offset(outer.end_lineno, outer.end_col_offset)
+                  replacement_text = f'type({target_text}) is not {type_name}'
+              else:
+                  start_offset = offset(node.lineno, node.col_offset)
+                  end_offset = offset(node.end_lineno, node.end_col_offset)
+                  replacement_text = f'type({target_text}) is {type_name}'
+              replacements.append(
+                  (start_offset, end_offset, replacement_text)
+              )
+          for start_offset, end_offset, replacement_text in sorted(
+              replacements, reverse=True
+          ):
+              source = (
+                  source[:start_offset]
+                  + replacement_text
+                  + source[end_offset:]
+              )
+
+          message_replacements = {
+              'reviewer must be a ReviewerIdentity': (
+                  'reviewer must be an exact ReviewerIdentity'
+              ),
+              'request must be an ExactShaReviewRequest': (
+                  'request must be an exact ExactShaReviewRequest'
+              ),
+              'attestation must be an ExactShaReviewAttestation': (
+                  'attestation must be an exact ExactShaReviewAttestation'
+              ),
+          }
+          for old, new in message_replacements.items():
+              if old in source:
+                  source = source.replace(old, new)
+              elif new not in source:
+                  raise SystemExit(
+                      f'exact-type error category is absent: {old!r}'
+                  )
+
+          if source == original:
+              raise SystemExit('privacy hardening produced no change')
+          path.write_text(source, encoding='utf-8')
+          PY
+          sed -i 's/^          //' /tmp/patch_review_registry_r3.py
+          python /tmp/patch_review_registry_r3.py
+          mapfile -t modified < <(git diff --name-only | sort)
+          test "${#modified[@]}" -eq 1
+          test "${modified[0]}" = \
+            src/nextgen_memory/review_attestation_registry.py
+
+      - name: Normalize and run focused/full verification
+        shell: bash
+        run: |
+          set -euo pipefail
+          ruff check --fix \
+            src/nextgen_memory/review_attestation_registry.py \
+            tests/test_review_attestation_registry.py
+          ruff format \
+            src/nextgen_memory/review_attestation_registry.py \
+            tests/test_review_attestation_registry.py
+          ruff check .
+          ruff format --check \
+            src/nextgen_memory/__init__.py \
+            src/nextgen_memory/review_attestation_registry.py \
+            tests/test_review_attestation_registry.py \
+            tests/test_review_attestation_registry_properties.py \
+            tests/test_review_attestation_registry_public_api.py
+          python -m compileall -q src scripts
+          set -o pipefail
+          python -m pytest -q \
+            tests/test_review_attestation_registry.py \
+            2>&1 | tee /tmp/exact-review-attestation-r3-focused.txt
+          grep -F '67 passed' \
+            /tmp/exact-review-attestation-r3-focused.txt >/dev/null
+          python -m pytest -q 2>&1 \
+            | tee /tmp/exact-review-attestation-r3-full.txt
+          grep -F '521 passed' \
+            /tmp/exact-review-attestation-r3-full.txt >/dev/null
+          git diff --check
+
+      - name: Run direct adversarial and static safety probes
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from __future__ import annotations
+
+          import ast
+          from pathlib import Path
+
+          path = Path('src/nextgen_memory/review_attestation_registry.py')
+          source = path.read_text(encoding='utf-8')
+          tree = ast.parse(source, filename=str(path))
+          findings = []
+          for node in ast.walk(tree):
+              if isinstance(node, ast.Pass):
+                  findings.append(('pass', node.lineno))
+              elif (
+                  isinstance(node, ast.Expr)
+                  and isinstance(node.value, ast.Constant)
+                  and node.value.value is Ellipsis
+              ):
+                  findings.append(('executable_ellipsis', node.lineno))
+              elif isinstance(node, ast.Raise):
+                  exc = node.exc
+                  if (
+                      isinstance(exc, ast.Call)
+                      and isinstance(exc.func, ast.Name)
+                      and exc.func.id == 'NotImplementedError'
+                  ):
+                      findings.append(('not_implemented', node.lineno))
+          for marker in (
+              'reviewer_email', 'reviewer_name', 'raw_payload',
+              'raw_review', 'query_text', 'command_output',
+              'memory_body', 'credential', 'api_key',
+              'access_token', 'password',
+          ):
+              if marker in source.lower():
+                  findings.append((f'privacy_surface:{marker}', 0))
+          if findings:
+              raise SystemExit(f'product safety findings: {findings!r}')
+          if 'except Exception:' not in source:
+              raise SystemExit('bounded iterator exception sanitization absent')
+          for required in (
+              'reviewer must be an exact ReviewerIdentity',
+              'request must be an exact ExactShaReviewRequest',
+              'attestation must be an exact ExactShaReviewAttestation',
+          ):
+              if required not in source:
+                  raise SystemExit(f'exact type boundary absent: {required}')
+          PY
+
+      - name: Build and import isolated wheel
+        shell: bash
+        run: |
+          set -euo pipefail
+          wheelhouse="$RUNNER_TEMP/review-attestation-r3-wheelhouse"
+          venv="$RUNNER_TEMP/review-attestation-r3-venv"
+          mkdir -p "$wheelhouse"
+          python -m pip wheel --no-deps . -w "$wheelhouse"
+          wheel=$(find "$wheelhouse" -maxdepth 1 -type f -name '*.whl' -print -quit)
+          test -n "$wheel"
+          python -m venv "$venv"
+          "$venv/bin/python" -m pip install --no-deps "$wheel"
+          "$venv/bin/python" -m pip check
+          "$venv/bin/python" - <<'PY'
+          import nextgen_memory
+
+          expected = (
+              'ExactShaReviewAttestation',
+              'ExactShaReviewRequest',
+              'InMemoryExactShaReviewAttestationRegistry',
+              'ReviewAdvisoryState',
+              'ReviewAttestationConflictError',
+              'ReviewAttestationDecision',
+              'ReviewAttestationRegistrySummary',
+              'ReviewAttestationStateError',
+              'ReviewAttestationValidationError',
+              'ReviewAttestationVerdict',
+              'ReviewerIdentity',
+              'ReviewFindingCode',
+              'ReviewModel',
+          )
+          for name in expected:
+              assert hasattr(nextgen_memory, name)
+              assert nextgen_memory.__all__.count(name) == 1
+          PY
+          cp "$wheel" /tmp/exact-review-attestation-r3-wheel.whl
+          sha256sum /tmp/exact-review-attestation-r3-wheel.whl \
+            > /tmp/exact-review-attestation-r3-wheel.sha256
+
+      - name: Commit and publish immutable r3 candidate
+        id: publish
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/nextgen_memory/review_attestation_registry.py
+          git diff --cached --check
+          git commit -m 'fix: harden exact review attestation privacy boundaries'
+          candidate_sha=$(git rev-parse HEAD)
+          test "$(git rev-parse HEAD^)" = '${{ steps.identity.outputs.red_sha }}'
+          test "$(git diff --name-only HEAD^...HEAD)" = \
+            src/nextgen_memory/review_attestation_registry.py
+          mapfile -t changed < <(
+            git diff --name-only '${{ steps.identity.outputs.base_sha }}'...HEAD \
+              | sort
+          )
+          expected=(
+            docs/exact-sha-review-attestation-registry-v0-red.md
+            docs/exact-sha-review-attestation-registry-v0.md
+            docs/superpowers/plans/2026-08-24-exact-sha-review-attestation-registry-v0.md
+            docs/superpowers/specs/2026-08-24-exact-sha-review-attestation-registry-v0-design.md
+            src/nextgen_memory/__init__.py
+            src/nextgen_memory/review_attestation_registry.py
+            tests/test_review_attestation_registry.py
+            tests/test_review_attestation_registry_properties.py
+            tests/test_review_attestation_registry_public_api.py
+          )
+          test "${#changed[@]}" -eq "${#expected[@]}"
+          diff -u <(printf '%s\n' "${expected[@]}" | sort) \
+            <(printf '%s\n' "${changed[@]}")
+          git diff --check '${{ steps.identity.outputs.base_sha }}'...HEAD
+          destination='${{ steps.identity.outputs.destination_branch }}'
+          feature='${{ steps.identity.outputs.feature_branch }}'
+          git push origin HEAD:"refs/heads/$destination"
+          git push origin HEAD:"refs/heads/$feature"
+          git fetch --no-tags origin \
+            "+refs/heads/$destination:refs/remotes/origin/$destination" \
+            "+refs/heads/$feature:refs/remotes/origin/$feature" \
+            '+refs/heads/candidate/exact-sha-review-attestation-registry-v0-r2-20260826:refs/remotes/origin/candidate/exact-sha-review-attestation-registry-v0-r2-20260826'
+          test "$(git rev-parse "origin/$destination")" = "$candidate_sha"
+          test "$(git rev-parse "origin/$feature")" = "$candidate_sha"
+          test "$(git rev-parse origin/candidate/exact-sha-review-attestation-registry-v0-r2-20260826)" = \
+            '${{ steps.identity.outputs.candidate_r2 }}'
+          git diff --binary '${{ steps.identity.outputs.red_sha }}'..."$candidate_sha" \
+            > /tmp/exact-review-attestation-r3-product.patch
+          jq -n \
+            --arg schema 'm-head-exact-review-attestation-r3-producer-v1' \
+            --arg repository '${{ github.repository }}' \
+            --arg base_sha '${{ steps.identity.outputs.base_sha }}' \
+            --arg red_sha '${{ steps.identity.outputs.red_sha }}' \
+            --arg candidate_branch "$destination" \
+            --arg candidate_sha "$candidate_sha" \
+            --arg candidate_tree_sha "$(git rev-parse "$candidate_sha^{tree}")" \
+            --arg wheel_sha256 "$(awk '{print $1}' /tmp/exact-review-attestation-r3-wheel.sha256)" \
+            '{schema:$schema,status:"candidate_r3_published_verification_pending_unmerged",repository:$repository,base_sha:$base_sha,adversarial_red_sha:$red_sha,candidate_branch:$candidate_branch,candidate_sha:$candidate_sha,candidate_tree_sha:$candidate_tree_sha,exact_path_count:9,verification:{ruff:true,format:true,compileall:true,focused_tests:67,full_tests:521,adversarial_regressions:6,isolated_wheel:true,wheel_sha256:$wheel_sha256,audit_findings:0},review:{technical_verdict:"pending",external_model_gate:"pending",merge_allowed:false},safety:{merged:false,production_database_contacted:false,production_migration_applied:false,feedback_written:false,policy_activated:false,release_published:false,tests_weakened:false,stubs_added:false}}' \
+            > /tmp/exact-review-attestation-r3-producer-summary.json
+          printf 'candidate_sha=%s\ncandidate_branch=%s\n' \
+            "$candidate_sha" "$destination" | tee -a "$GITHUB_OUTPUT"
+          cat /tmp/exact-review-attestation-r3-producer-summary.json
+
+      - name: Publish bounded issue status
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          body=$(cat <<EOF
+          ## Exact-SHA Review Attestation Registry v0 candidate r3 published
+
+          - adversarial RED: \`${{ steps.identity.outputs.red_sha }}\`;
+          - candidate r3: \`${{ steps.publish.outputs.candidate_sha }}\`;
+          - exact product delta from RED: \`src/nextgen_memory/review_attestation_registry.py\` only;
+          - privacy regressions fixed: iterator exception sanitization, exact reviewer/request/attestation boundaries, primitive subclass rejection;
+          - Ruff 0.16.4, compileall, 67 focused tests, 521 full tests, audit and isolated wheel: green;
+          - independent Python 3.12/3.13 exact-SHA verification: pending;
+          - merge allowed: \`false\`.
+
+          No merge, database operation, migration, feedback write, policy activation, deployment, or release occurred.
+          EOF
+          )
+          gh api "repos/$REPO/issues/165/comments" --raw-field body="$body" >/dev/null
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: exact-review-attestation-r3-producer
+          path: |
+            /tmp/exact-review-attestation-r3-producer-summary.json
+            /tmp/exact-review-attestation-r3-product.patch
+            /tmp/exact-review-attestation-r3-focused.txt
+            /tmp/exact-review-attestation-r3-full.txt
+            /tmp/exact-review-attestation-r3-wheel.whl
+            /tmp/exact-review-attestation-r3-wheel.sha256
+            /tmp/exact-review-attestation-r3-red.txt
+          if-no-files-found: error
+          retention-days: 7
