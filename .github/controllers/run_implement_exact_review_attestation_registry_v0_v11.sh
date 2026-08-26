@@ -56,12 +56,14 @@ for forbidden in (
 ):
     if forbidden in source:
         raise SystemExit(f"obsolete RED-v4 producer marker remains: {forbidden}")
-if source.count("849df204e899d7570ef469d52307786cf242695a") < 2:
-    raise SystemExit("RED-v5 SHA is not fully bound")
-if source.count("prove_exact_review_attestation_red_v5.py") != 1:
-    raise SystemExit("RED-v5 source prover call is absent or duplicated")
-if source.count("update_exact_review_attestation_docs_v5.py") != 1:
-    raise SystemExit("RED-v5 docs updater call is absent or duplicated")
+if source.count("849df204e899d7570ef469d52307786cf242695a") != 2:
+    raise SystemExit("RED-v5 SHA wrapper cardinality differs")
+if source.count("prove_exact_review_attestation_red_v5.py") != 3:
+    raise SystemExit("RED-v5 source prover wrapper cardinality differs")
+if source.count("update_exact_review_attestation_docs_v5.py") != 3:
+    raise SystemExit("RED-v5 docs updater wrapper cardinality differs")
+if source.count("exact-review-attestation-red-v5-preservation.json") != 3:
+    raise SystemExit("RED-v5 preservation path wrapper cardinality differs")
 if source.count("'red_v5_sha':") != 1:
     raise SystemExit("producer summary RED-v5 identity is absent or duplicated")
 if source.count("'red_v5_test_ast_preserved': True,") != 1:
