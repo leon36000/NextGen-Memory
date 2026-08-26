@@ -1,0 +1,252 @@
+name: Repair exact review attestation candidate r2 v2
+
+on:
+  push:
+    branches:
+      - bootstrap/repair-exact-review-attestation-candidate-r2-20260826
+
+concurrency:
+  group: exact-review-attestation-candidate-r2-single-writer
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  repair:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: bd1d0821e22a733682e13dfc5a4876c0911995d0
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Repair exactly four inherited Markdown hard breaks
+        id: repair
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_sha='bd1d0821e22a733682e13dfc5a4876c0911995d0'
+          base_sha='f4f3aca9759b5b7a60691017c2211152c011ea92'
+          source_branch='candidate/exact-sha-review-attestation-registry-v0-20260824'
+          feature_branch='feat/exact-sha-review-attestation-registry-v0-20260824'
+          destination_branch='candidate/exact-sha-review-attestation-registry-v0-r2-20260826'
+          test "$(git rev-parse HEAD)" = "$source_sha"
+          test "$(git merge-base "$base_sha" HEAD)" = "$base_sha"
+          git fetch --no-tags origin \
+            "+refs/heads/$source_branch:refs/remotes/origin/$source_branch" \
+            "+refs/heads/$feature_branch:refs/remotes/origin/$feature_branch"
+          test "$(git rev-parse "origin/$source_branch")" = "$source_sha"
+          test "$(git rev-parse "origin/$feature_branch")" = "$source_sha"
+          if git ls-remote --exit-code --heads origin "$destination_branch"; then
+            echo 'destination candidate branch already exists' >&2
+            exit 1
+          fi
+
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path(
+              'docs/superpowers/specs/'
+              '2026-08-24-exact-sha-review-attestation-registry-v0-design.md'
+          )
+          raw = path.read_text(encoding='utf-8')
+          lines = raw.splitlines(keepends=True)
+          trailing = []
+          rewritten = []
+          for number, line in enumerate(lines, start=1):
+              ending = '\n' if line.endswith('\n') else ''
+              body = line[:-1] if ending else line
+              stripped = body.rstrip(' \t')
+              if stripped != body:
+                  trailing.append((number, body[len(stripped):]))
+              rewritten.append(stripped + ending)
+          expected = [(3, '  '), (4, '  '), (5, '  '), (6, '  ')]
+          if trailing != expected:
+              raise SystemExit(f'unexpected trailing whitespace inventory: {trailing!r}')
+          path.write_text(''.join(rewritten), encoding='utf-8')
+          PY
+
+          mapfile -t modified < <(git diff --name-only | sort)
+          test "${#modified[@]}" -eq 1
+          test "${modified[0]}" = \
+            'docs/superpowers/specs/2026-08-24-exact-sha-review-attestation-registry-v0-design.md'
+          test "$(git diff --numstat -- "${modified[0]}" | awk '{print $1}')" -eq 4
+          test "$(git diff --numstat -- "${modified[0]}" | awk '{print $2}')" -eq 4
+          git diff --check
+          printf 'source_sha=%s\nbase_sha=%s\ndestination_branch=%s\n' \
+            "$source_sha" "$base_sha" "$destination_branch" \
+            | tee -a "$GITHUB_OUTPUT"
+
+      - name: Install exact development environment
+        run: |
+          python -m pip install -e '.[dev]'
+          python -m pip install 'ruff==0.16.4'
+          ruff --version
+
+      - name: Run exact candidate verification before commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          ruff check .
+          ruff format --check \
+            src/nextgen_memory/__init__.py \
+            src/nextgen_memory/review_attestation_registry.py \
+            tests/test_review_attestation_registry.py \
+            tests/test_review_attestation_registry_properties.py \
+            tests/test_review_attestation_registry_public_api.py
+          python -m compileall -q src scripts
+          set -o pipefail
+          python -m pytest -q \
+            tests/test_review_attestation_registry.py \
+            tests/test_review_attestation_registry_properties.py \
+            tests/test_review_attestation_registry_public_api.py \
+            2>&1 | tee /tmp/exact-review-attestation-r2-focused.txt
+          grep -F '61 passed' /tmp/exact-review-attestation-r2-focused.txt >/dev/null
+          python -m pytest -q 2>&1 | tee /tmp/exact-review-attestation-r2-full.txt
+          grep -F '515 passed' /tmp/exact-review-attestation-r2-full.txt >/dev/null
+          git diff --check
+
+      - name: Build and import isolated wheel
+        shell: bash
+        run: |
+          set -euo pipefail
+          wheelhouse="$RUNNER_TEMP/review-attestation-r2-wheelhouse"
+          venv="$RUNNER_TEMP/review-attestation-r2-venv"
+          mkdir -p "$wheelhouse"
+          python -m pip wheel --no-deps . -w "$wheelhouse"
+          wheel=$(find "$wheelhouse" -maxdepth 1 -type f -name '*.whl' -print -quit)
+          test -n "$wheel"
+          python -m venv "$venv"
+          "$venv/bin/python" -m pip install --no-deps "$wheel"
+          "$venv/bin/python" -m pip check
+          "$venv/bin/python" - <<'PY'
+          import nextgen_memory
+          from nextgen_memory import (
+              ExactShaReviewAttestation,
+              ExactShaReviewRequest,
+              InMemoryExactShaReviewAttestationRegistry,
+              ReviewAttestationDecision,
+          )
+
+          assert ExactShaReviewAttestation
+          assert ExactShaReviewRequest
+          assert InMemoryExactShaReviewAttestationRegistry
+          assert ReviewAttestationDecision
+          for name in (
+              'ExactShaReviewAttestation',
+              'ExactShaReviewRequest',
+              'InMemoryExactShaReviewAttestationRegistry',
+              'ReviewAttestationDecision',
+          ):
+              assert nextgen_memory.__all__.count(name) == 1
+          PY
+          cp "$wheel" /tmp/exact-review-attestation-r2-wheel.whl
+          sha256sum /tmp/exact-review-attestation-r2-wheel.whl \
+            > /tmp/exact-review-attestation-r2-wheel.sha256
+
+      - name: Commit, verify base-to-candidate scope, and publish r2
+        id: publish
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add \
+            docs/superpowers/specs/2026-08-24-exact-sha-review-attestation-registry-v0-design.md
+          git diff --cached --check
+          git commit -m 'docs: remove review registry design trailing whitespace'
+          candidate_sha=$(git rev-parse HEAD)
+          destination='${{ steps.repair.outputs.destination_branch }}'
+          mapfile -t changed < <(
+            git diff --name-only '${{ steps.repair.outputs.base_sha }}'..."$candidate_sha" | sort
+          )
+          expected=(
+            docs/exact-sha-review-attestation-registry-v0-red.md
+            docs/exact-sha-review-attestation-registry-v0.md
+            docs/superpowers/plans/2026-08-24-exact-sha-review-attestation-registry-v0.md
+            docs/superpowers/specs/2026-08-24-exact-sha-review-attestation-registry-v0-design.md
+            src/nextgen_memory/__init__.py
+            src/nextgen_memory/review_attestation_registry.py
+            tests/test_review_attestation_registry.py
+            tests/test_review_attestation_registry_properties.py
+            tests/test_review_attestation_registry_public_api.py
+          )
+          test "${#changed[@]}" -eq "${#expected[@]}"
+          diff -u <(printf '%s\n' "${expected[@]}" | sort) <(printf '%s\n' "${changed[@]}")
+          git diff --check '${{ steps.repair.outputs.base_sha }}'..."$candidate_sha"
+          test "$(git diff --numstat '${{ steps.repair.outputs.source_sha }}'..."$candidate_sha" -- \
+            docs/superpowers/specs/2026-08-24-exact-sha-review-attestation-registry-v0-design.md \
+            | awk '{print $1}')" -eq 4
+          test "$(git diff --numstat '${{ steps.repair.outputs.source_sha }}'..."$candidate_sha" -- \
+            docs/superpowers/specs/2026-08-24-exact-sha-review-attestation-registry-v0-design.md \
+            | awk '{print $2}')" -eq 4
+          test "$(git diff --name-only '${{ steps.repair.outputs.source_sha }}'..."$candidate_sha" | wc -l)" -eq 1
+          git push origin HEAD:"refs/heads/$destination"
+          git push origin HEAD:refs/heads/feat/exact-sha-review-attestation-registry-v0-20260824
+          git fetch --no-tags origin \
+            '+refs/heads/candidate/exact-sha-review-attestation-registry-v0-20260824:refs/remotes/origin/candidate/exact-sha-review-attestation-registry-v0-20260824' \
+            "+refs/heads/$destination:refs/remotes/origin/$destination" \
+            '+refs/heads/feat/exact-sha-review-attestation-registry-v0-20260824:refs/remotes/origin/feat/exact-sha-review-attestation-registry-v0-20260824'
+          test "$(git rev-parse origin/candidate/exact-sha-review-attestation-registry-v0-20260824)" = \
+            '${{ steps.repair.outputs.source_sha }}'
+          test "$(git rev-parse "origin/$destination")" = "$candidate_sha"
+          test "$(git rev-parse origin/feat/exact-sha-review-attestation-registry-v0-20260824)" = "$candidate_sha"
+          git diff --binary '${{ steps.repair.outputs.source_sha }}'..."$candidate_sha" \
+            > /tmp/exact-review-attestation-r2-repair.patch
+          jq -n \
+            --arg schema 'm-head-exact-review-attestation-candidate-r2-producer-v1' \
+            --arg repository '${{ github.repository }}' \
+            --arg source_candidate_sha '${{ steps.repair.outputs.source_sha }}' \
+            --arg base_sha '${{ steps.repair.outputs.base_sha }}' \
+            --arg candidate_branch "$destination" \
+            --arg candidate_sha "$candidate_sha" \
+            --arg candidate_tree_sha "$(git rev-parse "$candidate_sha^{tree}")" \
+            --arg wheel_sha256 "$(awk '{print $1}' /tmp/exact-review-attestation-r2-wheel.sha256)" \
+            '{schema:$schema,status:"candidate_r2_published_verification_pending_unmerged",repository:$repository,source_candidate_sha:$source_candidate_sha,base_sha:$base_sha,candidate_branch:$candidate_branch,candidate_sha:$candidate_sha,candidate_tree_sha:$candidate_tree_sha,exact_path_count:9,repair:{path:"docs/superpowers/specs/2026-08-24-exact-sha-review-attestation-registry-v0-design.md",trailing_whitespace_lines_removed:[3,4,5,6]},verification:{ruff:true,format:true,compileall:true,focused_tests:61,full_tests:515,isolated_wheel:true,wheel_sha256:$wheel_sha256},review:{verdict:"pending",merge_allowed:false},safety:{merged:false,production_database_contacted:false,production_migration_applied:false,feedback_written:false,policy_activated:false,release_published:false,tests_weakened:false,stubs_added:false}}' \
+            > /tmp/exact-review-attestation-r2-producer-summary.json
+          printf 'candidate_sha=%s\n' "$candidate_sha" | tee -a "$GITHUB_OUTPUT"
+          cat /tmp/exact-review-attestation-r2-producer-summary.json
+
+      - name: Publish bounded issue status
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          body=$(cat <<EOF
+          ## Exact-SHA Review Attestation Registry v0 candidate r2 published
+
+          - invalid source candidate retained: \`${{ steps.repair.outputs.source_sha }}\`;
+          - corrected candidate: \`${{ steps.publish.outputs.candidate_sha }}\`;
+          - corrected branch: \`${{ steps.repair.outputs.destination_branch }}\`;
+          - product change: removal of four Markdown trailing-space hard breaks only;
+          - Ruff 0.16.4, compileall, 61 focused tests, 515 full tests, and isolated wheel import: green;
+          - independent Python 3.12/3.13 exact-SHA verification: pending;
+          - merge allowed: \`false\`.
+
+          No merge, database operation, migration, feedback write, policy activation, deployment, or release occurred.
+          EOF
+          )
+          gh api "repos/$REPO/issues/165/comments" --raw-field body="$body" >/dev/null
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: exact-review-attestation-candidate-r2-producer
+          path: |
+            /tmp/exact-review-attestation-r2-producer-summary.json
+            /tmp/exact-review-attestation-r2-repair.patch
+            /tmp/exact-review-attestation-r2-focused.txt
+            /tmp/exact-review-attestation-r2-full.txt
+            /tmp/exact-review-attestation-r2-wheel.whl
+            /tmp/exact-review-attestation-r2-wheel.sha256
+          if-no-files-found: error
+          retention-days: 7
