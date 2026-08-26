@@ -1,4 +1,4 @@
-name: Export exact review attestation candidate for independent audit
+name: Export exact review attestation candidate r2 for independent audit
 
 on:
   push:
@@ -15,14 +15,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: bd1d0821e22a733682e13dfc5a4876c0911995d0
+          ref: 008005072f412ecda1bf461f4e875de72c5b808f
           fetch-depth: 0
 
       - name: Prove exact identity and product surface
         shell: bash
         run: |
           set -euo pipefail
-          candidate='bd1d0821e22a733682e13dfc5a4876c0911995d0'
+          candidate='008005072f412ecda1bf461f4e875de72c5b808f'
           base='f4f3aca9759b5b7a60691017c2211152c011ea92'
           test "$(git rev-parse HEAD)" = "$candidate"
           test "$(git merge-base "$base" "$candidate")" = "$base"
@@ -42,7 +42,7 @@ jobs:
           diff -u <(printf '%s\n' "${expected[@]}" | sort) <(printf '%s\n' "${changed[@]}")
           git diff --check "$base"..."$candidate"
           jq -n \
-            --arg schema 'm-head-exact-review-attestation-candidate-export-v1' \
+            --arg schema 'm-head-exact-review-attestation-candidate-export-v2' \
             --arg repository '${{ github.repository }}' \
             --arg candidate_sha "$candidate" \
             --arg candidate_tree_sha "$(git rev-parse "$candidate^{tree}")" \
@@ -59,19 +59,19 @@ jobs:
           set -euo pipefail
           git archive \
             --format=tar.gz \
-            --prefix=NextGen-Memory-bd1d0821/ \
-            --output=/tmp/nextgen-memory-bd1d0821.tar.gz \
-            bd1d0821e22a733682e13dfc5a4876c0911995d0
-          sha256sum /tmp/nextgen-memory-bd1d0821.tar.gz \
-            > /tmp/nextgen-memory-bd1d0821.tar.gz.sha256
-          cat /tmp/nextgen-memory-bd1d0821.tar.gz.sha256
+            --prefix=NextGen-Memory-00800507/ \
+            --output=/tmp/nextgen-memory-00800507.tar.gz \
+            008005072f412ecda1bf461f4e875de72c5b808f
+          sha256sum /tmp/nextgen-memory-00800507.tar.gz \
+            > /tmp/nextgen-memory-00800507.tar.gz.sha256
+          cat /tmp/nextgen-memory-00800507.tar.gz.sha256
 
       - uses: actions/upload-artifact@v4
         with:
-          name: exact-review-attestation-candidate-bd1d0821
+          name: exact-review-attestation-candidate-00800507
           path: |
             /tmp/candidate-export-manifest.json
-            /tmp/nextgen-memory-bd1d0821.tar.gz
-            /tmp/nextgen-memory-bd1d0821.tar.gz.sha256
+            /tmp/nextgen-memory-00800507.tar.gz
+            /tmp/nextgen-memory-00800507.tar.gz.sha256
           if-no-files-found: error
           retention-days: 7
