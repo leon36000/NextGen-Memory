@@ -58,6 +58,8 @@ jobs:
             ${{ runner.temp }}/generate_exact_review_attestation_registry_v7_only.sh
             ${{ runner.temp }}/implement_exact_review_attestation_registry_v0_v7.sh
             ${{ runner.temp }}/implement_exact_review_attestation_registry_v0_v10.sh
+            product/docs/superpowers/plans/2026-08-24-exact-sha-review-attestation-registry-v0.md
+            product/docs/superpowers/specs/2026-08-24-exact-sha-review-attestation-registry-v0-design.md
           if-no-files-found: warn
           retention-days: 7
 
