@@ -1,0 +1,79 @@
+name: Repair exact review attestation r2 audit structurally once
+
+on:
+  push:
+    branches:
+      - bootstrap/verify-exact-review-attestation-registry-r2-20260826
+
+concurrency:
+  group: exact-review-attestation-registry-r2-audit-repair-v2
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  repair:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: bootstrap/verify-exact-review-attestation-registry-r2-20260826
+          fetch-depth: 0
+
+      - name: Replace broad Constant scan with standalone Expr scan
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from __future__ import annotations
+
+          import re
+          from pathlib import Path
+
+          path = Path(
+              '.github/workflows/'
+              'verify-exact-review-attestation-registry-r2.yml'
+          )
+          source = path.read_text(encoding='utf-8')
+          pattern = re.compile(
+              r"(?m)^(?P<indent>[ ]*)elif isinstance\(node, ast\.Constant\) "
+              r"and node\.value is Ellipsis:\n"
+              r"(?P=indent)    findings\.append\(\{'kind': 'ellipsis', "
+              r"'line': node\.lineno\}\)$"
+          )
+          matches = list(pattern.finditer(source))
+          if len(matches) != 1:
+              raise SystemExit(
+                  'expected one broad ellipsis audit block, '
+                  f'found {len(matches)}'
+              )
+          indent = matches[0].group('indent')
+          replacement = (
+              f'{indent}elif (\n'
+              f'{indent}    isinstance(node, ast.Expr)\n'
+              f'{indent}    and isinstance(node.value, ast.Constant)\n'
+              f'{indent}    and node.value.value is Ellipsis\n'
+              f'{indent}):\n'
+              f'{indent}    findings.append(\n'
+              f"{indent}        {{'kind': 'executable_ellipsis', "
+              "'line': node.lineno}}\n"
+              f'{indent}    )'
+          )
+          source = pattern.sub(replacement, source, count=1)
+          if 'elif isinstance(node, ast.Constant) and node.value is Ellipsis:' in source:
+              raise SystemExit('broad ellipsis audit remains')
+          if source.count("'kind': 'executable_ellipsis'") != 1:
+              raise SystemExit('executable ellipsis audit differs')
+          path.write_text(source, encoding='utf-8')
+          PY
+          rm -f \
+            .github/workflows/repair-exact-review-attestation-r2-audit-once.yml \
+            .github/workflows/repair-exact-review-attestation-r2-audit-v2-once.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git diff --cached --check
+          git commit -m 'ci: audit only executable ellipsis expressions'
+          git push origin HEAD:bootstrap/verify-exact-review-attestation-registry-r2-20260826
