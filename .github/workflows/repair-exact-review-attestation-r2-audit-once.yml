@@ -1,0 +1,67 @@
+name: Repair exact review attestation r2 audit classification once
+
+on:
+  push:
+    branches:
+      - bootstrap/verify-exact-review-attestation-registry-r2-20260826
+
+concurrency:
+  group: exact-review-attestation-registry-r2-audit-repair
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  repair:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: bootstrap/verify-exact-review-attestation-registry-r2-20260826
+          fetch-depth: 0
+
+      - name: Classify only standalone executable ellipsis expressions as stubs
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path(
+              '.github/workflows/'
+              'verify-exact-review-attestation-registry-r2.yml'
+          )
+          source = path.read_text(encoding='utf-8')
+          old = '''              elif isinstance(node, ast.Constant) and node.value is Ellipsis:
+                  findings.append({'kind': 'ellipsis', 'line': node.lineno})
+          '''
+          new = '''              elif (
+                  isinstance(node, ast.Expr)
+                  and isinstance(node.value, ast.Constant)
+                  and node.value.value is Ellipsis
+              ):
+                  findings.append(
+                      {'kind': 'executable_ellipsis', 'line': node.lineno}
+                  )
+          '''
+          if source.count(old) != 1:
+              raise SystemExit(
+                  'expected exactly one overly broad ellipsis audit block, '
+                  f'found {source.count(old)}'
+              )
+          source = source.replace(old, new, 1)
+          if "isinstance(node, ast.Constant) and node.value is Ellipsis" in source:
+              raise SystemExit('overly broad ellipsis classification remains')
+          if source.count("'kind': 'executable_ellipsis'") != 1:
+              raise SystemExit('executable ellipsis classification differs')
+          path.write_text(source, encoding='utf-8')
+          PY
+          rm .github/workflows/repair-exact-review-attestation-r2-audit-once.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git diff --cached --check
+          git commit -m 'ci: distinguish type ellipsis from executable stubs'
+          git push origin HEAD:bootstrap/verify-exact-review-attestation-registry-r2-20260826
