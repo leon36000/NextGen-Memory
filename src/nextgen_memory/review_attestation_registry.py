@@ -117,7 +117,7 @@ def _stable_uuid(kind: str, content_hash: str) -> UUID:
 
 def _require_repository(value: object) -> str:
     if (
-        not isinstance(value, str)
+        type(value) is not str
         or value != value.strip()
         or not value
         or len(value) > _MAX_REPOSITORY_LENGTH
@@ -131,37 +131,37 @@ def _require_repository(value: object) -> str:
 
 
 def _positive_integer(name: str, value: object) -> int:
-    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+    if type(value) is not int or value <= 0:
         raise ReviewAttestationValidationError(f"{name} must be a positive integer")
     return value
 
 
 def _nonnegative_integer(name: str, value: object) -> int:
-    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+    if type(value) is not int or value < 0:
         raise ReviewAttestationValidationError(f"{name} must be a nonnegative integer")
     return value
 
 
 def _require_uuid(name: str, value: object) -> UUID:
-    if not isinstance(value, UUID):
+    if type(value) is not UUID:
         raise ReviewAttestationValidationError(f"{name} must be a UUID")
     return value
 
 
 def _require_sha256(name: str, value: object) -> str:
-    if not isinstance(value, str) or _SHA256_RE.fullmatch(value) is None:
+    if type(value) is not str or _SHA256_RE.fullmatch(value) is None:
         raise ReviewAttestationValidationError(f"{name} must be a lowercase SHA-256")
     return value
 
 
 def _require_git_sha(name: str, value: object) -> str:
-    if not isinstance(value, str) or _GIT_SHA_RE.fullmatch(value) is None:
+    if type(value) is not str or _GIT_SHA_RE.fullmatch(value) is None:
         raise ReviewAttestationValidationError(f"{name} must be a lowercase 40-character Git SHA")
     return value
 
 
 def _require_enum[T](name: str, value: object, enum_type: type[T]) -> T:
-    if not isinstance(value, enum_type):
+    if type(value) is not enum_type:
         raise ReviewAttestationValidationError(f"{name} must use the bounded enum")
     return value
 
@@ -177,11 +177,15 @@ def _bounded_unique[T](
 ) -> tuple[T, ...]:
     if isinstance(values, (str, bytes, bytearray, Mapping)):
         raise ReviewAttestationValidationError(f"{name} must be a bounded iterable")
+    iteration_failed = False
+    raw: tuple[object, ...] = ()
     try:
         iterator = iter(values)  # type: ignore[arg-type]
-    except TypeError as exc:
-        raise ReviewAttestationValidationError(f"{name} must be a bounded iterable") from exc
-    raw = tuple(islice(iterator, limit + 1))
+        raw = tuple(islice(iterator, limit + 1))
+    except Exception:
+        iteration_failed = True
+    if iteration_failed:
+        raise ReviewAttestationValidationError(f"{name} must be a bounded iterable")
     if len(raw) > limit:
         raise ReviewAttestationValidationError(f"{name} exceeds its limit")
     if require_nonempty and not raw:
@@ -345,8 +349,8 @@ class ExactShaReviewAttestation:
         repository = _require_repository(self.repository)
         pull_request_number = _positive_integer("pull request number", self.pull_request_number)
         candidate_sha = _require_git_sha("candidate SHA", self.candidate_sha)
-        if not isinstance(self.reviewer, ReviewerIdentity):
-            raise ReviewAttestationValidationError("reviewer must be a ReviewerIdentity")
+        if type(self.reviewer) is not ReviewerIdentity:
+            raise ReviewAttestationValidationError("reviewer must be an exact ReviewerIdentity")
         verdict = _require_enum("verdict", self.verdict, ReviewAttestationVerdict)
         findings = _bounded_unique(
             "finding codes",
@@ -448,8 +452,8 @@ class ReviewAttestationRegistrySummary:
     def __post_init__(self) -> None:
         request_id = _require_uuid("request id", self.request_id)
         request_content_hash = _require_sha256("request content hash", self.request_content_hash)
-        if not isinstance(self.attestation_ids, tuple) or any(
-            not isinstance(item, UUID) for item in self.attestation_ids
+        if type(self.attestation_ids) is not tuple or any(
+            type(item) is not UUID for item in self.attestation_ids
         ):
             raise ReviewAttestationValidationError("attestation ids must be a UUID tuple")
         if len(set(self.attestation_ids)) != len(self.attestation_ids):
@@ -573,8 +577,8 @@ class InMemoryExactShaReviewAttestationRegistry:
         self._attestations_by_request: dict[UUID, dict[str, ExactShaReviewAttestation]] = {}
 
     def register_request(self, request: ExactShaReviewRequest) -> ExactShaReviewRequest:
-        if not isinstance(request, ExactShaReviewRequest):
-            raise ReviewAttestationValidationError("request must be an ExactShaReviewRequest")
+        if type(request) is not ExactShaReviewRequest:
+            raise ReviewAttestationValidationError("request must be an exact ExactShaReviewRequest")
         existing_id = self._request_ids_by_key.get(request.registry_key)
         if existing_id is not None:
             existing = self._requests_by_id[existing_id]
@@ -604,9 +608,9 @@ class InMemoryExactShaReviewAttestationRegistry:
     def record_attestation(
         self, attestation: ExactShaReviewAttestation
     ) -> ExactShaReviewAttestation:
-        if not isinstance(attestation, ExactShaReviewAttestation):
+        if type(attestation) is not ExactShaReviewAttestation:
             raise ReviewAttestationValidationError(
-                "attestation must be an ExactShaReviewAttestation"
+                "attestation must be an exact ExactShaReviewAttestation"
             )
         request = self._require_registered_request(attestation.request_id)
         if attestation.request_content_hash != request.content_hash:
