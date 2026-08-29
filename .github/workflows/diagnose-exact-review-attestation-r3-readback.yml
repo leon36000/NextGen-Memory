@@ -1,0 +1,91 @@
+name: Diagnose exact review attestation r3 readback
+
+on:
+  push:
+    branches:
+      - bootstrap/attest-exact-review-attestation-r3-20260829
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+
+      - name: Print every immutable readback invariant
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*'
+          evidence_branch='evidence/exact-review-attestation-registry-v0-f4d9388c-green-20260829'
+          checkpoint_branch='evidence/exact-review-attestation-registry-v0-f4d9388c-checkpoint-20260829'
+          evidence_file='evidence/exact-review-attestation-registry-v0-f4d9388c-green-20260829.json'
+          checkpoint_file='evidence/exact-review-attestation-registry-v0-f4d9388c-checkpoint-20260829.json'
+          git show "origin/$evidence_branch:$evidence_file" > /tmp/evidence.json
+          git show "origin/$checkpoint_branch:$checkpoint_file" > /tmp/checkpoint.json
+          python - <<'PY'
+          from __future__ import annotations
+
+          import hashlib
+          import json
+          from pathlib import Path
+
+          evidence_raw = Path('/tmp/evidence.json').read_bytes()
+          checkpoint_raw = Path('/tmp/checkpoint.json').read_bytes()
+          evidence = json.loads(evidence_raw)
+          checkpoint = json.loads(checkpoint_raw)
+          actual_evidence_sha = hashlib.sha256(evidence_raw).hexdigest()
+          expected_evidence_sha = checkpoint['evidence_sha256']
+          checks = {
+              'schema': evidence['schema'] == 'm-head-exact-review-attestation-r3-green-v1',
+              'status': evidence['status'] == 'green_review_pending_unmerged',
+              'candidate_sha': evidence['candidate']['sha'] == 'f4d9388c14dd1f746f904b3724767f73f82786fd',
+              'candidate_pr_scope': evidence['candidate']['pull_request'] == 185 and evidence['candidate']['exact_path_count'] == 9,
+              'run_id': evidence['verification']['run_id'] == 33278448676,
+              'python_versions': evidence['verification']['python_versions'] == ['3.12', '3.13'],
+              'test_counts': (
+                  evidence['verification']['adversarial_tests_each'] == 6
+                  and evidence['verification']['focused_tests_each'] == 67
+                  and evidence['verification']['full_tests_each'] == 521
+              ),
+              'trace_retry_counts': (
+                  evidence['verification']['generated_traces_each'] == 5000
+                  and evidence['verification']['exact_retries_each'] == 1000
+              ),
+              'semantic_hash_seed': (
+                  evidence['verification']['cross_python_semantic_evidence_identical'] is True
+                  and evidence['verification']['hash_seed_invariant'] is True
+              ),
+              'audit_wheel': (
+                  evidence['verification']['audit_findings'] == 0
+                  and evidence['verification']['isolated_wheel_import'] is True
+              ),
+              'privacy_all_true': all(evidence['privacy_hardening'].values()),
+              'review_merge_false': evidence['review']['merge_allowed'] is False,
+              'safety_all_false': not any(evidence['safety'].values()),
+              'checkpoint_key': checkpoint['checkpoint_key'] == 'm-head:exact-sha-review-attestation-registry-v0:r3-green:f4d9388c:20260829',
+              'checkpoint_candidate': checkpoint['candidate'] == evidence['candidate'],
+              'checkpoint_verification': checkpoint['verification'] == evidence['verification'],
+              'checkpoint_privacy': checkpoint['privacy_hardening'] == evidence['privacy_hardening'],
+              'checkpoint_safety': checkpoint['safety'] == evidence['safety'],
+              'checkpoint_evidence_sha': expected_evidence_sha == actual_evidence_sha,
+          }
+          report = {
+              'checks': checks,
+              'expected_evidence_sha256': expected_evidence_sha,
+              'actual_evidence_sha256': actual_evidence_sha,
+              'evidence_length': len(evidence_raw),
+              'evidence_tail_hex': evidence_raw[-8:].hex(),
+              'checkpoint_sha256': hashlib.sha256(checkpoint_raw).hexdigest(),
+          }
+          print(json.dumps(report, sort_keys=True, indent=2))
+          failed = [name for name, passed in checks.items() if not passed]
+          if failed:
+              raise SystemExit('failed checks: ' + ', '.join(failed))
+          PY
