@@ -1,0 +1,254 @@
+name: Attest exact review attestation registry privacy r3
+
+on:
+  push:
+    branches:
+      - bootstrap/attest-exact-review-attestation-r3-20260829
+
+concurrency:
+  group: exact-review-attestation-r3-readback-20260829
+  cancel-in-progress: true
+
+permissions:
+  actions: read
+  contents: write
+  issues: write
+  pull-requests: write
+
+jobs:
+  attest:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+
+      - name: Reconcile immutable Git evidence and live refs
+        id: git
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          git fetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*'
+          candidate='f4d9388c14dd1f746f904b3724767f73f82786fd'
+          evidence_branch='evidence/exact-review-attestation-registry-v0-f4d9388c-green-20260829'
+          checkpoint_branch='evidence/exact-review-attestation-registry-v0-f4d9388c-checkpoint-20260829'
+          evidence_file='evidence/exact-review-attestation-registry-v0-f4d9388c-green-20260829.json'
+          checkpoint_file='evidence/exact-review-attestation-registry-v0-f4d9388c-checkpoint-20260829.json'
+          test "$(git rev-parse origin/candidate/exact-sha-review-attestation-registry-v0-r3-20260829)" = "$candidate"
+          evidence_commit=$(git rev-parse "origin/$evidence_branch")
+          checkpoint_commit=$(git rev-parse "origin/$checkpoint_branch")
+          test "$evidence_commit" = '09414b4fd5da08726d7d987478e304d1c4e65a42'
+          test "$checkpoint_commit" = 'a40f88d1377040a0e9bb2d0b87f945ace2a132dd'
+          git show "origin/$evidence_branch:$evidence_file" > /tmp/evidence.json
+          git show "origin/$checkpoint_branch:$checkpoint_file" > /tmp/checkpoint.json
+          jq -e '.schema == "m-head-exact-review-attestation-r3-green-v1"' /tmp/evidence.json >/dev/null
+          jq -e '.status == "green_review_pending_unmerged"' /tmp/evidence.json >/dev/null
+          jq -e '.candidate.sha == "f4d9388c14dd1f746f904b3724767f73f82786fd"' /tmp/evidence.json >/dev/null
+          jq -e '.candidate.pull_request == 185 and .candidate.exact_path_count == 9' /tmp/evidence.json >/dev/null
+          jq -e '.verification.run_id == 33278448676' /tmp/evidence.json >/dev/null
+          jq -e '.verification.python_versions == ["3.12","3.13"]' /tmp/evidence.json >/dev/null
+          jq -e '.verification.adversarial_tests_each == 6 and .verification.focused_tests_each == 67 and .verification.full_tests_each == 521' /tmp/evidence.json >/dev/null
+          jq -e '.verification.generated_traces_each == 5000 and .verification.exact_retries_each == 1000' /tmp/evidence.json >/dev/null
+          jq -e '.verification.cross_python_semantic_evidence_identical == true and .verification.hash_seed_invariant == true' /tmp/evidence.json >/dev/null
+          jq -e '.verification.audit_findings == 0 and .verification.isolated_wheel_import == true' /tmp/evidence.json >/dev/null
+          jq -e '.privacy_hardening | to_entries | all(.value == true)' /tmp/evidence.json >/dev/null
+          jq -e '.review.merge_allowed == false' /tmp/evidence.json >/dev/null
+          jq -e '.safety | to_entries | all(.value == false)' /tmp/evidence.json >/dev/null
+          jq -e '.checkpoint_key == "m-head:exact-sha-review-attestation-registry-v0:r3-green:f4d9388c:20260829"' /tmp/checkpoint.json >/dev/null
+          jq -e '.candidate == input.candidate and .verification == input.verification and .privacy_hardening == input.privacy_hardening and .safety == input.safety' /tmp/checkpoint.json /tmp/evidence.json >/dev/null
+          evidence_sha=$(sha256sum /tmp/evidence.json | awk '{print $1}')
+          test "$(jq -r '.evidence_sha256' /tmp/checkpoint.json)" = "$evidence_sha"
+          printf 'candidate=%s\nevidence_commit=%s\ncheckpoint_commit=%s\nevidence_sha=%s\n' \
+            "$candidate" "$evidence_commit" "$checkpoint_commit" "$evidence_sha" \
+            | tee -a "$GITHUB_OUTPUT"
+
+      - name: Reconcile source jobs and the bounded publisher failure
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          run_id=33278448676
+          jobs=$(gh api --method GET "repos/$REPO/actions/runs/$run_id/jobs" -f per_page=100)
+          printf '%s' "$jobs" > /tmp/jobs-raw.json
+          jq '[.jobs[] | {id,name,status,conclusion,head_sha,started_at,completed_at,steps:[.steps[] | {name,status,conclusion,number}]}]' \
+            /tmp/jobs-raw.json > /tmp/jobs.json
+          jq -e '[.jobs[] | select(.name == "resolve" and .conclusion == "success")] | length == 1' /tmp/jobs-raw.json >/dev/null
+          jq -e '[.jobs[] | select(.name == "verify (3.12)" and .conclusion == "success")] | length == 1' /tmp/jobs-raw.json >/dev/null
+          jq -e '[.jobs[] | select(.name == "verify (3.13)" and .conclusion == "success")] | length == 1' /tmp/jobs-raw.json >/dev/null
+          jq -e '[.jobs[] | select(.name == "compare-and-publish" and .conclusion == "failure")] | length == 1' /tmp/jobs-raw.json >/dev/null
+          jq -e '[.jobs[] | select(.name | startswith("verify (")) | .steps[] | select(.name | startswith("Verify exact candidate under Python")) | select(.conclusion == "success")] | length == 2' /tmp/jobs-raw.json >/dev/null
+          gh api "repos/$REPO/actions/jobs/99169429950/logs" > /tmp/compare-publish.log
+          grep -F 'cross_python_semantic_evidence_identical' /tmp/compare-publish.log >/dev/null
+          grep -F 'HEAD -> evidence/exact-review-attestation-registry-v0-f4d9388c-green-20260829' /tmp/compare-publish.log >/dev/null
+          grep -F 'HEAD -> evidence/exact-review-attestation-registry-v0-f4d9388c-checkpoint-20260829' /tmp/compare-publish.log >/dev/null
+          grep -F 'Resource not accessible by integration (HTTP 403)' /tmp/compare-publish.log >/dev/null
+
+      - name: Download, rehash, and compare both Python artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/artifacts
+          mkdir -p /tmp/artifacts/python-3.12 /tmp/artifacts/python-3.13
+          gh api "repos/$REPO/actions/artifacts/9722241766/zip" > /tmp/artifacts/python-3.12.zip
+          gh api "repos/$REPO/actions/artifacts/9722240203/zip" > /tmp/artifacts/python-3.13.zip
+          unzip -q /tmp/artifacts/python-3.12.zip -d /tmp/artifacts/python-3.12
+          unzip -q /tmp/artifacts/python-3.13.zip -d /tmp/artifacts/python-3.13
+          zip_312=$(sha256sum /tmp/artifacts/python-3.12.zip | awk '{print $1}')
+          zip_313=$(sha256sum /tmp/artifacts/python-3.13.zip | awk '{print $1}')
+          test "$zip_312" = 'a42fb8c85d1c8ae2f48d32e21ce958f39cf28ed490b4d3e6b48b8177c0b8b2fb'
+          test "$zip_313" = '94cc15b21bfa44282e6edd5a9a8299f893d331d9668fd689ac662363956a78e8'
+          manifest_312=$(find /tmp/artifacts/python-3.12 -name manifest.json -print -quit)
+          manifest_313=$(find /tmp/artifacts/python-3.13 -name manifest.json -print -quit)
+          semantic_312=$(find /tmp/artifacts/python-3.12 -name semantic.json -print -quit)
+          semantic_313=$(find /tmp/artifacts/python-3.13 -name semantic.json -print -quit)
+          wheel_312=$(find /tmp/artifacts/python-3.12 -name '*.whl' -print -quit)
+          wheel_313=$(find /tmp/artifacts/python-3.13 -name '*.whl' -print -quit)
+          test -n "$manifest_312" && test -n "$manifest_313"
+          test -n "$semantic_312" && test -n "$semantic_313"
+          test -n "$wheel_312" && test -n "$wheel_313"
+          cmp "$semantic_312" "$semantic_313"
+          semantic_sha=$(sha256sum "$semantic_312" | awk '{print $1}')
+          test "$semantic_sha" = 'ddd124b712f8a1b3179ed317293474c6a66e133695a14cb4b3a971ff2fb7c8e3'
+          wheel_sha_312=$(sha256sum "$wheel_312" | awk '{print $1}')
+          wheel_sha_313=$(sha256sum "$wheel_313" | awk '{print $1}')
+          test "$wheel_sha_312" = '117914c55b290e7a7c13a4b4f60583f543d2e3118d01cf0b6d2697c4d95c012c'
+          test "$wheel_sha_313" = '24af9217225717f3834d8b245b1a9f155596e34fe3b6d08afd1753d838d14601'
+          jq -e '.candidate_sha == "f4d9388c14dd1f746f904b3724767f73f82786fd" and .python_version | startswith("3.12.")' "$manifest_312" >/dev/null
+          jq -e '.candidate_sha == "f4d9388c14dd1f746f904b3724767f73f82786fd" and .python_version | startswith("3.13.")' "$manifest_313" >/dev/null
+          jq -e '.adversarial_test_count == 6 and .focused_test_count == 67 and .full_test_count == 521 and .generated_trace_count == 5000 and .exact_retry_count == 1000 and .audit_findings == 0 and .isolated_wheel_import == true' "$manifest_312" >/dev/null
+          jq -e '.adversarial_test_count == 6 and .focused_test_count == 67 and .full_test_count == 521 and .generated_trace_count == 5000 and .exact_retry_count == 1000 and .audit_findings == 0 and .isolated_wheel_import == true' "$manifest_313" >/dev/null
+          jq -n \
+            --arg zip_312 "$zip_312" --arg zip_313 "$zip_313" \
+            --arg wheel_312 "$wheel_sha_312" --arg wheel_313 "$wheel_sha_313" \
+            --arg semantic "$semantic_sha" \
+            '{python_3_12:{artifact_id:9722241766,zip_sha256:$zip_312,wheel_sha256:$wheel_312},python_3_13:{artifact_id:9722240203,zip_sha256:$zip_313,wheel_sha256:$wheel_313},semantic_sha256:$semantic,cross_python_semantic_identical:true}' \
+            > /tmp/artifact-readback.json
+
+      - name: Build and publish immutable ChatGPT attestation
+        id: publish
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from __future__ import annotations
+
+          import json
+          from pathlib import Path
+
+          evidence = json.loads(Path('/tmp/evidence.json').read_text(encoding='utf-8'))
+          checkpoint = json.loads(Path('/tmp/checkpoint.json').read_text(encoding='utf-8'))
+          attestation = {
+              'schema': 'm-head-exact-review-attestation-r3-chatgpt-attestation-v1',
+              'attestation_key': 'm-head:exact-sha-review-attestation-registry-v0:r3-chatgpt-attested:f4d9388c:20260829',
+              'status': 'green_review_pending_unmerged',
+              'repository': 'leon36000/NextGen-Memory',
+              'candidate': evidence['candidate'],
+              'base': evidence['base'],
+              'parent_candidate': evidence['parent_candidate'],
+              'adversarial_red': evidence['adversarial_red'],
+              'source_run': 33278448676,
+              'source_jobs': json.loads(Path('/tmp/jobs.json').read_text(encoding='utf-8')),
+              'source_evidence': {
+                  'branch': checkpoint['evidence_branch'],
+                  'commit': checkpoint['evidence_commit'],
+                  'sha256': checkpoint['evidence_sha256'],
+                  'checkpoint_branch': 'evidence/exact-review-attestation-registry-v0-f4d9388c-checkpoint-20260829',
+                  'checkpoint_commit': 'a40f88d1377040a0e9bb2d0b87f945ace2a132dd',
+              },
+              'artifact_readback': json.loads(Path('/tmp/artifact-readback.json').read_text(encoding='utf-8')),
+              'verification': evidence['verification'],
+              'privacy_hardening': evidence['privacy_hardening'],
+              'contract': evidence['contract'],
+              'review': {
+                  'reviewer_runtime': 'GPT-5.6 Pro',
+                  'verdict': 'pending_independent_exact_sha_review',
+                  'merge_allowed': False,
+              },
+              'safety': evidence['safety'],
+              'attestation_method': (
+                  'Independent live Git ref, immutable evidence/checkpoint, Actions job, '
+                  'publisher-log, artifact ZIP/wheel and cross-Python semantic-byte readback.'
+              ),
+              'next_action': (
+                  'Perform a fresh exact-SHA technical review of PR #185. Any candidate '
+                  'movement invalidates evidence; merge and deployment operations remain separate.'
+              ),
+          }
+          Path('/tmp/r3-chatgpt-attestation.json').write_text(
+              json.dumps(
+                  attestation,
+                  ensure_ascii=False,
+                  allow_nan=False,
+                  sort_keys=True,
+                  separators=(',', ':'),
+              ) + '\n',
+              encoding='utf-8',
+          )
+          print(Path('/tmp/r3-chatgpt-attestation.json').read_text(encoding='utf-8'), end='')
+          PY
+          branch='evidence/exact-review-attestation-registry-v0-f4d9388c-chatgpt-attested-20260829'
+          destination='evidence/exact-review-attestation-registry-v0-f4d9388c-chatgpt-attested-20260829.json'
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git fetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*'
+          if git ls-remote --exit-code --heads origin "$branch" >/dev/null; then
+            git switch --detach "origin/$branch"
+            cmp /tmp/r3-chatgpt-attestation.json "$destination"
+          else
+            git switch -c "$branch" '${{ steps.git.outputs.candidate }}'
+            mkdir -p evidence
+            cp /tmp/r3-chatgpt-attestation.json "$destination"
+            git add "$destination"
+            git diff --cached --check
+            git commit -m 'evidence: attest exact review attestation privacy r3'
+            git push origin HEAD:"refs/heads/$branch"
+          fi
+          echo "attestation_commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Publish durable status to issue and product PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          body=$(cat <<EOF
+          ## Exact-SHA Review Attestation Registry r3 independent readback GREEN
+
+          - candidate: \`f4d9388c14dd1f746f904b3724767f73f82786fd\`;
+          - source run: \`33278448676\`;
+          - Python 3.12/3.13 verification jobs: success;
+          - adversarial tests: \`6\` per Python;
+          - focused tests: \`67\` per Python;
+          - complete tests: \`521\` per Python;
+          - generated traces: \`5,000\` per Python;
+          - exact retries: \`1,000\` per Python;
+          - cross-Python semantic SHA-256: \`ddd124b712f8a1b3179ed317293474c6a66e133695a14cb4b3a971ff2fb7c8e3\`;
+          - downloaded artifact ZIPs and wheels: independently rehashed;
+          - immutable attestation: \`evidence/exact-review-attestation-registry-v0-f4d9388c-chatgpt-attested-20260829\` at \`${{ steps.publish.outputs.attestation_commit }}\`;
+          - technical exact-SHA review: pending;
+          - merge allowed: \`false\`.
+
+          The earlier compare job failed only after both immutable evidence branches had been pushed, when its token lacked PR-comment permission. This readback independently reconciles that bounded failure. No merge, migration, deployment, feedback write, policy activation, or release occurred.
+          EOF
+          )
+          gh api "repos/$REPO/issues/165/comments" --raw-field body="$body" >/dev/null
+          gh api "repos/$REPO/issues/185/comments" --raw-field body="$body" >/dev/null
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: exact-review-attestation-r3-chatgpt-attestation
+          path: |
+            /tmp/r3-chatgpt-attestation.json
+            /tmp/artifact-readback.json
+            /tmp/jobs.json
+          if-no-files-found: error
+          retention-days: 7
