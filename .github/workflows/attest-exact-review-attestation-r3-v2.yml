@@ -1,0 +1,382 @@
+name: Attest exact review attestation registry privacy r3 v2
+
+on:
+  push:
+    branches:
+      - bootstrap/attest-exact-review-attestation-r3-20260829
+
+concurrency:
+  group: exact-review-attestation-r3-readback-v2-20260829
+  cancel-in-progress: true
+
+permissions:
+  actions: read
+  contents: write
+  issues: write
+  pull-requests: write
+
+jobs:
+  attest:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+
+      - name: Reconcile immutable Git evidence and checkpoint
+        id: git
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          git fetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*'
+          candidate='f4d9388c14dd1f746f904b3724767f73f82786fd'
+          evidence_branch='evidence/exact-review-attestation-registry-v0-f4d9388c-green-20260829'
+          checkpoint_branch='evidence/exact-review-attestation-registry-v0-f4d9388c-checkpoint-20260829'
+          evidence_file='evidence/exact-review-attestation-registry-v0-f4d9388c-green-20260829.json'
+          checkpoint_file='evidence/exact-review-attestation-registry-v0-f4d9388c-checkpoint-20260829.json'
+          test "$(git rev-parse origin/candidate/exact-sha-review-attestation-registry-v0-r3-20260829)" = "$candidate"
+          evidence_commit=$(git rev-parse "origin/$evidence_branch")
+          checkpoint_commit=$(git rev-parse "origin/$checkpoint_branch")
+          test "$evidence_commit" = '09414b4fd5da08726d7d987478e304d1c4e65a42'
+          test "$checkpoint_commit" = 'a40f88d1377040a0e9bb2d0b87f945ace2a132dd'
+          git show "origin/$evidence_branch:$evidence_file" > /tmp/evidence.json
+          git show "origin/$checkpoint_branch:$checkpoint_file" > /tmp/checkpoint.json
+          python - <<'PY'
+          from __future__ import annotations
+
+          import hashlib
+          import json
+          from pathlib import Path
+
+          evidence_raw = Path('/tmp/evidence.json').read_bytes()
+          checkpoint = json.loads(Path('/tmp/checkpoint.json').read_text(encoding='utf-8'))
+          evidence = json.loads(evidence_raw)
+          actual_sha = hashlib.sha256(evidence_raw).hexdigest()
+          checks = {
+              'schema': evidence['schema'] == 'm-head-exact-review-attestation-r3-green-v1',
+              'status': evidence['status'] == 'green_review_pending_unmerged',
+              'candidate': evidence['candidate'] == {
+                  'branch': 'candidate/exact-sha-review-attestation-registry-v0-r3-20260829',
+                  'sha': 'f4d9388c14dd1f746f904b3724767f73f82786fd',
+                  'pull_request': 185,
+                  'exact_path_count': 9,
+              },
+              'run': evidence['verification']['run_id'] == 33278448676,
+              'python': evidence['verification']['python_versions'] == ['3.12', '3.13'],
+              'counts': (
+                  evidence['verification']['adversarial_tests_each'] == 6
+                  and evidence['verification']['focused_tests_each'] == 67
+                  and evidence['verification']['full_tests_each'] == 521
+                  and evidence['verification']['generated_traces_each'] == 5_000
+                  and evidence['verification']['exact_retries_each'] == 1_000
+              ),
+              'semantic': (
+                  evidence['verification']['semantic_sha256']
+                  == 'ddd124b712f8a1b3179ed317293474c6a66e133695a14cb4b3a971ff2fb7c8e3'
+                  and evidence['verification']['cross_python_semantic_evidence_identical'] is True
+                  and evidence['verification']['hash_seed_invariant'] is True
+              ),
+              'audit_wheel': (
+                  evidence['verification']['audit_findings'] == 0
+                  and evidence['verification']['isolated_wheel_import'] is True
+              ),
+              'privacy': all(evidence['privacy_hardening'].values()),
+              'review': evidence['review']['merge_allowed'] is False,
+              'safety': not any(evidence['safety'].values()),
+              'checkpoint_key': checkpoint['checkpoint_key'] == 'm-head:exact-sha-review-attestation-registry-v0:r3-green:f4d9388c:20260829',
+              'checkpoint_binding': all(
+                  checkpoint[key] == evidence[key]
+                  for key in (
+                      'candidate',
+                      'verification',
+                      'privacy_hardening',
+                      'safety',
+                  )
+              ),
+              'checkpoint_digest': checkpoint['evidence_sha256'] == actual_sha,
+          }
+          failed = [name for name, passed in checks.items() if not passed]
+          print(json.dumps({'checks': checks, 'evidence_sha256': actual_sha}, sort_keys=True))
+          if failed:
+              raise SystemExit('immutable readback failed: ' + ', '.join(failed))
+          PY
+          evidence_sha=$(sha256sum /tmp/evidence.json | awk '{print $1}')
+          printf 'candidate=%s\nevidence_commit=%s\ncheckpoint_commit=%s\nevidence_sha=%s\n' \
+            "$candidate" "$evidence_commit" "$checkpoint_commit" "$evidence_sha" \
+            | tee -a "$GITHUB_OUTPUT"
+
+      - name: Reconcile source jobs and bounded publisher failure
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          run_id=33278448676
+          gh api --method GET "repos/$REPO/actions/runs/$run_id/jobs" \
+            -f per_page=100 > /tmp/jobs-raw.json
+          python - <<'PY'
+          from __future__ import annotations
+
+          import json
+          from pathlib import Path
+
+          payload = json.loads(Path('/tmp/jobs-raw.json').read_text(encoding='utf-8'))
+          jobs = payload['jobs']
+          by_name = {job['name']: job for job in jobs}
+          expected = {
+              'resolve': 'success',
+              'verify (3.12)': 'success',
+              'verify (3.13)': 'success',
+              'compare-and-publish': 'failure',
+          }
+          for name, conclusion in expected.items():
+              if by_name.get(name, {}).get('conclusion') != conclusion:
+                  raise SystemExit(f'job conclusion differs: {name}')
+          for name in ('verify (3.12)', 'verify (3.13)'):
+              steps = by_name[name]['steps']
+              matches = [
+                  step
+                  for step in steps
+                  if step['name'].startswith('Verify exact candidate under Python')
+              ]
+              if len(matches) != 1 or matches[0]['conclusion'] != 'success':
+                  raise SystemExit(f'exact verifier step differs: {name}')
+          bounded = [
+              {
+                  'id': job['id'],
+                  'name': job['name'],
+                  'status': job['status'],
+                  'conclusion': job['conclusion'],
+                  'head_sha': job['head_sha'],
+                  'started_at': job['started_at'],
+                  'completed_at': job['completed_at'],
+                  'steps': [
+                      {
+                          'name': step['name'],
+                          'status': step['status'],
+                          'conclusion': step['conclusion'],
+                          'number': step['number'],
+                      }
+                      for step in job['steps']
+                  ],
+              }
+              for job in jobs
+          ]
+          Path('/tmp/jobs.json').write_text(
+              json.dumps(bounded, sort_keys=True, separators=(',', ':')) + '\n',
+              encoding='utf-8',
+          )
+          PY
+          gh api "repos/$REPO/actions/jobs/99169429950/logs" > /tmp/compare-publish.log
+          grep -F 'cross_python_semantic_evidence_identical' /tmp/compare-publish.log >/dev/null
+          grep -F 'HEAD -> evidence/exact-review-attestation-registry-v0-f4d9388c-green-20260829' /tmp/compare-publish.log >/dev/null
+          grep -F 'HEAD -> evidence/exact-review-attestation-registry-v0-f4d9388c-checkpoint-20260829' /tmp/compare-publish.log >/dev/null
+          grep -F 'Resource not accessible by integration (HTTP 403)' /tmp/compare-publish.log >/dev/null
+
+      - name: Download and rehash both Python artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/artifacts
+          mkdir -p /tmp/artifacts/python-3.12 /tmp/artifacts/python-3.13
+          gh api "repos/$REPO/actions/artifacts/9722241766/zip" \
+            > /tmp/artifacts/python-3.12.zip
+          gh api "repos/$REPO/actions/artifacts/9722240203/zip" \
+            > /tmp/artifacts/python-3.13.zip
+          test "$(sha256sum /tmp/artifacts/python-3.12.zip | awk '{print $1}')" \
+            = 'a42fb8c85d1c8ae2f48d32e21ce958f39cf28ed490b4d3e6b48b8177c0b8b2fb'
+          test "$(sha256sum /tmp/artifacts/python-3.13.zip | awk '{print $1}')" \
+            = '94cc15b21bfa44282e6edd5a9a8299f893d331d9668fd689ac662363956a78e8'
+          unzip -q /tmp/artifacts/python-3.12.zip -d /tmp/artifacts/python-3.12
+          unzip -q /tmp/artifacts/python-3.13.zip -d /tmp/artifacts/python-3.13
+          python - <<'PY'
+          from __future__ import annotations
+
+          import hashlib
+          import json
+          from pathlib import Path
+
+          roots = {
+              '3.12': Path('/tmp/artifacts/python-3.12'),
+              '3.13': Path('/tmp/artifacts/python-3.13'),
+          }
+          expected_wheels = {
+              '3.12': '117914c55b290e7a7c13a4b4f60583f543d2e3118d01cf0b6d2697c4d95c012c',
+              '3.13': '24af9217225717f3834d8b245b1a9f155596e34fe3b6d08afd1753d838d14601',
+          }
+          manifests = {}
+          semantics = {}
+          wheels = {}
+          for version, root in roots.items():
+              manifest_path = next(root.rglob('manifest.json'))
+              semantic_path = next(root.rglob('semantic.json'))
+              wheel_path = next(root.rglob('*.whl'))
+              manifests[version] = json.loads(manifest_path.read_text(encoding='utf-8'))
+              semantics[version] = semantic_path.read_bytes()
+              wheels[version] = hashlib.sha256(wheel_path.read_bytes()).hexdigest()
+              if wheels[version] != expected_wheels[version]:
+                  raise SystemExit(f'wheel digest differs: {version}')
+              manifest = manifests[version]
+              if manifest['candidate_sha'] != 'f4d9388c14dd1f746f904b3724767f73f82786fd':
+                  raise SystemExit(f'candidate SHA differs: {version}')
+              if not manifest['python_version'].startswith(version + '.'):
+                  raise SystemExit(f'Python version differs: {version}')
+              expected = {
+                  'adversarial_test_count': 6,
+                  'focused_test_count': 67,
+                  'full_test_count': 521,
+                  'generated_trace_count': 5000,
+                  'exact_retry_count': 1000,
+                  'audit_findings': 0,
+                  'isolated_wheel_import': True,
+              }
+              for key, value in expected.items():
+                  if manifest[key] != value:
+                      raise SystemExit(f'manifest field differs: {version}:{key}')
+          if semantics['3.12'] != semantics['3.13']:
+              raise SystemExit('cross-Python semantic bytes differ')
+          semantic_sha = hashlib.sha256(semantics['3.12']).hexdigest()
+          if semantic_sha != 'ddd124b712f8a1b3179ed317293474c6a66e133695a14cb4b3a971ff2fb7c8e3':
+              raise SystemExit('semantic digest differs')
+          readback = {
+              'python_3_12': {
+                  'artifact_id': 9722241766,
+                  'zip_sha256': 'a42fb8c85d1c8ae2f48d32e21ce958f39cf28ed490b4d3e6b48b8177c0b8b2fb',
+                  'wheel_sha256': wheels['3.12'],
+              },
+              'python_3_13': {
+                  'artifact_id': 9722240203,
+                  'zip_sha256': '94cc15b21bfa44282e6edd5a9a8299f893d331d9668fd689ac662363956a78e8',
+                  'wheel_sha256': wheels['3.13'],
+              },
+              'semantic_sha256': semantic_sha,
+              'cross_python_semantic_identical': True,
+          }
+          Path('/tmp/artifact-readback.json').write_text(
+              json.dumps(readback, sort_keys=True, separators=(',', ':')) + '\n',
+              encoding='utf-8',
+          )
+          PY
+
+      - name: Build and publish immutable ChatGPT attestation
+        id: publish
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from __future__ import annotations
+
+          import json
+          from pathlib import Path
+
+          evidence = json.loads(Path('/tmp/evidence.json').read_text(encoding='utf-8'))
+          checkpoint = json.loads(Path('/tmp/checkpoint.json').read_text(encoding='utf-8'))
+          attestation = {
+              'schema': 'm-head-exact-review-attestation-r3-chatgpt-attestation-v1',
+              'attestation_key': 'm-head:exact-sha-review-attestation-registry-v0:r3-chatgpt-attested:f4d9388c:20260829',
+              'status': 'green_review_pending_unmerged',
+              'repository': 'leon36000/NextGen-Memory',
+              'candidate': evidence['candidate'],
+              'base': evidence['base'],
+              'parent_candidate': evidence['parent_candidate'],
+              'adversarial_red': evidence['adversarial_red'],
+              'source_run': 33278448676,
+              'source_jobs': json.loads(Path('/tmp/jobs.json').read_text(encoding='utf-8')),
+              'source_evidence': {
+                  'branch': checkpoint['evidence_branch'],
+                  'commit': checkpoint['evidence_commit'],
+                  'sha256': checkpoint['evidence_sha256'],
+                  'checkpoint_branch': 'evidence/exact-review-attestation-registry-v0-f4d9388c-checkpoint-20260829',
+                  'checkpoint_commit': 'a40f88d1377040a0e9bb2d0b87f945ace2a132dd',
+              },
+              'artifact_readback': json.loads(Path('/tmp/artifact-readback.json').read_text(encoding='utf-8')),
+              'verification': evidence['verification'],
+              'privacy_hardening': evidence['privacy_hardening'],
+              'contract': evidence['contract'],
+              'review': {
+                  'reviewer_runtime': 'GPT-5.6 Pro',
+                  'verdict': 'pending_independent_exact_sha_review',
+                  'merge_allowed': False,
+              },
+              'safety': evidence['safety'],
+              'attestation_method': (
+                  'Independent live Git ref, immutable evidence/checkpoint, Actions job, '
+                  'publisher-log, artifact ZIP/wheel and cross-Python semantic-byte readback.'
+              ),
+              'next_action': (
+                  'Perform a fresh exact-SHA technical review of PR #185. Any candidate '
+                  'movement invalidates evidence; merge and deployment operations remain separate.'
+              ),
+          }
+          Path('/tmp/r3-chatgpt-attestation.json').write_text(
+              json.dumps(
+                  attestation,
+                  ensure_ascii=False,
+                  allow_nan=False,
+                  sort_keys=True,
+                  separators=(',', ':'),
+              ) + '\n',
+              encoding='utf-8',
+          )
+          PY
+          branch='evidence/exact-review-attestation-registry-v0-f4d9388c-chatgpt-attested-20260829'
+          destination='evidence/exact-review-attestation-registry-v0-f4d9388c-chatgpt-attested-20260829.json'
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git fetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*'
+          if git ls-remote --exit-code --heads origin "$branch" >/dev/null; then
+            git switch --detach "origin/$branch"
+            cmp /tmp/r3-chatgpt-attestation.json "$destination"
+          else
+            git switch -c "$branch" '${{ steps.git.outputs.candidate }}'
+            mkdir -p evidence
+            cp /tmp/r3-chatgpt-attestation.json "$destination"
+            git add "$destination"
+            git diff --cached --check
+            git commit -m 'evidence: attest exact review attestation privacy r3'
+            git push origin HEAD:"refs/heads/$branch"
+          fi
+          echo "attestation_commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Publish durable status
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          body=$(cat <<EOF
+          ## Exact-SHA Review Attestation Registry r3 independent readback GREEN
+
+          - candidate: \`f4d9388c14dd1f746f904b3724767f73f82786fd\`;
+          - Python 3.12/3.13 exact jobs: success;
+          - adversarial/focused/full tests: \`6 / 67 / 521\` per Python;
+          - generated traces and exact retries: \`5,000 / 1,000\` per Python;
+          - cross-Python semantic SHA-256: \`ddd124b712f8a1b3179ed317293474c6a66e133695a14cb4b3a971ff2fb7c8e3\`;
+          - downloaded ZIPs and wheels: independently rehashed;
+          - immutable attestation: \`evidence/exact-review-attestation-registry-v0-f4d9388c-chatgpt-attested-20260829\` at \`${{ steps.publish.outputs.attestation_commit }}\`;
+          - exact-SHA technical review: pending;
+          - merge allowed: \`false\`.
+
+          The prior publisher failure occurred only after immutable evidence publication, during an unauthorized PR-comment call. This v2 readback reconciles every Git, job, artifact and digest invariant. No merge, migration, deployment, feedback write, policy activation, or release occurred.
+          EOF
+          )
+          gh api "repos/$REPO/issues/165/comments" --raw-field body="$body" >/dev/null
+          gh api "repos/$REPO/issues/185/comments" --raw-field body="$body" >/dev/null
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: exact-review-attestation-r3-chatgpt-attestation-v2
+          path: |
+            /tmp/r3-chatgpt-attestation.json
+            /tmp/artifact-readback.json
+            /tmp/jobs.json
+          if-no-files-found: error
+          retention-days: 7
