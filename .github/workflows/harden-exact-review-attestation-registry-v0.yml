@@ -1,0 +1,72 @@
+name: Harden exact review attestation registry privacy boundary
+
+on:
+  push:
+    branches:
+      - bootstrap/harden-exact-review-attestation-registry-v0-20260829
+
+concurrency:
+  group: exact-review-attestation-registry-privacy-r3
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  harden:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          path: controller
+          fetch-depth: 0
+
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/exact-sha-review-attestation-registry-v0-privacy-boundary-20260829
+          path: product
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: product/pyproject.toml
+
+      - name: Reproduce RED, apply minimal fix, verify, and publish r3
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -o pipefail
+          bash -x controller/.github/controllers/harden_exact_review_attestation_registry_v0.sh \
+            "$GITHUB_WORKSPACE/controller" \
+            "$GITHUB_WORKSPACE/product" \
+            2>&1 | tee /tmp/exact-review-attestation-privacy-r3-controller.log
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: exact-review-attestation-privacy-r3-diagnostics
+          path: |
+            /tmp/exact-review-attestation-privacy-r3-controller.log
+            /tmp/exact-review-attestation-adversarial-red.txt
+            /tmp/exact-review-attestation-adversarial-green.txt
+            /tmp/exact-review-attestation-focused-r3.txt
+            /tmp/exact-review-attestation-full-r3.txt
+          if-no-files-found: warn
+          retention-days: 7
+
+      - uses: actions/upload-artifact@v4
+        if: success()
+        with:
+          name: exact-review-attestation-privacy-r3-evidence
+          path: |
+            /tmp/exact-review-attestation-privacy-r3-summary.json
+            /tmp/exact-review-attestation-privacy-r3.patch
+            /tmp/exact-review-attestation-privacy-r3.whl
+          if-no-files-found: error
+          retention-days: 7
