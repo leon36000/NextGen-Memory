@@ -1,0 +1,52 @@
+name: Repair exact review attestation r3 readback once
+
+on:
+  push:
+    branches:
+      - bootstrap/attest-exact-review-attestation-r3-20260829
+
+permissions:
+  contents: write
+
+jobs:
+  repair:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+
+      - name: Replace repeated jq input consumption with one bound document
+        shell: bash
+        run: |
+          set -euo pipefail
+          path='.github/workflows/attest-exact-review-attestation-r3.yml'
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('.github/workflows/attest-exact-review-attestation-r3.yml')
+          source = path.read_text(encoding='utf-8')
+          old = '''          jq -e '.candidate == input.candidate and .verification == input.verification and .privacy_hardening == input.privacy_hardening and .safety == input.safety' /tmp/checkpoint.json /tmp/evidence.json >/dev/null
+          '''
+          new = '''          jq -e --slurpfile evidence /tmp/evidence.json '.candidate == $evidence[0].candidate and .verification == $evidence[0].verification and .privacy_hardening == $evidence[0].privacy_hardening and .safety == $evidence[0].safety' /tmp/checkpoint.json >/dev/null
+          '''
+          if source.count(old) != 1:
+              raise SystemExit(
+                  f'expected one repeated-input jq expression, found {source.count(old)}'
+              )
+          path.write_text(source.replace(old, new, 1), encoding='utf-8')
+          PY
+          grep -F -- '--slurpfile evidence /tmp/evidence.json' "$path" >/dev/null
+          if grep -F 'input.candidate' "$path" >/dev/null; then
+            echo 'repeated jq input consumption remains' >&2
+            exit 1
+          fi
+          rm .github/workflows/repair-exact-review-attestation-r3-readback-once.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git diff --cached --check
+          git commit -m 'ci: bind r3 readback to one evidence document'
+          git push origin HEAD:bootstrap/attest-exact-review-attestation-r3-20260829
