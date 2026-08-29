@@ -1,0 +1,138 @@
+name: Verify exact review attestation registry privacy r3
+
+on:
+  push:
+    branches:
+      - bootstrap/verify-exact-review-attestation-r3-20260829
+
+concurrency:
+  group: exact-review-attestation-registry-r3-20260829
+  cancel-in-progress: true
+
+permissions:
+  actions: read
+  contents: write
+  issues: write
+
+jobs:
+  resolve:
+    runs-on: ubuntu-24.04
+    outputs:
+      candidate_sha: ${{ steps.identity.outputs.candidate_sha }}
+      base_sha: ${{ steps.identity.outputs.base_sha }}
+      r2_sha: ${{ steps.identity.outputs.r2_sha }}
+      red_sha: ${{ steps.identity.outputs.red_sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: candidate/exact-sha-review-attestation-registry-v0-r3-20260829
+          fetch-depth: 0
+
+      - name: Resolve immutable candidate graph
+        id: identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          candidate_sha='f4d9388c14dd1f746f904b3724767f73f82786fd'
+          base_sha='f4f3aca9759b5b7a60691017c2211152c011ea92'
+          r2_sha='008005072f412ecda1bf461f4e875de72c5b808f'
+          red_sha='7a59141d6f890df574be42198be88a200e307846'
+          test "$(git rev-parse HEAD)" = "$candidate_sha"
+          test "$(git rev-parse HEAD^)" = "$red_sha"
+          test "$(git rev-parse "$red_sha^")" = "$r2_sha"
+          test "$(git merge-base "$base_sha" HEAD)" = "$base_sha"
+          test -z "$(git status --porcelain)"
+          printf 'candidate_sha=%s\nbase_sha=%s\nr2_sha=%s\nred_sha=%s\n' \
+            "$candidate_sha" "$base_sha" "$r2_sha" "$red_sha" \
+            | tee -a "$GITHUB_OUTPUT"
+
+  verify:
+    needs: resolve
+    runs-on: ubuntu-24.04
+    timeout-minutes: 55
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.12', '3.13']
+    env:
+      PYTHON_VERSION: ${{ matrix.python-version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: bootstrap/verify-exact-review-attestation-r3-20260829
+          path: controller
+          fetch-depth: 0
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.candidate_sha }}
+          path: product
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: product/pyproject.toml
+
+      - name: Verify exact candidate under Python ${{ matrix.python-version }}
+        env:
+          EVIDENCE_ROOT: ${{ runner.temp }}/exact-review-attestation-r3-${{ matrix.python-version }}
+        shell: bash
+        run: |
+          bash controller/.github/controllers/verify_exact_review_attestation_r3_candidate_v2.sh \
+            "$GITHUB_WORKSPACE/product" \
+            "$EVIDENCE_ROOT" \
+            '${{ needs.resolve.outputs.candidate_sha }}' \
+            '${{ needs.resolve.outputs.base_sha }}' \
+            '${{ needs.resolve.outputs.r2_sha }}' \
+            '${{ needs.resolve.outputs.red_sha }}'
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: exact-review-attestation-r3-python-${{ matrix.python-version }}
+          path: ${{ runner.temp }}/exact-review-attestation-r3-${{ matrix.python-version }}
+          if-no-files-found: error
+          retention-days: 7
+
+  compare-and-publish:
+    needs: [resolve, verify]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: bootstrap/verify-exact-review-attestation-r3-20260829
+          path: controller
+          fetch-depth: 0
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.candidate_sha }}
+          path: product
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: exact-review-attestation-r3-python-*
+          path: ${{ runner.temp }}/exact-review-attestation-r3-matrix
+
+      - name: Compare Python evidence and publish immutable checkpoint
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          bash controller/.github/controllers/compare_publish_exact_review_attestation_r3.sh \
+            "$GITHUB_WORKSPACE/product" \
+            '${{ runner.temp }}/exact-review-attestation-r3-matrix' \
+            '${{ needs.resolve.outputs.candidate_sha }}' \
+            '${{ needs.resolve.outputs.base_sha }}' \
+            '${{ needs.resolve.outputs.r2_sha }}' \
+            '${{ needs.resolve.outputs.red_sha }}'
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: exact-review-attestation-r3-cross-python-summary
+          path: ${{ runner.temp }}/exact-review-attestation-r3-matrix/publish-summary.json
+          if-no-files-found: error
+          retention-days: 7
