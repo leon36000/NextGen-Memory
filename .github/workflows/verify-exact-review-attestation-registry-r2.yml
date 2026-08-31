@@ -1,0 +1,135 @@
+name: Verify exact review attestation registry R2 exact SHA
+
+on:
+  pull_request:
+
+concurrency:
+  group: exact-review-attestation-registry-r2-exact
+  cancel-in-progress: true
+
+permissions:
+  actions: read
+  contents: write
+  issues: write
+  pull-requests: read
+
+jobs:
+  resolve:
+    if: github.event.pull_request.head.ref == 'bootstrap/verify-exact-review-attestation-registry-v0-20260830'
+    runs-on: ubuntu-24.04
+    outputs:
+      base_sha: ${{ steps.identity.outputs.base_sha }}
+      candidate_sha: ${{ steps.identity.outputs.candidate_sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: candidate/exact-sha-review-attestation-registry-v0-r2-20260830
+          fetch-depth: 0
+
+      - name: Freeze exact immutable identities and nine-path surface
+        id: identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          base_sha='f4f3aca9759b5b7a60691017c2211152c011ea92'
+          candidate_sha='008005072f412ecda1bf461f4e875de72c5b808f'
+          test "$(git rev-parse HEAD)" = "$candidate_sha"
+          test "$(git merge-base HEAD "$base_sha")" = "$base_sha"
+          mapfile -t changed < <(git diff --name-only "$base_sha"...HEAD | sort)
+          expected=(
+            docs/exact-sha-review-attestation-registry-v0-red.md
+            docs/exact-sha-review-attestation-registry-v0.md
+            docs/superpowers/plans/2026-08-24-exact-sha-review-attestation-registry-v0.md
+            docs/superpowers/specs/2026-08-24-exact-sha-review-attestation-registry-v0-design.md
+            src/nextgen_memory/__init__.py
+            src/nextgen_memory/review_attestation_registry.py
+            tests/test_review_attestation_registry.py
+            tests/test_review_attestation_registry_properties.py
+            tests/test_review_attestation_registry_public_api.py
+          )
+          test "${#changed[@]}" -eq "${#expected[@]}"
+          diff -u <(printf '%s\n' "${expected[@]}" | sort) <(printf '%s\n' "${changed[@]}")
+          git diff --check "$base_sha"...HEAD
+          echo "base_sha=$base_sha" >> "$GITHUB_OUTPUT"
+          echo "candidate_sha=$candidate_sha" >> "$GITHUB_OUTPUT"
+
+  verify:
+    needs: resolve
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.12', '3.13']
+    env:
+      PYTHON_VERSION: ${{ matrix.python-version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: bootstrap/verify-exact-review-attestation-registry-v0-20260830
+          path: controller
+          fetch-depth: 0
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.candidate_sha }}
+          path: product
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: product/pyproject.toml
+
+      - name: Verify exact candidate on Python ${{ matrix.python-version }}
+        env:
+          EVIDENCE_ROOT: ${{ runner.temp }}/exact-review-r2-${{ matrix.python-version }}
+        run: |
+          bash controller/.github/controllers/verify_exact_review_attestation_registry_r2.sh \
+            "$GITHUB_WORKSPACE/product" \
+            "$EVIDENCE_ROOT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: exact-review-attestation-r2-python-${{ matrix.python-version }}
+          path: ${{ runner.temp }}/exact-review-r2-${{ matrix.python-version }}
+          if-no-files-found: error
+          retention-days: 7
+
+  compare-and-publish:
+    needs: [resolve, verify]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: bootstrap/verify-exact-review-attestation-registry-v0-20260830
+          path: controller
+          fetch-depth: 0
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.candidate_sha }}
+          path: product
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: exact-review-attestation-r2-python-*
+          path: ${{ runner.temp }}/exact-review-r2-matrix
+
+      - name: Compare Python evidence and publish immutable proof
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          bash controller/.github/controllers/publish_exact_review_attestation_registry_r2.sh \
+            "$GITHUB_WORKSPACE/product" \
+            '${{ runner.temp }}/exact-review-r2-matrix'
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: exact-review-attestation-r2-cross-python-summary
+          path: ${{ runner.temp }}/exact-review-r2-matrix/cross-python-summary.json
+          if-no-files-found: error
+          retention-days: 7
