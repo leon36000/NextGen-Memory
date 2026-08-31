@@ -1,0 +1,238 @@
+name: Reconcile M-HEAD extended dependency graph 20260831
+
+on:
+  push:
+    branches:
+      - bootstrap/reconcile-mhead-extended-dependency-graph-20260831
+  workflow_dispatch:
+
+concurrency:
+  group: m-head-extended-dependency-graph-20260831
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  reconcile:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Resolve exact live identities and ancestry relations
+        id: graph
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*'
+          git show \
+            origin/evidence/learning-policy-stack-sol-review-queue-chatgpt-attested-20260824:evidence/learning-policy-stack-sol-review-queue-chatgpt-attested-20260824.json \
+            > /tmp/queue.json
+          git show \
+            origin/evidence/learning-policy-stack-gpt56pro-reviews-20260831:evidence/learning-policy-stack-gpt56pro-reviews-20260831.json \
+            > /tmp/stack-reviews.json
+          git show \
+            origin/evidence/exact-sha-review-attestation-registry-v0-canonical-approved-20260831:evidence/exact-sha-review-attestation-registry-v0-canonical-approved-20260831.json \
+            > /tmp/review-registry.json
+          current_main=$(git rev-parse origin/main)
+          historical_branch=$(jq -r '.candidates | sort_by(.ordinal) | last | .branch' /tmp/queue.json)
+          historical_sha=$(jq -r '.candidates | sort_by(.ordinal) | last | .sha' /tmp/queue.json)
+          advisory_branch='candidate/advisory-policy-promotion-gate-v0-20260824'
+          advisory_sha=$(git rev-parse "origin/$advisory_branch")
+          registry_branch='candidate/exact-sha-review-attestation-registry-v0-20260824'
+          registry_sha=$(git rev-parse "origin/$registry_branch")
+          registry_base_sha=$(jq -r '.base.sha' /tmp/review-registry.json)
+          test "$registry_base_sha" = "$advisory_sha"
+          test "$(git merge-base "$advisory_sha" "$registry_sha")" = "$advisory_sha"
+          historical_ancestor_of_advisory=false
+          advisory_ancestor_of_historical=false
+          if git merge-base --is-ancestor "$historical_sha" "$advisory_sha"; then historical_ancestor_of_advisory=true; fi
+          if git merge-base --is-ancestor "$advisory_sha" "$historical_sha"; then advisory_ancestor_of_historical=true; fi
+          shared_merge_base=$(git merge-base "$historical_sha" "$advisory_sha")
+          jq -e '.status == "all_six_gpt56pro_approved_unmerged" and .approved_count == 6 and .findings == []' /tmp/stack-reviews.json >/dev/null
+          jq -e '.status == "green_review_approved_unmerged" and .review.verdict == "APPROVE" and .merge_allowed == false' /tmp/review-registry.json >/dev/null
+          printf 'CURRENT_MAIN=%s\nHISTORICAL_BRANCH=%s\nHISTORICAL_SHA=%s\nADVISORY_BRANCH=%s\nADVISORY_SHA=%s\nREGISTRY_BRANCH=%s\nREGISTRY_SHA=%s\nSHARED_MERGE_BASE=%s\nHISTORICAL_ANCESTOR_OF_ADVISORY=%s\nADVISORY_ANCESTOR_OF_HISTORICAL=%s\n' \
+            "$current_main" "$historical_branch" "$historical_sha" \
+            "$advisory_branch" "$advisory_sha" "$registry_branch" "$registry_sha" \
+            "$shared_merge_base" "$historical_ancestor_of_advisory" "$advisory_ancestor_of_historical" \
+            | tee -a "$GITHUB_ENV"
+          printf 'current_main=%s\nhistorical_sha=%s\nadvisory_sha=%s\nregistry_sha=%s\n' \
+            "$current_main" "$historical_sha" "$advisory_sha" "$registry_sha" \
+            | tee -a "$GITHUB_OUTPUT"
+
+      - name: Simulate dependency-aware integration without pushing a merge
+        id: rehearsal
+        shell: bash
+        run: |
+          set -euo pipefail
+          root="$RUNNER_TEMP/extended-rehearsal"
+          rm -rf "$root"
+          git worktree add --detach "$root" "$CURRENT_MAIN"
+          cd "$root"
+          git config user.name 'm-head-rehearsal'
+          git config user.email 'm-head-rehearsal@invalid.local'
+          merge_status='clean'
+          conflict_stage='none'
+          merge_one() {
+            local label=$1 sha=$2
+            if git merge-base --is-ancestor "$sha" HEAD; then
+              printf '%s already contained\n' "$label"
+              return 0
+            fi
+            set +e
+            git merge --no-ff --no-commit "$sha" >/tmp/merge-$label.txt 2>&1
+            rc=$?
+            set -e
+            if [ "$rc" -ne 0 ]; then
+              merge_status='conflict'
+              conflict_stage="$label"
+              git diff --name-only --diff-filter=U | sort > /tmp/conflicts.txt
+              return 1
+            fi
+            git commit -m "rehearsal: merge $label" >/dev/null
+          }
+          if ! merge_one historical "$HISTORICAL_SHA"; then true; fi
+          if [ "$merge_status" = clean ]; then
+            if ! merge_one advisory "$ADVISORY_SHA"; then true; fi
+          fi
+          if [ "$merge_status" = clean ]; then
+            if ! merge_one review-registry "$REGISTRY_SHA"; then true; fi
+          fi
+          if [ "$merge_status" = clean ]; then
+            integrated_sha=$(git rev-parse HEAD)
+            printf '%s\n' "$integrated_sha" > /tmp/integrated-sha.txt
+            git diff --check "$CURRENT_MAIN"...HEAD
+            python -m pip install -e '.[dev]'
+            python -m pip install 'ruff==0.16.4'
+            ruff check .
+            ruff format --check .
+            python -m compileall -q src scripts
+            python -m pytest -q | tee /tmp/full.txt
+            python -m pip wheel --no-deps . -w /tmp/wheelhouse
+            wheel=$(find /tmp/wheelhouse -maxdepth 1 -type f -name '*.whl' -print -quit)
+            test -n "$wheel"
+            python -m venv /tmp/rehearsal-venv
+            /tmp/rehearsal-venv/bin/python -m pip install --no-deps "$wheel"
+            /tmp/rehearsal-venv/bin/python -m pip check
+            /tmp/rehearsal-venv/bin/python - <<'PY'
+          import nextgen_memory
+          assert nextgen_memory is not None
+          PY
+          fi
+          printf 'merge_status=%s\nconflict_stage=%s\n' "$merge_status" "$conflict_stage" | tee -a "$GITHUB_OUTPUT"
+
+      - name: Build exact dependency report
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ '${{ steps.rehearsal.outputs.merge_status }}' = clean ]; then
+            integrated_sha=$(cat /tmp/integrated-sha.txt)
+            test_count=$(sed -nE 's/.* ([0-9]+) passed.*/\1/p' /tmp/full.txt | tail -1)
+            [ -n "$test_count" ] || test_count=$(grep -oE '[0-9]+ passed' /tmp/full.txt | tail -1 | cut -d' ' -f1)
+            status='extended_stack_rehearsal_green_unmerged'
+            next='Obtain or confirm an independent review of the advisory policy promotion gate, then run a final merge latch against the same main SHA.'
+            conflicts='[]'
+          else
+            integrated_sha=''
+            test_count=0
+            status='extended_stack_integration_conflict_unmerged'
+            next='Resolve the recorded integration conflict in a dedicated branch, rerun tests, and repeat the rehearsal.'
+            if [ -s /tmp/conflicts.txt ]; then
+              conflicts=$(jq -R . /tmp/conflicts.txt | jq -s .)
+            else
+              conflicts='[]'
+            fi
+          fi
+          jq -n \
+            --arg schema 'm-head-extended-dependency-graph-rehearsal-v1' \
+            --arg status "$status" \
+            --arg repository '${{ github.repository }}' \
+            --arg current_main_sha "$CURRENT_MAIN" \
+            --arg historical_branch "$HISTORICAL_BRANCH" \
+            --arg historical_sha "$HISTORICAL_SHA" \
+            --arg advisory_branch "$ADVISORY_BRANCH" \
+            --arg advisory_sha "$ADVISORY_SHA" \
+            --arg registry_branch "$REGISTRY_BRANCH" \
+            --arg registry_sha "$REGISTRY_SHA" \
+            --arg shared_merge_base "$SHARED_MERGE_BASE" \
+            --argjson historical_ancestor_of_advisory "$HISTORICAL_ANCESTOR_OF_ADVISORY" \
+            --argjson advisory_ancestor_of_historical "$ADVISORY_ANCESTOR_OF_HISTORICAL" \
+            --arg merge_status '${{ steps.rehearsal.outputs.merge_status }}' \
+            --arg conflict_stage '${{ steps.rehearsal.outputs.conflict_stage }}' \
+            --arg integrated_sha "$integrated_sha" \
+            --argjson conflicts "$conflicts" \
+            --argjson full_test_count "$test_count" \
+            --arg next_action "$next" \
+            '{schema:$schema,status:$status,repository:$repository,current_main_sha:$current_main_sha,graph:{historical:{branch:$historical_branch,sha:$historical_sha},advisory:{branch:$advisory_branch,sha:$advisory_sha},review_registry:{branch:$registry_branch,sha:$registry_sha},shared_merge_base:$shared_merge_base,historical_ancestor_of_advisory:$historical_ancestor_of_advisory,advisory_ancestor_of_historical:$advisory_ancestor_of_historical},rehearsal:{merge_status:$merge_status,conflict_stage:$conflict_stage,conflicts:$conflicts,integrated_tree_commit:$integrated_sha,ruff_green:($merge_status=="clean"),format_green:($merge_status=="clean"),compileall_green:($merge_status=="clean"),full_test_count:$full_test_count,isolated_wheel_green:($merge_status=="clean")},reviews:{historical_six_gpt56pro_approved:true,exact_review_registry_gpt56pro_approved:true,advisory_policy_promotion_gate_independent_review_required:true},merge_allowed:false,safety:{actual_product_merge_performed:false,merged:false,production_database_contacted:false,production_migration_applied:false,production_application_data_written:false,feedback_written:false,policy_activated:false,release_published:false,tests_weakened:false,stubs_added:false,review_fabricated:false},next_action:$next}' \
+            > /tmp/extended-graph.json
+          cat /tmp/extended-graph.json
+
+      - name: Publish immutable dependency report
+        id: publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          branch='evidence/m-head-extended-dependency-graph-rehearsal-20260831'
+          path='evidence/m-head-extended-dependency-graph-rehearsal-20260831.json'
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git fetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*'
+          if git ls-remote --exit-code --heads origin "$branch"; then
+            git switch --detach "origin/$branch"
+            cmp /tmp/extended-graph.json "$path"
+          else
+            git switch -C "$branch" origin/main
+            mkdir -p evidence
+            cp /tmp/extended-graph.json "$path"
+            git add "$path"
+            git diff --cached --check
+            git commit -m 'evidence: rehearse extended M-HEAD dependency graph'
+            git push origin HEAD:"refs/heads/$branch"
+          fi
+          commit=$(git rev-parse HEAD)
+          status=$(jq -r '.status' /tmp/extended-graph.json)
+          merge_status=$(jq -r '.rehearsal.merge_status' /tmp/extended-graph.json)
+          full=$(jq -r '.rehearsal.full_test_count' /tmp/extended-graph.json)
+          body=$(cat <<EOF
+          ## Extended M-HEAD dependency graph rehearsal
+
+          - status: \`$status\`;
+          - historical policy gate SHA: \`$HISTORICAL_SHA\`;
+          - advisory policy gate SHA: \`$ADVISORY_SHA\`;
+          - exact review registry SHA: \`$REGISTRY_SHA\`;
+          - rehearsal merge status: \`$merge_status\`;
+          - complete tests after simulated integration: \`$full\`;
+          - immutable report: \`$branch\` at \`$commit\`;
+          - merge allowed: \`false\`.
+
+          No product merge or production operation occurred.
+          EOF
+          )
+          gh api "repos/$GITHUB_REPOSITORY/issues/23/comments" --raw-field body="$body" >/dev/null
+          echo "branch=$branch" >> "$GITHUB_OUTPUT"
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: m-head-extended-dependency-graph-rehearsal
+          path: |
+            /tmp/extended-graph.json
+            /tmp/queue.json
+            /tmp/stack-reviews.json
+            /tmp/review-registry.json
+            /tmp/conflicts.txt
+            /tmp/full.txt
+          if-no-files-found: ignore
+          retention-days: 14
