@@ -1,9 +1,9 @@
 # Exact-SHA Merge Readiness Gate v0 Design
 
-**Date:** 2026-08-30  
-**Status:** approved by the reconciled contract in issue #166 and the project owner's standing autonomous-development direction  
-**Issue:** #166  
-**Base branch:** `candidate/exact-sha-review-attestation-registry-v0-r3-20260829`  
+**Date:** 2026-08-30
+**Status:** approved by the reconciled contract in issue #166 and the project owner's standing autonomous-development direction
+**Issue:** #166
+**Base branch:** `candidate/exact-sha-review-attestation-registry-v0-r3-20260829`
 **Base SHA:** `f4d9388c14dd1f746f904b3724767f73f82786fd`
 
 ## 1. Goal
