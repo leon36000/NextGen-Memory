@@ -76,7 +76,7 @@ for forbidden in (
         raise SystemExit(f"obsolete R4-v1 target remains: {forbidden}")
 if source.count("r4-v2-20260831") < 6:
     raise SystemExit("R4-v2 branch identities are not fully bound")
-if source.count("prose_replacements") != 1:
+if source.count("prose_replacements") != 2:
     raise SystemExit("R4 prose correction is absent or duplicated")
 path.write_text(source, encoding="utf-8")
 PY
