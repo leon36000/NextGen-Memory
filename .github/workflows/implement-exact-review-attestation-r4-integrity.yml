@@ -4,7 +4,7 @@ on:
   pull_request:
 
 concurrency:
-  group: exact-review-attestation-r4-integrity-producer
+  group: exact-review-attestation-r4-integrity-producer-v2
   cancel-in-progress: true
 
 permissions:
@@ -46,7 +46,8 @@ jobs:
           test "$(git rev-parse HEAD)" = "$parent"
           test "$(git merge-base "$base" HEAD)" = "$base"
           cd ..
-          python controller/.github/controllers/patch_exact_review_attestation_r4_integrity.py \
+          python controller/.github/controllers/run_patch_exact_review_attestation_r4_integrity_v2.py \
+            --controller-root "$GITHUB_WORKSPACE/controller" \
             --root "$GITHUB_WORKSPACE/product"
 
       - name: Normalize without weakening tests
