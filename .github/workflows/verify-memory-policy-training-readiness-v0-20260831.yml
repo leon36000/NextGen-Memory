@@ -1,0 +1,518 @@
+name: Verify memory policy training readiness v0 independently
+
+on:
+  push:
+    branches:
+      - bootstrap/verify-memory-policy-training-readiness-v0-20260831
+  workflow_dispatch:
+
+concurrency:
+  group: memory-policy-training-readiness-v0-independent-20260831
+  cancel-in-progress: true
+
+permissions:
+  actions: read
+  contents: write
+  issues: write
+  pull-requests: write
+
+jobs:
+  resolve:
+    runs-on: ubuntu-24.04
+    outputs:
+      base_sha: ${{ steps.identity.outputs.base_sha }}
+      candidate_sha: ${{ steps.identity.outputs.candidate_sha }}
+      candidate_tree: ${{ steps.identity.outputs.candidate_tree }}
+      red_sha: ${{ steps.identity.outputs.red_sha }}
+      product_pr: ${{ steps.identity.outputs.product_pr }}
+      short: ${{ steps.identity.outputs.short }}
+      producer_branch: ${{ steps.identity.outputs.producer_branch }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: candidate/memory-policy-training-readiness-v0-20260831
+          fetch-depth: 0
+
+      - name: Freeze exact base, candidate, RED, producer evidence, and PR
+        id: identity
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*'
+          git show \
+            origin/evidence/memory-policy-dataset-v0-postmerge-checkpoint-20260831:evidence/memory-policy-dataset-v0-postmerge-checkpoint-20260831.json \
+            > /tmp/base-checkpoint.json
+          jq -e '.checkpoint_key == "m-head:memory-policy-dataset-v0:postmerge-green:20260831"' /tmp/base-checkpoint.json >/dev/null
+          jq -e '.status == "dataset_postmerge_green_no_model_training"' /tmp/base-checkpoint.json >/dev/null
+          jq -e '.model_state.training_authorized == false and .model_state.training_performed == false' /tmp/base-checkpoint.json >/dev/null
+          base_sha=$(jq -r '.merge.main_merge_sha' /tmp/base-checkpoint.json)
+          test "$(git rev-parse origin/main)" = "$base_sha"
+
+          candidate_branch='candidate/memory-policy-training-readiness-v0-20260831'
+          candidate_sha=$(git rev-parse HEAD)
+          candidate_tree=$(git rev-parse HEAD^{tree})
+          test "$(git rev-parse "origin/$candidate_branch")" = "$candidate_sha"
+          test "$(git merge-base "$base_sha" "$candidate_sha")" = "$base_sha"
+
+          mapfile -t changed < <(git diff --name-only "$base_sha"..."$candidate_sha" | sort)
+          expected=(
+            docs/memory-policy-training-readiness-v0-red.md
+            docs/memory-policy-training-readiness-v0.md
+            docs/superpowers/plans/2026-08-31-memory-policy-training-readiness-v0.md
+            docs/superpowers/specs/2026-08-31-memory-policy-training-readiness-v0-design.md
+            src/nextgen_memory/__init__.py
+            src/nextgen_memory/memory_policy_training_readiness.py
+            tests/test_memory_policy_training_readiness.py
+            tests/test_memory_policy_training_readiness_properties.py
+            tests/test_memory_policy_training_readiness_public_api.py
+          )
+          test "${#changed[@]}" -eq "${#expected[@]}"
+          diff -u <(printf '%s\n' "${expected[@]}" | sort) <(printf '%s\n' "${changed[@]}")
+          test -z "$(git diff --name-only "$base_sha"..."$candidate_sha" -- '.github/workflows/**' 'migrations/**' pyproject.toml 'src/nextgen_memory/corrective_retrieval_*')"
+          git diff --check "$base_sha"..."$candidate_sha"
+          test -z "$(git status --porcelain)"
+
+          red_branch='tdd/memory-policy-training-readiness-v0-red-20260831'
+          red_sha=$(git rev-parse "origin/$red_branch")
+          test "$(git merge-base "$base_sha" "$red_sha")" = "$base_sha"
+          for path in \
+            docs/memory-policy-training-readiness-v0-red.md \
+            tests/test_memory_policy_training_readiness.py \
+            tests/test_memory_policy_training_readiness_properties.py \
+            tests/test_memory_policy_training_readiness_public_api.py; do
+            cmp <(git show "$red_sha:$path") "$path"
+          done
+          grep -F "$red_branch" docs/superpowers/plans/2026-08-31-memory-policy-training-readiness-v0.md >/dev/null
+          grep -F "$red_sha" docs/superpowers/plans/2026-08-31-memory-policy-training-readiness-v0.md >/dev/null
+
+          short=${candidate_sha:0:8}
+          producer_branch="evidence/memory-policy-training-readiness-v0-${short}-producer-20260831"
+          producer_path="evidence/memory-policy-training-readiness-v0-${short}-producer-20260831.json"
+          git show "origin/$producer_branch:$producer_path" > /tmp/producer.json
+          jq -e '.schema == "m-head-memory-policy-training-readiness-producer-v1"' /tmp/producer.json >/dev/null
+          jq -e '.status == "producer_green_verification_pending_unmerged"' /tmp/producer.json >/dev/null
+          jq -e --arg sha "$candidate_sha" '.candidate.sha == $sha and .candidate.exact_path_count == 9' /tmp/producer.json >/dev/null
+          jq -e --arg tree "$candidate_tree" '.candidate.tree_sha == $tree' /tmp/producer.json >/dev/null
+          jq -e --arg sha "$base_sha" '.base.sha == $sha' /tmp/producer.json >/dev/null
+          jq -e --arg sha "$red_sha" '.tdd.sha == $sha and .tdd.source_preserved == true and .tdd.tests_weakened == false' /tmp/producer.json >/dev/null
+          jq -e '.verification.generated_10000_test_count > 0 and .verification.audit_findings == 0' /tmp/producer.json >/dev/null
+          jq -e '.verification.hash_seed_invariant == true and .verification.exact_retry_count == 1000' /tmp/producer.json >/dev/null
+          jq -e '.verification.isolated_wheel_import == true and .verification.pip_check == true' /tmp/producer.json >/dev/null
+          jq -e '.contract.all_reject_reasons == true and .contract.all_hold_reasons == true and .contract.ready_state == true' /tmp/producer.json >/dev/null
+          jq -e '.contract.model_training_always_unauthorized == true' /tmp/producer.json >/dev/null
+          jq -e '.review.verdict == "pending" and .review.merge_allowed == false and .review.model_training_authorized == false' /tmp/producer.json >/dev/null
+          jq -e '.safety.model_trained == false and .safety.merged == false' /tmp/producer.json >/dev/null
+
+          owner=${REPO%%/*}
+          pulls=$(gh api --method GET "repos/$REPO/pulls" -f state=open -f head="$owner:$candidate_branch" -f per_page=100)
+          test "$(printf '%s' "$pulls" | jq 'length')" -eq 1
+          product_pr=$(printf '%s' "$pulls" | jq -r '.[0].number')
+          test "$(printf '%s' "$pulls" | jq -r '.[0].draft')" = true
+          test "$(printf '%s' "$pulls" | jq -r '.[0].head.sha')" = "$candidate_sha"
+          test "$(printf '%s' "$pulls" | jq -r '.[0].base.ref')" = main
+          test "$(printf '%s' "$pulls" | jq -r '.[0].base.sha')" = "$base_sha"
+          test "$(jq -r '.candidate.pull_request' /tmp/producer.json)" = "$product_pr"
+
+          printf 'base_sha=%s\ncandidate_sha=%s\ncandidate_tree=%s\nred_sha=%s\nproduct_pr=%s\nshort=%s\nproducer_branch=%s\n' \
+            "$base_sha" "$candidate_sha" "$candidate_tree" "$red_sha" "$product_pr" "$short" "$producer_branch" \
+            | tee -a "$GITHUB_OUTPUT"
+
+  verify:
+    needs: resolve
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        python-version: ['3.12', '3.13']
+    env:
+      PYTHON_VERSION: ${{ matrix.python-version }}
+      BASE_SHA: ${{ needs.resolve.outputs.base_sha }}
+      CANDIDATE_SHA: ${{ needs.resolve.outputs.candidate_sha }}
+      CANDIDATE_TREE: ${{ needs.resolve.outputs.candidate_tree }}
+      RED_SHA: ${{ needs.resolve.outputs.red_sha }}
+      PRODUCT_PR: ${{ needs.resolve.outputs.product_pr }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.candidate_sha }}
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install exact candidate environment
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e '.[dev]'
+          python -m pip install 'ruff==0.16.4'
+          ruff --version
+
+      - name: Prove exact SHA, tree, RED sources, and static quality
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
+          test "$(git rev-parse HEAD^{tree})" = "$CANDIDATE_TREE"
+          test "$(git merge-base "$BASE_SHA" HEAD)" = "$BASE_SHA"
+          for path in \
+            docs/memory-policy-training-readiness-v0-red.md \
+            tests/test_memory_policy_training_readiness.py \
+            tests/test_memory_policy_training_readiness_properties.py \
+            tests/test_memory_policy_training_readiness_public_api.py; do
+            cmp <(git show "$RED_SHA:$path") "$path"
+          done
+          ruff check .
+          ruff format --check .
+          python -m compileall -q src scripts
+          git diff --check "$BASE_SHA"...HEAD
+          test -z "$(git status --porcelain)"
+
+      - name: Run focused, generated-10000, and complete test suites
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pytest -q \
+            tests/test_memory_policy_training_readiness.py \
+            tests/test_memory_policy_training_readiness_properties.py \
+            tests/test_memory_policy_training_readiness_public_api.py \
+            | tee /tmp/focused.txt
+          python -m pytest -q tests/test_memory_policy_training_readiness_properties.py \
+            | tee /tmp/generated-10000.txt
+          grep -F 'range(10_000)' tests/test_memory_policy_training_readiness_properties.py >/dev/null
+          python -m pytest -q | tee /tmp/full.txt
+          test -z "$(git status --porcelain)"
+
+      - name: Run independent dependency, privacy, side-effect, and stub audit
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from __future__ import annotations
+          import ast,json,sys
+          from pathlib import Path
+          path=Path('src/nextgen_memory/memory_policy_training_readiness.py')
+          source=path.read_text(encoding='utf-8')
+          tree=ast.parse(source,filename=str(path))
+          allowed=set(sys.stdlib_module_names)|{'__future__'}
+          findings=[]
+          for node in ast.walk(tree):
+              if isinstance(node,ast.Import):
+                  for alias in node.names:
+                      root=alias.name.split('.',1)[0]
+                      if root not in allowed: findings.append(f'{node.lineno}:nonstdlib:{alias.name}')
+              elif isinstance(node,ast.ImportFrom):
+                  if node.level==0:
+                      root=(node.module or '').split('.',1)[0]
+                      if root not in allowed: findings.append(f'{node.lineno}:nonstdlib:{node.module}')
+                  elif node.level!=1 or node.module!='memory_policy_dataset': findings.append(f'{node.lineno}:unexpected-local:{node.module}')
+              elif isinstance(node,ast.Pass): findings.append(f'{node.lineno}:pass')
+              elif isinstance(node,ast.Expr) and isinstance(node.value,ast.Constant) and node.value.value is Ellipsis: findings.append(f'{node.lineno}:ellipsis')
+              elif isinstance(node,ast.Raise):
+                  target=node.exc.func if isinstance(node.exc,ast.Call) else node.exc
+                  if isinstance(target,ast.Name) and target.id=='NotImplementedError': findings.append(f'{node.lineno}:NotImplementedError')
+              elif isinstance(node,ast.Call):
+                  if isinstance(node.func,ast.Name) and node.func.id in {'open','eval','exec','compile','input'}: findings.append(f'{node.lineno}:call:{node.func.id}')
+                  elif isinstance(node.func,ast.Attribute) and node.func.attr in {'connect','request','urlopen','system','popen','run','Popen','sleep','time','uuid1','uuid4','write_text','write_bytes','mkdir','unlink','rename','getenv'}: findings.append(f'{node.lineno}:call:{node.func.attr}')
+          lowered=source.lower()
+          for marker in ('raw_prompt','raw_query','response_text','memory_body','credential','password','reviewer_email','reviewer_name','postgresql://','mongodb://','http://','https://','torch','transformers','optimizer','trainer','model.fit','merge_pull_request','activate_policy','write_feedback','# todo','# fixme'):
+              if marker in lowered: findings.append(f'text:{marker}')
+          for test_path in [Path('tests/test_memory_policy_training_readiness.py'),Path('tests/test_memory_policy_training_readiness_properties.py'),Path('tests/test_memory_policy_training_readiness_public_api.py')]:
+              text=test_path.read_text(encoding='utf-8').lower()
+              for marker in ('pytest.mark.skip','pytest.mark.xfail','# noqa','notimplementederror'):
+                  if marker in text: findings.append(f'{test_path}:text:{marker}')
+          if findings: raise SystemExit('\n'.join(findings))
+          Path('/tmp/audit.json').write_text(json.dumps({'audit_findings':0},sort_keys=True)+'\n',encoding='utf-8')
+          print('audit_findings=0')
+          PY
+
+      - name: Generate independent deterministic readiness evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > /tmp/semantic.py <<'PY'
+          from __future__ import annotations
+          import hashlib,json,os,sys
+          from dataclasses import replace
+          from pathlib import Path
+          from uuid import UUID
+          from nextgen_memory import (
+              AdvisoryMemoryPolicyTrainingReadinessGate,
+              MemoryPolicyDatasetReadinessEvidence,
+              MemoryPolicyDatasetSplitStatistics,
+              MemoryPolicySplit,
+              MemoryPolicyTrainingReadinessConfig,
+              MemoryPolicyTrainingReadinessReason,
+              MemoryPolicyTrainingReadinessRequest,
+              MemoryPolicyTrainingReadinessState,
+          )
+          def digest(v:str)->str: return hashlib.sha256(v.encode()).hexdigest()
+          def split(kind,traj,examples,trainable,b,n,h,a,lo,hi): return MemoryPolicyDatasetSplitStatistics(split=kind,trajectory_count=traj,example_count=examples,trainable_example_count=trainable,beneficial_count=b,neutral_count=n,harmful_count=h,abstain_count=a,minimum_event_ordinal=lo,maximum_event_ordinal=hi)
+          splits={split(MemoryPolicySplit.TRAIN,600,6000,4800,1800,1600,1400,1200,0,999),split(MemoryPolicySplit.VALIDATION,200,2000,1600,600,500,500,400,1000,1499),split(MemoryPolicySplit.TEST,200,2000,1600,600,500,500,400,1500,1999)}
+          evidence=MemoryPolicyDatasetReadinessEvidence(snapshot_id=UUID(int=1),snapshot_content_hash=digest('snapshot'),dataset_artifact_sha256=digest('artifact'),dataset_source_sha=os.environ['BASE_SHA'],dataset_schema_version='memory-policy-dataset-v0',snapshot_trajectory_count=1000,snapshot_example_count=10000,snapshot_trainable_example_count=8000,snapshot_abstention_count=2000,split_statistics=splits,real_operational_trajectory_count=800,controlled_replay_trajectory_count=200,synthetic_fixture_trajectory_count=0,real_operational_trainable_example_count=6800,controlled_replay_trainable_example_count=1200,synthetic_fixture_trainable_example_count=0,direct_causal_example_count=6400,matched_replay_example_count=1200,interaction_allocation_example_count=400,observational_example_count=800,absent_credit_example_count=1200,effective_sample_size=800.0,duplicate_feature_vector_count=100,distinct_policy_version_count=4,distinct_expert_key_count=32,train_validation_trajectory_overlap_count=0,train_test_trajectory_overlap_count=0,validation_test_trajectory_overlap_count=0,evidence_age_seconds=100.0,schema_validation_passed=True,artifact_integrity_passed=True,privacy_audit_passed=True,raw_content_scan_passed=True,provenance_validation_passed=True,safety_violation=False)
+          config=MemoryPolicyTrainingReadinessConfig(minimum_real_operational_trajectories=500,minimum_real_operational_trainable_share=0.8,minimum_trainable_examples=5000,minimum_train_trajectories=500,minimum_validation_trajectories=100,minimum_test_trajectories=100,minimum_effective_sample_size=500.0,minimum_chronological_span_ordinals=1500,minimum_distinct_policy_versions=2,minimum_distinct_expert_keys=10,minimum_beneficial_examples=500,minimum_neutral_examples=500,minimum_harmful_examples=500,minimum_direct_causal_trainable_share=0.7,maximum_abstention_rate=0.25,maximum_dominant_label_share=0.5,maximum_controlled_replay_trainable_share=0.2,maximum_duplicate_feature_rate=0.02,maximum_evidence_age_seconds=3600.0)
+          def request(value,**overrides):
+              fields={'snapshot_id':evidence.snapshot_id,'snapshot_content_hash':evidence.snapshot_content_hash,'dataset_source_sha':evidence.dataset_source_sha,'dataset_artifact_sha256':evidence.dataset_artifact_sha256,'evidence':value}; fields.update(overrides); return MemoryPolicyTrainingReadinessRequest(**fields)
+          gate=AdvisoryMemoryPolicyTrainingReadinessGate()
+          ready=gate.evaluate(request(evidence),config)
+          if ready.state is not MemoryPolicyTrainingReadinessState.READY or ready.reasons!=(MemoryPolicyTrainingReadinessReason.ALL_GATES_PASSED,): raise SystemExit('ready differs')
+          hold=gate.evaluate(request(replace(evidence,real_operational_trajectory_count=499,controlled_replay_trajectory_count=501)),config)
+          if hold.state is not MemoryPolicyTrainingReadinessState.HOLD or hold.reasons!=(MemoryPolicyTrainingReadinessReason.INSUFFICIENT_REAL_TRAJECTORIES,): raise SystemExit(f'hold differs {hold.reasons}')
+          reject=gate.evaluate(request(replace(evidence,safety_violation=True)),replace(config,minimum_trainable_examples=9000))
+          if reject.state is not MemoryPolicyTrainingReadinessState.REJECT or reject.reasons!=(MemoryPolicyTrainingReadinessReason.SAFETY_VIOLATION,): raise SystemExit(f'reject differs {reject.reasons}')
+          mismatch=gate.evaluate(request(evidence,snapshot_content_hash=digest('other')),config)
+          if mismatch.reasons!=(MemoryPolicyTrainingReadinessReason.SNAPSHOT_IDENTITY_MISMATCH,): raise SystemExit('identity mismatch differs')
+          for record in (ready,hold,reject,mismatch):
+              if record.model_training_authorized or not record.advisory_only: raise SystemExit('authorization boundary differs')
+          expected=ready.render_json()
+          for _ in range(1000):
+              if gate.evaluate(request(evidence),config).render_json()!=expected: raise SystemExit('retry differs')
+          payload={'schema':'m-head-memory-policy-training-readiness-independent-semantic-v1','base_sha':os.environ['BASE_SHA'],'candidate_sha':os.environ['CANDIDATE_SHA'],'candidate_tree':os.environ['CANDIDATE_TREE'],'ready':json.loads(ready.render_json()),'hold':json.loads(hold.render_json()),'reject':json.loads(reject.render_json()),'identity_reject':json.loads(mismatch.render_json()),'exact_retry_count':1000,'model_training_authorized':False}
+          raw=json.dumps(payload,ensure_ascii=False,allow_nan=False,sort_keys=True,separators=(',',':'))+'\n'
+          for marker in ('raw_prompt','raw_query','response_text','memory_body','credential','password','reviewer_email','reviewer_name'):
+              if marker in raw.lower(): raise SystemExit(f'forbidden marker {marker}')
+          Path(sys.argv[1]).write_text(raw,encoding='utf-8')
+          PY
+          PYTHONHASHSEED=1 python /tmp/semantic.py /tmp/semantic.json
+          PYTHONHASHSEED=37 python /tmp/semantic.py /tmp/semantic-37.json
+          PYTHONHASHSEED=999 python /tmp/semantic.py /tmp/semantic-999.json
+          cmp /tmp/semantic.json /tmp/semantic-37.json
+          cmp /tmp/semantic.json /tmp/semantic-999.json
+
+      - name: Build and import the exact wheel in isolation
+        shell: bash
+        run: |
+          set -euo pipefail
+          wheelhouse="$RUNNER_TEMP/wheelhouse-$PYTHON_VERSION"
+          venv="$RUNNER_TEMP/wheel-venv-$PYTHON_VERSION"
+          rm -rf "$wheelhouse" "$venv"
+          mkdir -p "$wheelhouse"
+          python -m pip wheel --no-deps . -w "$wheelhouse"
+          wheel=$(find "$wheelhouse" -maxdepth 1 -type f -name '*.whl' -print -quit)
+          test -n "$wheel"
+          python -m venv "$venv"
+          "$venv/bin/python" -m pip install --no-deps "$wheel"
+          "$venv/bin/python" -m pip check
+          "$venv/bin/python" - <<'PY'
+          import nextgen_memory
+          from nextgen_memory import AdvisoryMemoryPolicyTrainingReadinessGate, MemoryPolicyTrainingReadinessState
+          assert AdvisoryMemoryPolicyTrainingReadinessGate is not None
+          assert MemoryPolicyTrainingReadinessState.READY.value == 'ready'
+          assert len(nextgen_memory.__all__) == len(set(nextgen_memory.__all__))
+          PY
+          cp "$wheel" /tmp/product.whl
+
+      - name: Build per-Python exact verification manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from __future__ import annotations
+          import hashlib,json,os,re,sys
+          from pathlib import Path
+          def passed(path):
+              values=re.findall(r'(\d+) passed',Path(path).read_text(encoding='utf-8'))
+              if not values: raise SystemExit(f'missing count {path}')
+              return int(values[-1])
+          semantic=Path('/tmp/semantic.json'); wheel=Path('/tmp/product.whl'); audit=json.loads(Path('/tmp/audit.json').read_text())
+          manifest={'schema':'m-head-memory-policy-training-readiness-python-v1','base_sha':os.environ['BASE_SHA'],'candidate_sha':os.environ['CANDIDATE_SHA'],'candidate_tree':os.environ['CANDIDATE_TREE'],'red_sha':os.environ['RED_SHA'],'product_pr':int(os.environ['PRODUCT_PR']),'python_version':'.'.join(map(str,sys.version_info[:3])),'focused_test_count':passed('/tmp/focused.txt'),'generated_10000_test_count':passed('/tmp/generated-10000.txt'),'full_test_count':passed('/tmp/full.txt'),'audit':audit,'semantic_sha256':hashlib.sha256(semantic.read_bytes()).hexdigest(),'wheel_sha256':hashlib.sha256(wheel.read_bytes()).hexdigest(),'hash_seed_invariant':True,'exact_retry_count':1000,'all_reject_hold_ready_tests':True,'model_training_authorized':False,'isolated_wheel_import':True,'pip_check':True}
+          root=Path('/tmp/evidence'); root.mkdir(parents=True,exist_ok=True)
+          (root/'manifest.json').write_text(json.dumps(manifest,ensure_ascii=False,allow_nan=False,sort_keys=True,separators=(',',':'))+'\n',encoding='utf-8')
+          (root/'semantic.json').write_bytes(semantic.read_bytes()); (root/'product.whl').write_bytes(wheel.read_bytes())
+          PY
+          test -z "$(git status --porcelain)"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: memory-policy-training-readiness-python-${{ matrix.python-version }}
+          path: /tmp/evidence
+          if-no-files-found: error
+          retention-days: 21
+
+  aggregate:
+    needs: [resolve, verify]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      GH_TOKEN: ${{ github.token }}
+      BASE_SHA: ${{ needs.resolve.outputs.base_sha }}
+      CANDIDATE_SHA: ${{ needs.resolve.outputs.candidate_sha }}
+      CANDIDATE_TREE: ${{ needs.resolve.outputs.candidate_tree }}
+      RED_SHA: ${{ needs.resolve.outputs.red_sha }}
+      PRODUCT_PR: ${{ needs.resolve.outputs.product_pr }}
+      SHORT: ${{ needs.resolve.outputs.short }}
+      PRODUCER_BRANCH: ${{ needs.resolve.outputs.producer_branch }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.candidate_sha }}
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: memory-policy-training-readiness-python-*
+          path: ${{ runner.temp }}/matrix
+
+      - name: Compare cross-Python evidence and build approval
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from __future__ import annotations
+          import hashlib,json,os
+          from pathlib import Path
+          root=Path(os.environ['RUNNER_TEMP'])/'matrix'
+          manifests=sorted(root.rglob('manifest.json')); semantics=sorted(root.rglob('semantic.json')); wheels=sorted(root.rglob('product.whl'))
+          if len(manifests)!=2 or len(semantics)!=2 or len(wheels)!=2: raise SystemExit('expected two artifacts')
+          docs=[json.loads(path.read_text()) for path in manifests]
+          versions={'.'.join(doc['python_version'].split('.')[:2]) for doc in docs}
+          if versions!={'3.12','3.13'}: raise SystemExit(f'versions {versions}')
+          if semantics[0].read_bytes()!=semantics[1].read_bytes(): raise SystemExit('semantic bytes differ')
+          for doc in docs:
+              if doc['base_sha']!=os.environ['BASE_SHA'] or doc['candidate_sha']!=os.environ['CANDIDATE_SHA'] or doc['candidate_tree']!=os.environ['CANDIDATE_TREE'] or doc['red_sha']!=os.environ['RED_SHA'] or doc['product_pr']!=int(os.environ['PRODUCT_PR']): raise SystemExit('identity drift')
+              if doc['focused_test_count']<=0 or doc['generated_10000_test_count']<=0 or doc['full_test_count']<doc['focused_test_count']: raise SystemExit('test counts invalid')
+              if doc['audit']['audit_findings']!=0 or not doc['hash_seed_invariant'] or doc['exact_retry_count']!=1000 or not doc['all_reject_hold_ready_tests'] or doc['model_training_authorized'] or not doc['isolated_wheel_import'] or not doc['pip_check']: raise SystemExit('verification flag differs')
+          for key in ('focused_test_count','generated_10000_test_count','full_test_count','semantic_sha256'):
+              if len({json.dumps(doc[key],sort_keys=True) for doc in docs})!=1: raise SystemExit(f'drift {key}')
+          raw=semantics[0].read_bytes()
+          review={'schema':'m-head-memory-policy-training-readiness-review-v1','status':'green_review_approved_unmerged','repository':'leon36000/NextGen-Memory','reviewer_runtime':'GPT-5.6 Pro','base':{'branch':'main','sha':os.environ['BASE_SHA']},'candidate':{'branch':'candidate/memory-policy-training-readiness-v0-20260831','sha':os.environ['CANDIDATE_SHA'],'tree_sha':os.environ['CANDIDATE_TREE'],'pull_request':int(os.environ['PRODUCT_PR']),'exact_path_count':9},'tdd':{'branch':'tdd/memory-policy-training-readiness-v0-red-20260831','sha':os.environ['RED_SHA'],'source_preserved':True,'tests_weakened':False},'producer_evidence_branch':os.environ['PRODUCER_BRANCH'],'verdict':'APPROVE','findings':[],'verification':{'python_versions':sorted(versions),'focused_test_count_each':docs[0]['focused_test_count'],'generated_10000_test_count_each':docs[0]['generated_10000_test_count'],'full_test_count_each':docs[0]['full_test_count'],'semantic_sha256':hashlib.sha256(raw).hexdigest(),'cross_python_semantic_identical':True,'hash_seed_invariant':True,'exact_retry_count':1000,'all_reject_hold_ready_tests':True,'audit_findings':0,'isolated_wheel_import':True,'pip_check':True,'wheel_sha256_by_python':{'.'.join(doc['python_version'].split('.')[:2]):doc['wheel_sha256'] for doc in docs}},'contract':{'hard_reject_precedence':True,'all_hold_reasons':True,'ready_state':True,'offline_experiment_only':True,'model_training_always_unauthorized':True,'raw_content_surface':False,'model_training_surface':False,'persistence_surface':False,'feedback_surface':False,'activation_surface':False},'merge_allowed':False,'model_training_authorized':False,'safety':{'merged':False,'model_trained':False,'production_database_contacted':False,'production_migration_applied':False,'production_application_data_written':False,'feedback_written':False,'policy_activated':False,'release_published':False,'tests_weakened':False,'stubs_added':False,'review_fabricated':False},'next_action':'A separate exact-SHA merge authorization may integrate this unchanged gate. Merging it does not claim current data is ready and never authorizes model training; a real dataset evidence record must later be evaluated and a separate offline experiment approved.'}
+          Path('/tmp/review.json').write_text(json.dumps(review,ensure_ascii=False,allow_nan=False,sort_keys=True,separators=(',',':'))+'\n',encoding='utf-8')
+          PY
+
+      - name: Reconcile live branch and draft PR after matrix
+        env:
+          REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*'
+          test "$(git rev-parse origin/main)" = "$BASE_SHA"
+          test "$(git rev-parse origin/candidate/memory-policy-training-readiness-v0-20260831)" = "$CANDIDATE_SHA"
+          test "$(git rev-parse "$CANDIDATE_SHA^{tree}")" = "$CANDIDATE_TREE"
+          pr=$(gh api "repos/$REPO/pulls/$PRODUCT_PR")
+          test "$(printf '%s' "$pr" | jq -r '.state')" = open
+          test "$(printf '%s' "$pr" | jq -r '.draft')" = true
+          test "$(printf '%s' "$pr" | jq -r '.head.sha')" = "$CANDIDATE_SHA"
+          test "$(printf '%s' "$pr" | jq -r '.base.sha')" = "$BASE_SHA"
+
+      - name: Bind artifacts and publish immutable approval/checkpoint/review
+        id: publish
+        env:
+          REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          artifacts=$(gh api --method GET "repos/$REPO/actions/runs/$GITHUB_RUN_ID/artifacts" -f per_page=100)
+          printf '%s' "$artifacts" | jq '[.artifacts[] | select(.name | startswith("memory-policy-training-readiness-python-")) | {id,name,digest,expired,size_in_bytes,created_at,expires_at}] | sort_by(.name)' > /tmp/artifacts.json
+          test "$(jq 'length' /tmp/artifacts.json)" -eq 2
+          test "$(jq '[.[] | select(.expired == true)] | length' /tmp/artifacts.json)" -eq 0
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          path=Path('/tmp/review.json'); review=json.loads(path.read_text())
+          review['verification']['run_id']=int('${{ github.run_id }}')
+          review['verification']['artifacts']=json.loads(Path('/tmp/artifacts.json').read_text())
+          path.write_text(json.dumps(review,ensure_ascii=False,allow_nan=False,sort_keys=True,separators=(',',':'))+'\n',encoding='utf-8')
+          PY
+          specific_branch="evidence/memory-policy-training-readiness-v0-${SHORT}-green-20260831"
+          specific_path="evidence/memory-policy-training-readiness-v0-${SHORT}-green-20260831.json"
+          checkpoint_branch="evidence/memory-policy-training-readiness-v0-${SHORT}-checkpoint-20260831"
+          checkpoint_path="evidence/memory-policy-training-readiness-v0-${SHORT}-checkpoint-20260831.json"
+          canonical_branch='evidence/memory-policy-training-readiness-v0-canonical-approved-20260831'
+          canonical_path='evidence/memory-policy-training-readiness-v0-canonical-approved-20260831.json'
+          canonical_checkpoint_branch='evidence/memory-policy-training-readiness-v0-canonical-checkpoint-20260831'
+          canonical_checkpoint_path='evidence/memory-policy-training-readiness-v0-canonical-checkpoint-20260831.json'
+          git config user.name 'github-actions[bot]'; git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git fetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*'
+          publish_exact(){ local branch=$1 source=$2 destination=$3 message=$4 base=$5; if git ls-remote --exit-code --heads origin "$branch"; then git switch --detach "origin/$branch"; cmp "$source" "$destination"; else git switch -C "$branch" "$base"; mkdir -p "$(dirname "$destination")"; cp "$source" "$destination"; git add "$destination"; git diff --cached --check; git commit -m "$message"; git push origin HEAD:"refs/heads/$branch"; fi; }
+          publish_exact "$specific_branch" /tmp/review.json "$specific_path" 'evidence: approve memory policy training readiness v0' "$CANDIDATE_SHA"
+          specific_commit=$(git rev-parse HEAD)
+          python - <<PY
+          import hashlib,json
+          from pathlib import Path
+          raw=Path('/tmp/review.json').read_bytes(); review=json.loads(raw)
+          checkpoint={'checkpoint_key':'m-head:memory-policy-training-readiness-v0:green-readback:${SHORT}','status':review['status'],'repository':review['repository'],'evidence_branch':'$specific_branch','evidence_commit':'$specific_commit','evidence_sha256':hashlib.sha256(raw).hexdigest(),'base':review['base'],'candidate':review['candidate'],'tdd':review['tdd'],'verification':review['verification'],'contract':review['contract'],'verdict':review['verdict'],'findings':review['findings'],'merge_allowed':False,'model_training_authorized':False,'safety':review['safety'],'next_action':review['next_action']}
+          Path('/tmp/checkpoint.json').write_text(json.dumps(checkpoint,ensure_ascii=False,allow_nan=False,sort_keys=True,separators=(',',':'))+'\n',encoding='utf-8')
+          PY
+          publish_exact "$checkpoint_branch" /tmp/checkpoint.json "$checkpoint_path" 'evidence: checkpoint memory policy training readiness v0' "$specific_commit"
+          checkpoint_commit=$(git rev-parse HEAD)
+          publish_exact "$canonical_branch" /tmp/review.json "$canonical_path" 'evidence: canonicalize memory policy training readiness v0 approval' "$CANDIDATE_SHA"
+          canonical_commit=$(git rev-parse HEAD)
+          python - <<PY
+          import hashlib,json
+          from pathlib import Path
+          review_raw=Path('/tmp/review.json').read_bytes(); checkpoint_raw=Path('/tmp/checkpoint.json').read_bytes(); review=json.loads(review_raw)
+          canonical={'checkpoint_key':'m-head:memory-policy-training-readiness-v0:canonical-approved:20260831','status':review['status'],'repository':review['repository'],'candidate':review['candidate'],'base':review['base'],'tdd':review['tdd'],'verification':review['verification'],'contract':review['contract'],'review':{'reviewer_runtime':review['reviewer_runtime'],'verdict':review['verdict'],'findings':review['findings'],'merge_allowed':False,'model_training_authorized':False},'immutable_evidence':{'specific_branch':'$specific_branch','specific_commit':'$specific_commit','specific_sha256':hashlib.sha256(review_raw).hexdigest(),'specific_checkpoint_branch':'$checkpoint_branch','specific_checkpoint_commit':'$checkpoint_commit','specific_checkpoint_sha256':hashlib.sha256(checkpoint_raw).hexdigest(),'canonical_branch':'$canonical_branch','canonical_commit':'$canonical_commit'},'safety':review['safety'],'next_action':review['next_action']}
+          Path('/tmp/canonical-checkpoint.json').write_text(json.dumps(canonical,ensure_ascii=False,allow_nan=False,sort_keys=True,separators=(',',':'))+'\n',encoding='utf-8')
+          PY
+          publish_exact "$canonical_checkpoint_branch" /tmp/canonical-checkpoint.json "$canonical_checkpoint_path" 'evidence: checkpoint canonical memory policy training readiness v0 approval' "$canonical_commit"
+          canonical_checkpoint_commit=$(git rev-parse HEAD)
+          marker="MHEAD_GPT56PRO_MEMORY_POLICY_TRAINING_READINESS_REVIEW_V1:$CANDIDATE_SHA"
+          reviews=$(gh api --paginate "repos/$REPO/pulls/$PRODUCT_PR/reviews?per_page=100" | jq -s 'add // []')
+          existing=$(printf '%s' "$reviews" | jq -r --arg marker "$marker" '[.[]|select(.body|contains($marker))]|last|.id//empty')
+          if [ -z "$existing" ]; then
+            body=$(cat <<EOF
+          <!-- $marker -->
+          ## Independent exact-SHA technical review
+
+          - reviewer runtime: \`GPT-5.6 Pro\`;
+          - candidate SHA: \`$CANDIDATE_SHA\`;
+          - verdict: \`APPROVE\`;
+          - findings: none;
+          - Python 3.12/3.13 focused and complete suites: green and equal;
+          - 10,000 generated evaluations per Python: green;
+          - every reject/hold/ready contract: green;
+          - cross-Python semantic evidence: byte-identical;
+          - exact retries: \`1,000\`;
+          - audit findings: \`0\`;
+          - isolated wheels and pip checks: green;
+          - canonical evidence: \`$canonical_branch\` at \`$canonical_commit\`;
+          - canonical checkpoint: \`$canonical_checkpoint_branch\` at \`$canonical_checkpoint_commit\`;
+          - code merge authorized by this review: \`false\`;
+          - model training authorized: \`false\`.
+
+          Any SHA movement invalidates this review. A future real dataset must still evaluate to READY, and a separate immutable offline experiment specification is required before training.
+          EOF
+            )
+            gh api "repos/$REPO/pulls/$PRODUCT_PR/reviews" --method POST -f event='COMMENT' --raw-field body="$body" > /tmp/github-review.json
+          else
+            gh api "repos/$REPO/pulls/$PRODUCT_PR/reviews/$existing" > /tmp/github-review.json
+          fi
+          review_id=$(jq -r '.id' /tmp/github-review.json)
+          issue_body=$(cat <<EOF
+          ## Memory Policy Training Readiness Gate v0 independently approved
+
+          - candidate SHA: \`$CANDIDATE_SHA\`;
+          - product PR: #$PRODUCT_PR;
+          - verdict: \`APPROVE\`;
+          - Python 3.12/3.13, 10,000 evaluations, all reasons, semantic identity, audit and wheels: green;
+          - canonical evidence: \`$canonical_branch\` at \`$canonical_commit\`;
+          - canonical checkpoint: \`$canonical_checkpoint_branch\` at \`$canonical_checkpoint_commit\`;
+          - code merge allowed: \`false\`;
+          - model training authorized/performed: \`false\`.
+          EOF
+          )
+          gh api "repos/$REPO/issues/23/comments" --raw-field body="$issue_body" >/dev/null
+          echo "canonical_branch=$canonical_branch" >> "$GITHUB_OUTPUT"
+          echo "canonical_commit=$canonical_commit" >> "$GITHUB_OUTPUT"
+          echo "canonical_checkpoint_branch=$canonical_checkpoint_branch" >> "$GITHUB_OUTPUT"
+          echo "canonical_checkpoint_commit=$canonical_checkpoint_commit" >> "$GITHUB_OUTPUT"
+          echo "github_review_id=$review_id" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: memory-policy-training-readiness-v0-review-summary
+          path: |
+            /tmp/review.json
+            /tmp/checkpoint.json
+            /tmp/canonical-checkpoint.json
+            /tmp/artifacts.json
+          if-no-files-found: error
+          retention-days: 21
