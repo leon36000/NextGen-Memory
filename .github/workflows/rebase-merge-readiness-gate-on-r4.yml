@@ -1,0 +1,308 @@
+name: Rebase merge readiness gate design and RED on R4
+
+on:
+  pull_request:
+
+concurrency:
+  group: exact-sha-merge-readiness-r4-rebase
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+jobs:
+  rebase:
+    if: github.event.pull_request.head.ref == 'bootstrap/rebase-merge-readiness-gate-on-r4-20260831'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install project development tools
+        run: python -m pip install -e '.[dev]'
+
+      - name: Reconcile immutable source and parent identities
+        id: identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*'
+          parent_sha='41b0b104e5a3f06c4d238060ad0fd3dd51dd4446'
+          r3_sha='f4d9388c14dd1f746f904b3724767f73f82786fd'
+          source_feature_sha='c5e14f8d8db744b457b1f3f84cac249b1d7d5c70'
+          source_red_sha='6f7f9adbfe4020cbf4135206162ec4335b8d8373'
+          test "$(git merge-base "$r3_sha" "$parent_sha")" = "$r3_sha"
+          test "$(git merge-base "$r3_sha" "$source_feature_sha")" = "$r3_sha"
+          test "$(git merge-base "$source_feature_sha" "$source_red_sha")" = "$source_feature_sha"
+          printf 'parent_sha=%s\nr3_sha=%s\nsource_feature_sha=%s\nsource_red_sha=%s\n' \
+            "$parent_sha" "$r3_sha" "$source_feature_sha" "$source_red_sha" \
+            | tee -a "$GITHUB_OUTPUT"
+
+      - name: Publish R4-based design and plan branch
+        id: feature
+        env:
+          PARENT_SHA: ${{ steps.identity.outputs.parent_sha }}
+          SOURCE_FEATURE_SHA: ${{ steps.identity.outputs.source_feature_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          feature_branch='feat/exact-sha-merge-readiness-gate-v0-r4-20260831'
+          if git ls-remote --exit-code --heads origin "$feature_branch"; then
+            echo "feature branch already exists" >&2
+            exit 1
+          fi
+          git switch -C "$feature_branch" "$PARENT_SHA"
+          old_spec='docs/superpowers/specs/2026-08-30-exact-sha-merge-readiness-gate-v0-design.md'
+          old_plan='docs/superpowers/plans/2026-08-30-exact-sha-merge-readiness-gate-v0.md'
+          new_spec='docs/superpowers/specs/2026-08-31-exact-sha-merge-readiness-gate-v0-design.md'
+          new_plan='docs/superpowers/plans/2026-08-31-exact-sha-merge-readiness-gate-v0.md'
+          git checkout "$SOURCE_FEATURE_SHA" -- "$old_spec" "$old_plan"
+          mkdir -p "$(dirname "$new_spec")" "$(dirname "$new_plan")"
+          git mv "$old_spec" "$new_spec"
+          git mv "$old_plan" "$new_plan"
+          SPEC="$new_spec" PLAN="$new_plan" python - <<'PY'
+          from __future__ import annotations
+
+          import os
+          from pathlib import Path
+
+          r3_branch = 'candidate/exact-sha-review-attestation-registry-v0-r3-20260829'
+          r3_sha = 'f4d9388c14dd1f746f904b3724767f73f82786fd'
+          r4_branch = 'candidate/exact-sha-review-attestation-registry-v0-r4-20260831'
+          r4_sha = '41b0b104e5a3f06c4d238060ad0fd3dd51dd4446'
+          old_feature = 'feat/exact-sha-merge-readiness-gate-v0-20260830'
+          new_feature = 'feat/exact-sha-merge-readiness-gate-v0-r4-20260831'
+          old_red = 'tdd/exact-sha-merge-readiness-gate-v0-red-20260830'
+          old_red_v2 = 'tdd/exact-sha-merge-readiness-gate-v0-red-v2-20260831'
+          new_red = 'tdd/exact-sha-merge-readiness-gate-v0-red-r4-20260831'
+          old_candidate = 'candidate/exact-sha-merge-readiness-gate-v0-20260830'
+          new_candidate = 'candidate/exact-sha-merge-readiness-gate-v0-r4-20260831'
+          old_spec_path = 'docs/superpowers/specs/2026-08-30-exact-sha-merge-readiness-gate-v0-design.md'
+          old_plan_path = 'docs/superpowers/plans/2026-08-30-exact-sha-merge-readiness-gate-v0.md'
+          new_spec_path = 'docs/superpowers/specs/2026-08-31-exact-sha-merge-readiness-gate-v0-design.md'
+          new_plan_path = 'docs/superpowers/plans/2026-08-31-exact-sha-merge-readiness-gate-v0.md'
+
+          for environment_key in ('SPEC', 'PLAN'):
+              path = Path(os.environ[environment_key])
+              source = path.read_text(encoding='utf-8')
+              replacements = (
+                  ('**Date:** 2026-08-30', '**Date:** 2026-08-31'),
+                  (r3_branch, r4_branch),
+                  (r3_sha, r4_sha),
+                  (old_feature, new_feature),
+                  (old_red_v2, new_red),
+                  (old_red, new_red),
+                  (old_candidate, new_candidate),
+                  (old_spec_path, new_spec_path),
+                  (old_plan_path, new_plan_path),
+                  ('2026-08-30-exact-sha-merge-readiness-gate-v0', '2026-08-31-exact-sha-merge-readiness-gate-v0'),
+              )
+              for old, new in replacements:
+                  source = source.replace(old, new)
+              source = '\n'.join(line.rstrip() for line in source.splitlines()) + '\n'
+              if r3_branch in source or r3_sha in source:
+                  raise SystemExit(f'{path}: R3 identity remains')
+              if r4_branch not in source or r4_sha not in source:
+                  raise SystemExit(f'{path}: R4 identity is absent')
+              path.write_text(source, encoding='utf-8')
+
+          spec = Path(os.environ['SPEC'])
+          source = spec.read_text(encoding='utf-8')
+          section = '''
+
+          ## R4 parent integrity boundary
+
+          The parent registry is exact SHA `41b0b104e5a3f06c4d238060ad0fd3dd51dd4446`. It revalidates canonical review identities before serialization or registry use and stores request/attestation identity snapshots separately from exposed references. Merge-readiness review evidence is trusted only after these R4 integrity checks and the gate's own request/summary/decision consistency checks succeed. Any post-construction mutation therefore fails closed.
+          '''
+          section = '\n'.join(
+              line[10:] if line.startswith('          ') else line
+              for line in section.splitlines()
+          ) + '\n'
+          if '## R4 parent integrity boundary' not in source:
+              source += section
+          spec.write_text(source, encoding='utf-8')
+          PY
+          git diff --check
+          mapfile -t changed < <(git diff --name-only "$PARENT_SHA"...HEAD 2>/dev/null || git diff --name-only)
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add "$new_spec" "$new_plan"
+          git diff --cached --check
+          git commit -m 'docs: rebase merge readiness design on review registry R4'
+          feature_sha=$(git rev-parse HEAD)
+          mapfile -t delta < <(git diff --name-only "$PARENT_SHA"...HEAD | sort)
+          expected=("$new_plan" "$new_spec")
+          test "${#delta[@]}" -eq 2
+          diff -u <(printf '%s\n' "${expected[@]}" | sort) \
+            <(printf '%s\n' "${delta[@]}")
+          git push origin HEAD:"refs/heads/$feature_branch"
+          printf 'feature_branch=%s\nfeature_sha=%s\n' "$feature_branch" "$feature_sha" \
+            | tee -a "$GITHUB_OUTPUT"
+
+      - name: Publish R4-based Ruff-clean tests-only RED
+        id: red
+        env:
+          FEATURE_SHA: ${{ steps.feature.outputs.feature_sha }}
+          SOURCE_RED_SHA: ${{ steps.identity.outputs.source_red_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          red_branch='tdd/exact-sha-merge-readiness-gate-v0-red-r4-20260831'
+          if git ls-remote --exit-code --heads origin "$red_branch"; then
+            echo "RED branch already exists" >&2
+            exit 1
+          fi
+          git switch -C "$red_branch" "$FEATURE_SHA"
+          paths=(
+            docs/exact-sha-merge-readiness-gate-v0-red.md
+            tests/test_merge_readiness_gate.py
+            tests/test_merge_readiness_gate_properties.py
+            tests/test_merge_readiness_gate_public_api.py
+          )
+          git checkout "$SOURCE_RED_SHA" -- "${paths[@]}"
+          DOC="${paths[0]}" python - <<'PY'
+          from __future__ import annotations
+
+          import os
+          from pathlib import Path
+
+          path = Path(os.environ['DOC'])
+          source = path.read_text(encoding='utf-8')
+          replacements = (
+              ('**Date:** 2026-08-30', '**Date:** 2026-08-31'),
+              ('candidate/exact-sha-review-attestation-registry-v0-r3-20260829', 'candidate/exact-sha-review-attestation-registry-v0-r4-20260831'),
+              ('f4d9388c14dd1f746f904b3724767f73f82786fd', '41b0b104e5a3f06c4d238060ad0fd3dd51dd4446'),
+              ('feat/exact-sha-merge-readiness-gate-v0-20260830', 'feat/exact-sha-merge-readiness-gate-v0-r4-20260831'),
+              ('tdd/exact-sha-merge-readiness-gate-v0-red-v2-20260831', 'tdd/exact-sha-merge-readiness-gate-v0-red-r4-20260831'),
+              ('tdd/exact-sha-merge-readiness-gate-v0-red-20260830', 'tdd/exact-sha-merge-readiness-gate-v0-red-r4-20260831'),
+          )
+          for old, new in replacements:
+              source = source.replace(old, new)
+          section = '''
+
+          ## R4 rebase and canonical formatting
+
+          This RED preserves the complete behavior contract from the earlier draft while rebasing onto immutable Review Attestation Registry R4 `41b0b104e5a3f06c4d238060ad0fd3dd51dd4446`. The three test modules receive only canonical Ruff formatting; their parsed ASTs are compared to the source draft before publication. No fixture, assertion, reason, generated case, retry, privacy boundary, or expected state changes.
+          '''
+          section = '\n'.join(
+              line[10:] if line.startswith('          ') else line
+              for line in section.splitlines()
+          ) + '\n'
+          if '## R4 rebase and canonical formatting' not in source:
+              source += section
+          source = '\n'.join(line.rstrip() for line in source.splitlines()) + '\n'
+          path.write_text(source, encoding='utf-8')
+          PY
+          test_files=(
+            tests/test_merge_readiness_gate.py
+            tests/test_merge_readiness_gate_properties.py
+            tests/test_merge_readiness_gate_public_api.py
+          )
+          ruff check "${test_files[@]}"
+          ruff format "${test_files[@]}"
+          ruff check "${test_files[@]}"
+          ruff format --check "${test_files[@]}"
+          python -m py_compile "${test_files[@]}"
+          SOURCE_RED_SHA="$SOURCE_RED_SHA" python - <<'PY'
+          from __future__ import annotations
+
+          import ast
+          import hashlib
+          import json
+          import os
+          import subprocess
+          from pathlib import Path
+
+          paths = (
+              'tests/test_merge_readiness_gate.py',
+              'tests/test_merge_readiness_gate_properties.py',
+              'tests/test_merge_readiness_gate_public_api.py',
+          )
+          records = []
+          for raw in paths:
+              before_source = subprocess.check_output(
+                  ('git', 'show', f'{os.environ["SOURCE_RED_SHA"]}:{raw}'),
+                  text=True,
+              )
+              after_source = Path(raw).read_text(encoding='utf-8')
+              before_ast = ast.dump(
+                  ast.parse(before_source, filename=raw),
+                  annotate_fields=True,
+                  include_attributes=False,
+              )
+              after_ast = ast.dump(
+                  ast.parse(after_source, filename=raw),
+                  annotate_fields=True,
+                  include_attributes=False,
+              )
+              if before_ast != after_ast:
+                  raise SystemExit(f'{raw}: Ruff formatting changed parsed AST')
+              records.append(
+                  {
+                      'path': raw,
+                      'source_red_ast_sha256': hashlib.sha256(before_ast.encode()).hexdigest(),
+                      'r4_red_ast_sha256': hashlib.sha256(after_ast.encode()).hexdigest(),
+                      'ast_identical': True,
+                  }
+              )
+          Path('/tmp/merge-readiness-red-r4-ast.json').write_text(
+              json.dumps(
+                  {'schema': 'm-head-merge-readiness-red-r4-ast-v1', 'paths': records},
+                  sort_keys=True,
+                  separators=(',', ':'),
+              ) + '\n',
+              encoding='utf-8',
+          )
+          PY
+          git diff --check
+          git add "${paths[@]}"
+          git diff --cached --check
+          git commit -m 'test: define R4-based exact-SHA merge readiness RED'
+          red_sha=$(git rev-parse HEAD)
+          mapfile -t delta < <(git diff --name-only "$FEATURE_SHA"...HEAD | sort)
+          test "${#delta[@]}" -eq 4
+          diff -u <(printf '%s\n' "${paths[@]}" | sort) \
+            <(printf '%s\n' "${delta[@]}")
+          git push origin HEAD:"refs/heads/$red_branch"
+          printf 'red_branch=%s\nred_sha=%s\n' "$red_branch" "$red_sha" \
+            | tee -a "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: merge-readiness-r4-rebase-evidence
+          path: /tmp/merge-readiness-red-r4-ast.json
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Publish durable status and close without merge
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SELF_PR: ${{ github.event.pull_request.number }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          body=$(cat <<EOF
+          ## Merge Readiness Gate design and RED rebased on R4
+
+          - exact parent: \`${{ steps.identity.outputs.parent_sha }}\`;
+          - R4 feature branch: \`${{ steps.feature.outputs.feature_branch }}\`;
+          - feature SHA: \`${{ steps.feature.outputs.feature_sha }}\`;
+          - tests-only RED branch: \`${{ steps.red.outputs.red_branch }}\`;
+          - RED SHA: \`${{ steps.red.outputs.red_sha }}\`;
+          - three test ASTs preserved exactly after Ruff formatting;
+          - product implementation and exports: absent;
+          - merge allowed: false.
+          EOF
+          )
+          gh api "repos/$REPO/issues/166/comments" --raw-field body="$body" >/dev/null
+          gh api --method PATCH "repos/$REPO/pulls/$SELF_PR" -f state=closed >/dev/null
