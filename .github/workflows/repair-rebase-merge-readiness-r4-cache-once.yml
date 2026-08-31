@@ -1,0 +1,47 @@
+name: Repair merge readiness R4 rebase cache once
+
+on:
+  pull_request:
+
+concurrency:
+  group: exact-sha-merge-readiness-r4-rebase-cache-repair
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  repair:
+    if: github.event.pull_request.head.ref == 'bootstrap/rebase-merge-readiness-gate-on-r4-20260831'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: bootstrap/rebase-merge-readiness-gate-on-r4-20260831
+          fetch-depth: 0
+
+      - name: Remove cache lookup that requires main pyproject metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          target='.github/workflows/rebase-merge-readiness-gate-on-r4.yml'
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('.github/workflows/rebase-merge-readiness-gate-on-r4.yml')
+          source = path.read_text(encoding='utf-8')
+          old = "          cache: pip\n"
+          if source.count(old) != 1:
+              raise SystemExit(
+                  f'expected one setup-python cache line, found {source.count(old)}'
+              )
+          path.write_text(source.replace(old, '', 1), encoding='utf-8')
+          PY
+          rm .github/workflows/repair-rebase-merge-readiness-r4-cache-once.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git diff --cached --check
+          git commit -m 'ci: remove invalid merge readiness rebase cache lookup'
+          git push origin HEAD:bootstrap/rebase-merge-readiness-gate-on-r4-20260831
