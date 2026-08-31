@@ -1,0 +1,371 @@
+name: Qualify memory policy dataset v0 RED v2
+
+on:
+  push:
+    branches:
+      - bootstrap/qualify-memory-policy-dataset-red-v2-20260831
+  workflow_dispatch:
+
+concurrency:
+  group: memory-policy-dataset-v0-red-v2-20260831
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  qualify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: tdd/memory-policy-dataset-v0-red-v2-20260831
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install exact qualification toolchain
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e '.[dev]'
+          python -m pip install 'ruff==0.16.4'
+          ruff --version
+
+      - name: Resolve exact main base and RED-v1 parent
+        id: identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*'
+          git show \
+            origin/evidence/m-head-main-postmerge-checkpoint-20260831:evidence/m-head-main-postmerge-checkpoint-20260831.json \
+            > /tmp/main-checkpoint.json
+          base_sha=$(jq -r '.merge.main_merge_sha' /tmp/main-checkpoint.json)
+          test "$(git rev-parse origin/main)" = "$base_sha"
+          red_v1_sha=$(git rev-parse HEAD)
+          test "$(git merge-base "$base_sha" "$red_v1_sha")" = "$base_sha"
+          printf 'base_sha=%s\nred_v1_sha=%s\n' "$base_sha" "$red_v1_sha" | tee -a "$GITHUB_OUTPUT"
+
+      - name: Correct only duplicate candidate ranks in the threshold-neighborhood fixture
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from __future__ import annotations
+
+          from pathlib import Path
+
+          path = Path('tests/test_memory_policy_dataset_properties.py')
+          source = path.read_text(encoding='utf-8')
+          replacements = (
+              (
+                  '''        observation(\n            0,\n            0,\n            credit_confidence_lower_bound=0.02,''',
+                  '''        observation(\n            0,\n            0,\n            original_rank=0,\n            credit_confidence_lower_bound=0.02,''',
+              ),
+              (
+                  '''        observation(\n            1,\n            0,\n            credit_confidence_lower_bound=0.019999,''',
+                  '''        observation(\n            1,\n            0,\n            original_rank=1,\n            credit_confidence_lower_bound=0.019999,''',
+              ),
+              (
+                  '''        observation(\n            2,\n            2,\n            credit_confidence_lower_bound=-0.04,''',
+                  '''        observation(\n            2,\n            2,\n            original_rank=0,\n            credit_confidence_lower_bound=-0.04,''',
+              ),
+              (
+                  '''        observation(\n            3,\n            2,\n            credit_confidence_lower_bound=-0.04,''',
+                  '''        observation(\n            3,\n            2,\n            original_rank=1,\n            credit_confidence_lower_bound=-0.04,''',
+              ),
+              (
+                  '''        observation(\n            4,\n            1,\n            credit_confidence_lower_bound=-0.01,''',
+                  '''        observation(\n            4,\n            1,\n            original_rank=0,\n            credit_confidence_lower_bound=-0.01,''',
+              ),
+              (
+                  '''        observation(\n            5,\n            1,\n            credit_confidence_lower_bound=-0.010001,''',
+                  '''        observation(\n            5,\n            1,\n            original_rank=1,\n            credit_confidence_lower_bound=-0.010001,''',
+              ),
+          )
+          for old, new in replacements:
+              old_count = source.count(old)
+              new_count = source.count(new)
+              if old_count == 1 and new_count == 0:
+                  source = source.replace(old, new, 1)
+              elif old_count == 0 and new_count == 1:
+                  continue
+              else:
+                  raise SystemExit(
+                      f'fixture replacement ambiguous: old={old_count} new={new_count}'
+                  )
+          path.write_text(source, encoding='utf-8')
+
+          document = Path('docs/memory-policy-dataset-v0-red.md')
+          text = document.read_text(encoding='utf-8')
+          text = text.replace(
+              '# Memory Policy Dataset v0 — TDD RED Evidence',
+              '# Memory Policy Dataset v0 — TDD RED v2 Evidence',
+              1,
+          )
+          text = text.replace(
+              '**TDD branch:** `tdd/memory-policy-dataset-v0-red-20260831`',
+              '**TDD branch:** `tdd/memory-policy-dataset-v0-red-v2-20260831`',
+              1,
+          )
+          section = '''
+
+          ## Fixture correction
+
+          RED v2 preserves the complete accepted contract and corrects one internally invalid generated-boundary fixture from RED v1. The six candidates used by `test_threshold_and_split_boundary_neighborhoods` now have ranks `0` and `1` within each two-candidate trace instead of duplicate rank `0`. This makes the fixture satisfy the explicit per-trace unique-rank invariant. No test name, assertion, expected label, split boundary, threshold value, generated-trace count, privacy boundary, or public API expectation changes.
+          '''
+          section = '\n'.join(
+              line[10:] if line.startswith('          ') else line
+              for line in section.splitlines()
+          ) + '\n'
+          if '## Fixture correction' not in text:
+              text += section
+          document.write_text(text, encoding='utf-8')
+          PY
+
+      - name: Normalize and prove the corrected RED source
+        shell: bash
+        run: |
+          set -euo pipefail
+          files=(
+            tests/test_memory_policy_dataset.py
+            tests/test_memory_policy_dataset_properties.py
+            tests/test_memory_policy_dataset_public_api.py
+          )
+          ruff check --fix "${files[@]}"
+          ruff format "${files[@]}"
+          ruff check "${files[@]}"
+          ruff format --check "${files[@]}"
+          python -m py_compile "${files[@]}"
+          git diff --check
+          mapfile -t modified < <(git diff --name-only | sort)
+          expected=(
+            docs/memory-policy-dataset-v0-red.md
+            tests/test_memory_policy_dataset_properties.py
+          )
+          test "${#modified[@]}" -eq "${#expected[@]}"
+          diff -u <(printf '%s\n' "${expected[@]}" | sort) <(printf '%s\n' "${modified[@]}")
+          for marker in '# noqa' 'pytest.mark.skip' 'pytest.mark.xfail' 'NotImplementedError'; do
+            if grep -RFn "$marker" "${files[@]}"; then
+              echo "forbidden RED weakening marker: $marker" >&2
+              exit 1
+            fi
+          done
+
+      - name: Prove assertions and test inventory are unchanged from RED v1
+        env:
+          RED_V1_SHA: ${{ steps.identity.outputs.red_v1_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --exit-code "$RED_V1_SHA" -- \
+            tests/test_memory_policy_dataset.py \
+            tests/test_memory_policy_dataset_public_api.py
+          python - <<'PY'
+          from __future__ import annotations
+
+          import ast
+          import os
+          import subprocess
+          from pathlib import Path
+
+          path = Path('tests/test_memory_policy_dataset_properties.py')
+          before_source = subprocess.check_output(
+              ('git', 'show', f'{os.environ["RED_V1_SHA"]}:{path.as_posix()}'),
+              text=True,
+          )
+          after_source = path.read_text(encoding='utf-8')
+          before = ast.parse(before_source, filename=str(path))
+          after = ast.parse(after_source, filename=str(path))
+
+          def test_names(tree: ast.Module) -> tuple[str, ...]:
+              return tuple(
+                  node.name
+                  for node in tree.body
+                  if isinstance(node, ast.FunctionDef)
+                  and node.name.startswith('test_')
+              )
+
+          def assertion_asts(tree: ast.Module) -> tuple[str, ...]:
+              return tuple(
+                  ast.dump(node, annotate_fields=True, include_attributes=False)
+                  for node in ast.walk(tree)
+                  if isinstance(node, ast.Assert)
+              )
+
+          if test_names(before) != test_names(after):
+              raise SystemExit('property-test inventory changed')
+          if assertion_asts(before) != assertion_asts(after):
+              raise SystemExit('property-test assertions changed')
+          if before_source.count('range(5_000)') != 1:
+              raise SystemExit('RED v1 generated-trace contract differs')
+          if after_source.count('range(5_000)') != 1:
+              raise SystemExit('RED v2 generated-trace contract differs')
+          if after_source.count('original_rank=0') < 3:
+              raise SystemExit('corrected rank-zero fixtures are absent')
+          if after_source.count('original_rank=1') < 3:
+              raise SystemExit('corrected rank-one fixtures are absent')
+          PY
+
+      - name: Prove every test independently reaches only module absence
+        shell: bash
+        env:
+          BASE_SHA: ${{ steps.identity.outputs.base_sha }}
+        run: |
+          set -euo pipefail
+          root="$RUNNER_TEMP/memory-policy-dataset-red-v2"
+          rm -rf "$root"
+          git worktree add --detach "$root" "$BASE_SHA"
+          mkdir -p "$root/tests" "$root/docs"
+          files=(
+            tests/test_memory_policy_dataset.py
+            tests/test_memory_policy_dataset_properties.py
+            tests/test_memory_policy_dataset_public_api.py
+          )
+          for file in "${files[@]}"; do cp "$file" "$root/$file"; done
+          cp docs/memory-policy-dataset-v0-red.md "$root/docs/"
+          cd "$root"
+          test ! -e src/nextgen_memory/memory_policy_dataset.py
+          if grep -F 'memory_policy_dataset' src/nextgen_memory/__init__.py; then
+            echo 'immutable base unexpectedly exports memory_policy_dataset' >&2
+            exit 1
+          fi
+          for file in "${files[@]}"; do
+            output="/tmp/$(basename "$file" .py)-red-v2.txt"
+            set +e
+            PYTHONPATH="$PWD/src" python -m pytest --collect-only -q "$file" > "$output" 2>&1
+            rc=$?
+            set -e
+            test "$rc" -ne 0
+            FILE="$file" OUTPUT="$output" python - <<'PY'
+          from __future__ import annotations
+
+          import os
+          import re
+          from pathlib import Path
+
+          file = os.environ['FILE']
+          text = Path(os.environ['OUTPUT']).read_text(
+              encoding='utf-8',
+              errors='replace',
+          )
+          modules = set(
+              re.findall(
+                  r"ModuleNotFoundError: No module named '([^']+)'",
+                  text,
+              )
+          )
+          if modules != {'nextgen_memory.memory_policy_dataset'}:
+              raise SystemExit(
+                  f'{file}: unexpected missing-module set: {sorted(modules)!r}'
+              )
+          for marker in (
+              'SyntaxError',
+              'IndentationError',
+              'NameError',
+              'ERROR at setup',
+              'fixture ',
+          ):
+              if marker in text:
+                  raise SystemExit(f'{file}: unintended RED marker: {marker}')
+          PY
+          done
+
+      - name: Commit immutable RED v2 and prove exact four-path scope
+        id: red
+        shell: bash
+        env:
+          BASE_SHA: ${{ steps.identity.outputs.base_sha }}
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add \
+            docs/memory-policy-dataset-v0-red.md \
+            tests/test_memory_policy_dataset_properties.py
+          git diff --cached --check
+          git commit -m 'test: correct memory policy dataset rank fixture'
+          red_v2_sha=$(git rev-parse HEAD)
+          mapfile -t changed < <(git diff --name-only "$BASE_SHA"...HEAD | sort)
+          expected=(
+            docs/memory-policy-dataset-v0-red.md
+            tests/test_memory_policy_dataset.py
+            tests/test_memory_policy_dataset_properties.py
+            tests/test_memory_policy_dataset_public_api.py
+          )
+          test "${#changed[@]}" -eq "${#expected[@]}"
+          diff -u <(printf '%s\n' "${expected[@]}" | sort) <(printf '%s\n' "${changed[@]}")
+          test -z "$(git diff --name-only "$BASE_SHA"...HEAD -- '.github/workflows/**' 'migrations/**' pyproject.toml 'src/**')"
+          git diff --check "$BASE_SHA"...HEAD
+          git push origin HEAD:tdd/memory-policy-dataset-v0-red-v2-20260831
+          echo "red_v2_sha=$red_v2_sha" >> "$GITHUB_OUTPUT"
+          echo "short=${red_v2_sha:0:8}" >> "$GITHUB_OUTPUT"
+
+      - name: Publish immutable RED v2 qualification evidence
+        id: publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASE_SHA: ${{ steps.identity.outputs.base_sha }}
+          RED_V1_SHA: ${{ steps.identity.outputs.red_v1_sha }}
+          RED_V2_SHA: ${{ steps.red.outputs.red_v2_sha }}
+          SHORT: ${{ steps.red.outputs.short }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          jq -n \
+            --arg schema 'm-head-memory-policy-dataset-red-v2' \
+            --arg status 'tdd_red_v2_accepted_unmerged' \
+            --arg repository '${{ github.repository }}' \
+            --arg base_sha "$BASE_SHA" \
+            --arg red_v1_sha "$RED_V1_SHA" \
+            --arg red_v2_sha "$RED_V2_SHA" \
+            --argjson run_id "$GITHUB_RUN_ID" \
+            '{schema:$schema,status:$status,repository:$repository,base:{branch:"main",sha:$base_sha},red:{branch:"tdd/memory-policy-dataset-v0-red-v2-20260831",sha:$red_v2_sha,parent_red_sha:$red_v1_sha,exact_path_count:4,ruff_version:"0.16.4",ruff_clean:true,format_clean:true,syntax_clean:true,individual_collection_proven:true,missing_module_set:["nextgen_memory.memory_policy_dataset"],generated_trace_contract:5000,trajectory_leakage_contract:true,absent_feedback_is_nonnegative:true,duplicate_rank_fixture_corrected:true,test_inventory_unchanged:true,assertion_asts_unchanged:true,tests_weakened:false},verification:{run_id:$run_id,implementation_present:false,package_export_present:false},merge_allowed:false,safety:{merged:false,model_trained:false,production_database_contacted:false,production_migration_applied:false,feedback_written:false,policy_activated:false,release_published:false,stubs_added:false},next_action:"Overlay this exact RED v2 onto the feature branch and implement the pure dataset contract. Require focused/full/generated/audit/wheel verification before candidate publication."}' \
+            > /tmp/red-v2.json
+          branch="evidence/memory-policy-dataset-v0-red-v2-${SHORT}-20260831"
+          path="evidence/memory-policy-dataset-v0-red-v2-${SHORT}-20260831.json"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git fetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*'
+          if git ls-remote --exit-code --heads origin "$branch"; then
+            git switch --detach "origin/$branch"
+            cmp /tmp/red-v2.json "$path"
+          else
+            git switch -C "$branch" "$RED_V2_SHA"
+            mkdir -p evidence
+            cp /tmp/red-v2.json "$path"
+            git add "$path"
+            git diff --cached --check
+            git commit -m 'evidence: qualify memory policy dataset RED v2'
+            git push origin HEAD:"refs/heads/$branch"
+          fi
+          commit=$(git rev-parse HEAD)
+          body=$(cat <<EOF
+          ## Memory Policy Dataset v0 corrected RED v2 accepted
+
+          - exact base main SHA: \`$BASE_SHA\`;
+          - RED v1 parent: \`$RED_V1_SHA\`;
+          - immutable RED v2: \`$RED_V2_SHA\`;
+          - correction: unique ranks `0/1` in each threshold-neighborhood trace;
+          - test inventory and assertion ASTs: unchanged;
+          - Ruff 0.16.4, format, syntax, per-file module-absence collection: green;
+          - generated trace contract: \`5,000\`;
+          - immutable evidence: \`$branch\` at \`$commit\`;
+          - implementation, model training, merge, deployment, migration, feedback, activation, release: none.
+          EOF
+          )
+          gh api "repos/$GITHUB_REPOSITORY/issues/23/comments" --raw-field body="$body" >/dev/null
+          echo "branch=$branch" >> "$GITHUB_OUTPUT"
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: memory-policy-dataset-v0-red-v2
+          path: /tmp/red-v2.json
+          if-no-files-found: error
+          retention-days: 14
