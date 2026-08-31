@@ -600,3 +600,71 @@ def test_primitive_subclasses_are_rejected_before_overridden_behavior() -> None:
     ) as integer_error:
         request(pull_request_number=ExplosiveInteger(172))
     assert integer_error.value.__context__ is None
+
+
+def assert_integrity_rejection(operation: object) -> None:
+    with pytest.raises(ReviewAttestationValidationError, match="integrity") as caught:
+        operation()  # type: ignore[operator]
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
+
+
+def test_request_tampering_before_registration_is_rejected() -> None:
+    registry = InMemoryExactShaReviewAttestationRegistry()
+    review_request = request()
+    original_hash = review_request.content_hash
+    original_id = review_request.id
+    object.__setattr__(review_request, "minimum_approvals", 1)
+    assert review_request.content_hash == original_hash
+    assert review_request.id == original_id
+    assert_integrity_rejection(lambda: registry.register_request(review_request))
+
+
+def test_request_tampering_after_registration_cannot_change_decision() -> None:
+    registry = InMemoryExactShaReviewAttestationRegistry()
+    review_request = registry.register_request(request())
+    approve(registry, review_request, REVIEWER_A, "a")
+    assert registry.decision(review_request.id).state is ReviewAdvisoryState.PENDING
+    object.__setattr__(review_request, "minimum_approvals", 1)
+    assert_integrity_rejection(lambda: registry.decision(review_request.id))
+
+
+def test_reviewer_tampering_is_rejected_before_attestation_identity_is_built() -> None:
+    review_request = request()
+    identity = reviewer(REVIEWER_A)
+    original_hash = identity.content_hash
+    object.__setattr__(identity, "reviewer_key_fingerprint", REVIEWER_B)
+    assert identity.content_hash == original_hash
+    assert_integrity_rejection(lambda: attestation(review_request, reviewer=identity))
+
+
+def test_attestation_tampering_before_record_is_rejected() -> None:
+    registry = InMemoryExactShaReviewAttestationRegistry()
+    review_request = registry.register_request(request(minimum_approvals=1))
+    value = attestation(review_request, suffix="a")
+    original_hash = value.content_hash
+    original_id = value.id
+    object.__setattr__(value, "verdict", ReviewAttestationVerdict.CHANGES_REQUIRED)
+    object.__setattr__(
+        value,
+        "finding_codes",
+        (ReviewFindingCode.CONTRACT_VIOLATION,),
+    )
+    assert value.content_hash == original_hash
+    assert value.id == original_id
+    assert_integrity_rejection(lambda: registry.record_attestation(value))
+    assert registry.attestations(review_request.id) == ()
+
+
+def test_attestation_tampering_after_record_cannot_rewrite_registry_history() -> None:
+    registry = InMemoryExactShaReviewAttestationRegistry()
+    review_request = registry.register_request(request(minimum_approvals=1))
+    value = approve(registry, review_request, REVIEWER_A, "a")
+    assert registry.decision(review_request.id).state is ReviewAdvisoryState.APPROVED
+    object.__setattr__(value, "verdict", ReviewAttestationVerdict.CHANGES_REQUIRED)
+    object.__setattr__(
+        value,
+        "finding_codes",
+        (ReviewFindingCode.CONTRACT_VIOLATION,),
+    )
+    assert_integrity_rejection(lambda: registry.decision(review_request.id))

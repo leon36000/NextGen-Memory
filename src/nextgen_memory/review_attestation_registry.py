@@ -230,6 +230,7 @@ class ReviewerIdentity:
         }
 
     def to_dict(self) -> dict[str, object]:
+        _assert_reviewer_integrity(self)
         return {
             **self._identity_payload(),
             "content_hash": self.content_hash,
@@ -296,6 +297,7 @@ class ExactShaReviewRequest:
 
     @property
     def registry_key(self) -> tuple[str, int, str]:
+        _assert_request_integrity(self)
         return (self.repository, self.pull_request_number, self.candidate_sha)
 
     def _identity_payload(self) -> dict[str, object]:
@@ -315,6 +317,7 @@ class ExactShaReviewRequest:
         }
 
     def to_dict(self) -> dict[str, object]:
+        _assert_request_integrity(self)
         return {
             **self._identity_payload(),
             "content_hash": self.content_hash,
@@ -424,6 +427,7 @@ class ExactShaReviewAttestation:
         }
 
     def to_dict(self) -> dict[str, object]:
+        _assert_attestation_integrity(self)
         return {
             **self._identity_payload(),
             "content_hash": self.content_hash,
@@ -504,6 +508,7 @@ class ReviewAttestationRegistrySummary:
         }
 
     def to_dict(self) -> dict[str, object]:
+        _assert_summary_integrity(self)
         return {
             **self._identity_payload(),
             "content_hash": self.content_hash,
@@ -552,6 +557,7 @@ class ReviewAttestationDecision:
         }
 
     def to_dict(self) -> dict[str, object]:
+        _assert_decision_integrity(self)
         return {
             **self._identity_payload(),
             "content_hash": self.content_hash,
@@ -562,48 +568,319 @@ class ReviewAttestationDecision:
         return _canonical_json(self.to_dict())
 
 
+def _raise_integrity(message: str) -> None:
+    raise ReviewAttestationValidationError(message)
+
+
+def _exact_sha256(value: object) -> bool:
+    return type(value) is str and _SHA256_RE.fullmatch(value) is not None
+
+
+def _exact_git_sha(value: object) -> bool:
+    return type(value) is str and _GIT_SHA_RE.fullmatch(value) is not None
+
+
+def _assert_reviewer_integrity(value: ReviewerIdentity) -> None:
+    if type(value) is not ReviewerIdentity:
+        _raise_integrity("reviewer integrity check failed")
+    if type(value.model) is not ReviewModel:
+        _raise_integrity("reviewer integrity check failed")
+    if not _exact_sha256(value.reviewer_key_fingerprint):
+        _raise_integrity("reviewer integrity check failed")
+    if not _exact_sha256(value.content_hash):
+        _raise_integrity("reviewer integrity check failed")
+    expected_hash = _hash_payload(
+        {
+            "kind": "reviewer_identity",
+            "model": value.model.value,
+            "reviewer_key_fingerprint": value.reviewer_key_fingerprint,
+            "schema": _SCHEMA,
+        }
+    )
+    if value.content_hash != expected_hash:
+        _raise_integrity("reviewer integrity check failed")
+
+
+def _assert_request_integrity(value: ExactShaReviewRequest) -> None:
+    if type(value) is not ExactShaReviewRequest:
+        _raise_integrity("review request integrity check failed")
+    if (
+        type(value.repository) is not str
+        or value.repository != value.repository.strip()
+        or not value.repository
+        or len(value.repository) > _MAX_REPOSITORY_LENGTH
+        or _REPOSITORY_RE.fullmatch(value.repository) is None
+    ):
+        _raise_integrity("review request integrity check failed")
+    if type(value.pull_request_number) is not int or value.pull_request_number <= 0:
+        _raise_integrity("review request integrity check failed")
+    if not _exact_git_sha(value.base_sha) or not _exact_git_sha(value.candidate_sha):
+        _raise_integrity("review request integrity check failed")
+    if value.base_sha == value.candidate_sha:
+        _raise_integrity("review request integrity check failed")
+    if not all(
+        _exact_sha256(item)
+        for item in (
+            value.diff_sha256,
+            value.review_packet_sha256,
+            value.acceptance_criteria_sha256,
+        )
+    ):
+        _raise_integrity("review request integrity check failed")
+    if type(value.required_model) is not ReviewModel:
+        _raise_integrity("review request integrity check failed")
+    trusted = value.trusted_reviewer_fingerprints
+    if (
+        type(trusted) is not tuple
+        or not trusted
+        or len(trusted) > _MAX_TRUSTED_REVIEWERS
+        or any(not _exact_sha256(item) for item in trusted)
+        or len(set(trusted)) != len(trusted)
+        or tuple(sorted(trusted)) != trusted
+    ):
+        _raise_integrity("review request integrity check failed")
+    if (
+        type(value.minimum_approvals) is not int
+        or value.minimum_approvals <= 0
+        or value.minimum_approvals > len(trusted)
+    ):
+        _raise_integrity("review request integrity check failed")
+    if not _exact_sha256(value.content_hash) or type(value.id) is not UUID:
+        _raise_integrity("review request integrity check failed")
+    payload = {
+        "acceptance_criteria_sha256": value.acceptance_criteria_sha256,
+        "base_sha": value.base_sha,
+        "candidate_sha": value.candidate_sha,
+        "diff_sha256": value.diff_sha256,
+        "kind": "review_request",
+        "minimum_approvals": value.minimum_approvals,
+        "pull_request_number": value.pull_request_number,
+        "repository": value.repository,
+        "required_model": value.required_model.value,
+        "review_packet_sha256": value.review_packet_sha256,
+        "schema": _SCHEMA,
+        "trusted_reviewer_fingerprints": list(trusted),
+    }
+    expected_hash = _hash_payload(payload)
+    expected_id = _stable_uuid("exact-sha-review-request", expected_hash)
+    if value.content_hash != expected_hash or value.id != expected_id:
+        _raise_integrity("review request integrity check failed")
+
+
+def _assert_attestation_integrity(value: ExactShaReviewAttestation) -> None:
+    if type(value) is not ExactShaReviewAttestation:
+        _raise_integrity("review attestation integrity check failed")
+    if type(value.request_id) is not UUID or not _exact_sha256(value.request_content_hash):
+        _raise_integrity("review attestation integrity check failed")
+    if (
+        type(value.repository) is not str
+        or value.repository != value.repository.strip()
+        or not value.repository
+        or len(value.repository) > _MAX_REPOSITORY_LENGTH
+        or _REPOSITORY_RE.fullmatch(value.repository) is None
+    ):
+        _raise_integrity("review attestation integrity check failed")
+    if type(value.pull_request_number) is not int or value.pull_request_number <= 0:
+        _raise_integrity("review attestation integrity check failed")
+    if not _exact_git_sha(value.candidate_sha):
+        _raise_integrity("review attestation integrity check failed")
+    _assert_reviewer_integrity(value.reviewer)
+    if type(value.verdict) is not ReviewAttestationVerdict:
+        _raise_integrity("review attestation integrity check failed")
+    findings = value.finding_codes
+    if (
+        type(findings) is not tuple
+        or len(findings) > _MAX_FINDINGS
+        or any(type(item) is not ReviewFindingCode for item in findings)
+        or len(set(findings)) != len(findings)
+        or tuple(sorted(findings, key=lambda item: item.value)) != findings
+    ):
+        _raise_integrity("review attestation integrity check failed")
+    defect_findings = _DEFECT_FINDINGS.intersection(findings)
+    evidence_findings = _EVIDENCE_FINDINGS.intersection(findings)
+    if value.verdict is ReviewAttestationVerdict.APPROVE and findings:
+        _raise_integrity("review attestation integrity check failed")
+    if value.verdict is ReviewAttestationVerdict.CHANGES_REQUIRED and not defect_findings:
+        _raise_integrity("review attestation integrity check failed")
+    if value.verdict is ReviewAttestationVerdict.BLOCKED_BY_EVIDENCE and (
+        not evidence_findings or defect_findings
+    ):
+        _raise_integrity("review attestation integrity check failed")
+    evidence = value.evidence_artifact_sha256s
+    if (
+        type(evidence) is not tuple
+        or not evidence
+        or len(evidence) > _MAX_EVIDENCE_ARTIFACTS
+        or any(not _exact_sha256(item) for item in evidence)
+        or len(set(evidence)) != len(evidence)
+        or tuple(sorted(evidence)) != evidence
+    ):
+        _raise_integrity("review attestation integrity check failed")
+    if not _exact_sha256(value.review_artifact_sha256) or not _exact_sha256(
+        value.authenticated_envelope_sha256
+    ):
+        _raise_integrity("review attestation integrity check failed")
+    if not _exact_sha256(value.content_hash) or type(value.id) is not UUID:
+        _raise_integrity("review attestation integrity check failed")
+    payload = {
+        "authenticated_envelope_sha256": value.authenticated_envelope_sha256,
+        "candidate_sha": value.candidate_sha,
+        "evidence_artifact_sha256s": list(evidence),
+        "finding_codes": [item.value for item in findings],
+        "kind": "review_attestation",
+        "pull_request_number": value.pull_request_number,
+        "repository": value.repository,
+        "request_content_hash": value.request_content_hash,
+        "request_id": str(value.request_id),
+        "review_artifact_sha256": value.review_artifact_sha256,
+        "reviewer": value.reviewer.to_dict(),
+        "schema": _SCHEMA,
+        "verdict": value.verdict.value,
+    }
+    expected_hash = _hash_payload(payload)
+    expected_id = _stable_uuid("exact-sha-review-attestation", expected_hash)
+    if value.content_hash != expected_hash or value.id != expected_id:
+        _raise_integrity("review attestation integrity check failed")
+
+
+def _assert_summary_integrity(value: ReviewAttestationRegistrySummary) -> None:
+    if type(value) is not ReviewAttestationRegistrySummary:
+        _raise_integrity("registry summary integrity check failed")
+    if type(value.request_id) is not UUID or not _exact_sha256(value.request_content_hash):
+        _raise_integrity("registry summary integrity check failed")
+    ids = value.attestation_ids
+    if (
+        type(ids) is not tuple
+        or any(type(item) is not UUID for item in ids)
+        or len(set(ids)) != len(ids)
+    ):
+        _raise_integrity("registry summary integrity check failed")
+    counts = (
+        value.registered_attestation_count,
+        value.approval_count,
+        value.changes_required_count,
+        value.evidence_blocked_count,
+        value.distinct_reviewer_count,
+        value.missing_approval_count,
+    )
+    if any(type(item) is not int or item < 0 for item in counts):
+        _raise_integrity("registry summary integrity check failed")
+    if len(ids) != value.registered_attestation_count:
+        _raise_integrity("registry summary integrity check failed")
+    if (
+        value.approval_count + value.changes_required_count + value.evidence_blocked_count
+        != value.registered_attestation_count
+        or value.distinct_reviewer_count != value.registered_attestation_count
+    ):
+        _raise_integrity("registry summary integrity check failed")
+    if not _exact_sha256(value.content_hash):
+        _raise_integrity("registry summary integrity check failed")
+    expected_hash = _hash_payload(value._identity_payload())
+    if value.content_hash != expected_hash:
+        _raise_integrity("registry summary integrity check failed")
+
+
+def _assert_decision_integrity(value: ReviewAttestationDecision) -> None:
+    if type(value) is not ReviewAttestationDecision:
+        _raise_integrity("review decision integrity check failed")
+    if (
+        type(value.request_id) is not UUID
+        or not _exact_sha256(value.request_content_hash)
+        or type(value.state) is not ReviewAdvisoryState
+        or not _exact_sha256(value.summary_content_hash)
+        or value.advisory_only is not True
+        or not _exact_sha256(value.content_hash)
+        or type(value.id) is not UUID
+    ):
+        _raise_integrity("review decision integrity check failed")
+    expected_hash = _hash_payload(value._identity_payload())
+    expected_id = _stable_uuid("review-attestation-decision", expected_hash)
+    if value.content_hash != expected_hash or value.id != expected_id:
+        _raise_integrity("review decision integrity check failed")
+
+
 class InMemoryExactShaReviewAttestationRegistry:
     """In-memory immutable-key registry with no I/O or activation surface."""
 
     __slots__ = (
         "_attestations_by_request",
         "_request_ids_by_key",
+        "_request_snapshots",
         "_requests_by_id",
     )
 
     def __init__(self) -> None:
         self._requests_by_id: dict[UUID, ExactShaReviewRequest] = {}
         self._request_ids_by_key: dict[tuple[str, int, str], UUID] = {}
-        self._attestations_by_request: dict[UUID, dict[str, ExactShaReviewAttestation]] = {}
+        self._request_snapshots: dict[UUID, tuple[tuple[str, int, str], str]] = {}
+        self._attestations_by_request: dict[
+            UUID, dict[str, tuple[UUID, str, ExactShaReviewAttestation]]
+        ] = {}
 
     def register_request(self, request: ExactShaReviewRequest) -> ExactShaReviewRequest:
         if type(request) is not ExactShaReviewRequest:
             raise ReviewAttestationValidationError("request must be an exact ExactShaReviewRequest")
-        existing_id = self._request_ids_by_key.get(request.registry_key)
+        _assert_request_integrity(request)
+        registry_key = (request.repository, request.pull_request_number, request.candidate_sha)
+        existing_id = self._request_ids_by_key.get(registry_key)
         if existing_id is not None:
-            existing = self._requests_by_id[existing_id]
+            existing = self._require_registered_request(existing_id)
             if existing == request:
                 return existing
             raise ReviewAttestationConflictError("review request key conflict")
         existing_by_id = self._requests_by_id.get(request.id)
         if existing_by_id is not None:
+            existing_by_id = self._require_registered_request(request.id)
             if existing_by_id == request:
                 return existing_by_id
             raise ReviewAttestationConflictError("review request identity conflict")
         self._requests_by_id[request.id] = request
-        self._request_ids_by_key[request.registry_key] = request.id
+        self._request_ids_by_key[registry_key] = request.id
+        self._request_snapshots[request.id] = (registry_key, request.content_hash)
         self._attestations_by_request[request.id] = {}
         return request
 
     def _require_registered_request(self, request_id: UUID) -> ExactShaReviewRequest:
         normalized_id = _require_uuid("request id", request_id)
         try:
-            return self._requests_by_id[normalized_id]
+            request = self._requests_by_id[normalized_id]
         except KeyError as exc:
             raise ReviewAttestationStateError("review request is not registered") from exc
+        _assert_request_integrity(request)
+        registry_key = (request.repository, request.pull_request_number, request.candidate_sha)
+        snapshot = self._request_snapshots.get(normalized_id)
+        if (
+            request.id != normalized_id
+            or snapshot != (registry_key, request.content_hash)
+            or self._request_ids_by_key.get(registry_key) != normalized_id
+            or normalized_id not in self._attestations_by_request
+        ):
+            _raise_integrity("review request registry integrity check failed")
+        return request
 
     def get_request(self, request_id: UUID) -> ExactShaReviewRequest:
         return self._require_registered_request(request_id)
+
+    def _validate_stored_attestation(
+        self,
+        request: ExactShaReviewRequest,
+        fingerprint: str,
+        stored: tuple[UUID, str, ExactShaReviewAttestation],
+    ) -> ExactShaReviewAttestation:
+        stored_id, stored_hash, attestation = stored
+        _assert_attestation_integrity(attestation)
+        if (
+            attestation.id != stored_id
+            or attestation.content_hash != stored_hash
+            or attestation.reviewer.reviewer_key_fingerprint != fingerprint
+            or attestation.request_id != request.id
+            or attestation.request_content_hash != request.content_hash
+            or attestation.repository != request.repository
+            or attestation.pull_request_number != request.pull_request_number
+            or attestation.candidate_sha != request.candidate_sha
+        ):
+            _raise_integrity("stored review attestation integrity check failed")
+        return attestation
 
     def record_attestation(
         self, attestation: ExactShaReviewAttestation
@@ -612,6 +889,7 @@ class InMemoryExactShaReviewAttestationRegistry:
             raise ReviewAttestationValidationError(
                 "attestation must be an exact ExactShaReviewAttestation"
             )
+        _assert_attestation_integrity(attestation)
         request = self._require_registered_request(attestation.request_id)
         if attestation.request_content_hash != request.content_hash:
             raise ReviewAttestationValidationError(
@@ -631,19 +909,28 @@ class InMemoryExactShaReviewAttestationRegistry:
         if fingerprint not in request.trusted_reviewer_fingerprints:
             raise ReviewAttestationValidationError("reviewer is not a trusted reviewer")
         reviewer_attestations = self._attestations_by_request[request.id]
-        existing = reviewer_attestations.get(fingerprint)
-        if existing is not None:
+        existing_record = reviewer_attestations.get(fingerprint)
+        if existing_record is not None:
+            existing = self._validate_stored_attestation(request, fingerprint, existing_record)
             if existing == attestation:
                 return existing
             raise ReviewAttestationConflictError("reviewer attestation conflict")
-        reviewer_attestations[fingerprint] = attestation
+        reviewer_attestations[fingerprint] = (
+            attestation.id,
+            attestation.content_hash,
+            attestation,
+        )
         return attestation
 
     def attestations(self, request_id: UUID) -> tuple[ExactShaReviewAttestation, ...]:
         request = self._require_registered_request(request_id)
+        values = tuple(
+            self._validate_stored_attestation(request, fingerprint, stored)
+            for fingerprint, stored in self._attestations_by_request[request.id].items()
+        )
         return tuple(
             sorted(
-                self._attestations_by_request[request.id].values(),
+                values,
                 key=lambda item: (
                     item.reviewer.reviewer_key_fingerprint,
                     str(item.id),

@@ -435,3 +435,14 @@ Before review, an independent exact-SHA Python 3.12/3.13 matrix must prove:
 - immutable evidence and checkpoint branches.
 
 A genuine blind GPT-5.6 Sol review must return `APPROVE` for the unchanged immutable candidate SHA before merge. Any SHA movement invalidates all evidence. `APPROVED` from this registry never authorizes merge, migration, deployment, feedback, policy activation, or release.
+
+
+### Post-construction tamper model
+
+Frozen slotted dataclasses provide ergonomic immutability, not hostile-code
+integrity. R4 therefore treats derived identity as a continuously checked
+invariant. Public serialization recomputes canonical identity, registry lookups
+reconcile request snapshots, and stored attestations are reconciled against
+separate immutable fingerprint/UUID/content-hash snapshots before any summary or
+decision is calculated. Post-init mutation is a bounded validation failure and
+never an implicit state transition.

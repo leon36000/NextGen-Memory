@@ -100,3 +100,15 @@ ReviewFindingCode
 ReviewerIdentity
 ReviewModel
 ```
+
+
+## Post-construction identity integrity
+
+`frozen=True` is not treated as a security boundary. Every reviewer, request,
+attestation, summary, and decision revalidates its canonical material against its
+derived SHA-256/UUID5 before serialization or registry use. The registry stores
+immutable request-key/content-hash snapshots and attestation
+reviewer-fingerprint/UUID/content-hash snapshots separately from exposed object
+references. A caller that uses Python's `object.__setattr__` escape hatch can
+therefore corrupt its local object, but the next registry or serialization
+operation fails closed instead of rewriting prior review history.
