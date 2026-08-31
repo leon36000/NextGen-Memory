@@ -1,0 +1,179 @@
+name: Qualify exact-SHA merge readiness gate RED
+
+on:
+  pull_request:
+
+concurrency:
+  group: exact-sha-merge-readiness-red
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+jobs:
+  qualify-red:
+    if: github.event.pull_request.head.ref == 'bootstrap/qualify-exact-sha-merge-readiness-red-20260830'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: tdd/exact-sha-merge-readiness-gate-v0-red-20260830
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install project development tools
+        run: python -m pip install -e '.[dev]'
+
+      - name: Prove immutable ancestry and exact RED scope
+        id: identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          base_sha='f4d9388c14dd1f746f904b3724767f73f82786fd'
+          design_sha='b8f6f4834502749005d97485e205f5b9615fadeb'
+          red_sha='d86e429d6b4cf104817297b5658d799858f82506'
+          test "$(git rev-parse HEAD)" = "$red_sha"
+          test "$(git merge-base "$base_sha" "$design_sha")" = "$base_sha"
+          test "$(git merge-base "$design_sha" "$red_sha")" = "$design_sha"
+
+          mapfile -t red_delta < <(git diff --name-only "$design_sha"..."$red_sha" | sort)
+          expected_red=(
+            docs/exact-sha-merge-readiness-gate-v0-red.md
+            tests/test_merge_readiness_gate.py
+            tests/test_merge_readiness_gate_properties.py
+            tests/test_merge_readiness_gate_public_api.py
+          )
+          test "${#red_delta[@]}" -eq "${#expected_red[@]}"
+          diff -u <(printf '%s\n' "${expected_red[@]}" | sort) \
+            <(printf '%s\n' "${red_delta[@]}")
+
+          mapfile -t full_delta < <(git diff --name-only "$base_sha"..."$red_sha" | sort)
+          expected_full=(
+            docs/exact-sha-merge-readiness-gate-v0-red.md
+            docs/superpowers/plans/2026-08-30-exact-sha-merge-readiness-gate-v0.md
+            docs/superpowers/specs/2026-08-30-exact-sha-merge-readiness-gate-v0-design.md
+            tests/test_merge_readiness_gate.py
+            tests/test_merge_readiness_gate_properties.py
+            tests/test_merge_readiness_gate_public_api.py
+          )
+          test "${#full_delta[@]}" -eq "${#expected_full[@]}"
+          diff -u <(printf '%s\n' "${expected_full[@]}" | sort) \
+            <(printf '%s\n' "${full_delta[@]}")
+          test -z "$(git diff --name-only "$base_sha"..."$red_sha" -- '.github/workflows/**' 'migrations/**' pyproject.toml 'src/**')"
+          git diff --check "$base_sha"..."$red_sha"
+          printf 'base_sha=%s\ndesign_sha=%s\nred_sha=%s\n' \
+            "$base_sha" "$design_sha" "$red_sha" | tee -a "$GITHUB_OUTPUT"
+
+      - name: Prove Ruff, formatting, and syntax are clean
+        shell: bash
+        run: |
+          set -euo pipefail
+          files=(
+            tests/test_merge_readiness_gate.py
+            tests/test_merge_readiness_gate_properties.py
+            tests/test_merge_readiness_gate_public_api.py
+          )
+          ruff check "${files[@]}"
+          ruff format --check "${files[@]}"
+          python -m py_compile "${files[@]}"
+
+      - name: Prove each test independently reaches only the intended missing module
+        shell: bash
+        env:
+          BASE_SHA: ${{ steps.identity.outputs.base_sha }}
+        run: |
+          set -euo pipefail
+          red_root="$RUNNER_TEMP/exact-sha-merge-readiness-red"
+          rm -rf "$red_root"
+          git worktree add --detach "$red_root" "$BASE_SHA"
+          mkdir -p "$red_root/tests" "$red_root/docs"
+          files=(
+            tests/test_merge_readiness_gate.py
+            tests/test_merge_readiness_gate_properties.py
+            tests/test_merge_readiness_gate_public_api.py
+          )
+          for file in "${files[@]}"; do
+            cp "$file" "$red_root/$file"
+          done
+          cp docs/exact-sha-merge-readiness-gate-v0-red.md "$red_root/docs/"
+          cd "$red_root"
+          test ! -e src/nextgen_memory/merge_readiness_gate.py
+          if grep -F 'merge_readiness_gate' src/nextgen_memory/__init__.py; then
+            echo 'base package root unexpectedly exports the absent module' >&2
+            exit 1
+          fi
+
+          for file in "${files[@]}"; do
+            output="/tmp/$(basename "$file" .py)-merge-readiness-red.txt"
+            set +e
+            PYTHONPATH="$PWD/src" python -m pytest --collect-only -q "$file" \
+              > "$output" 2>&1
+            rc=$?
+            set -e
+            test "$rc" -ne 0
+            FILE="$file" OUTPUT="$output" python - <<'PY'
+          from __future__ import annotations
+
+          import os
+          import re
+          from pathlib import Path
+
+          file = os.environ['FILE']
+          text = Path(os.environ['OUTPUT']).read_text(
+              encoding='utf-8',
+              errors='replace',
+          )
+          modules = set(
+              re.findall(
+                  r"ModuleNotFoundError: No module named '([^']+)'",
+                  text,
+              )
+          )
+          expected = {'nextgen_memory.merge_readiness_gate'}
+          if modules != expected:
+              raise SystemExit(
+                  f'{file}: unexpected missing-module set: {sorted(modules)!r}'
+              )
+          for marker in (
+              'SyntaxError',
+              'IndentationError',
+              'NameError',
+              'ERROR at setup',
+              'fixture ',
+          ):
+              if marker in text:
+                  raise SystemExit(f'{file}: unintended RED marker: {marker}')
+          PY
+          done
+
+      - name: Publish accepted RED status and close transport without merge
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SELF_PR: ${{ github.event.pull_request.number }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          body=$(cat <<EOF
+          ## Exact-SHA Merge Readiness Gate v0 RED accepted
+
+          - immutable product base: `${{ steps.identity.outputs.base_sha }}`;
+          - committed design/plan: `${{ steps.identity.outputs.design_sha }}`;
+          - tests-only RED head: `${{ steps.identity.outputs.red_sha }}`;
+          - design-to-RED surface: four paths;
+          - base-to-RED surface: six paths;
+          - Ruff, formatting, and syntax: clean;
+          - each test independently reaches only `ModuleNotFoundError: nextgen_memory.merge_readiness_gate`;
+          - implementation, package exports, workflows in product scope, migrations, persistence, merge execution, activation, deployment, feedback, and release: absent;
+          - merge allowed: false.
+          EOF
+          )
+          gh api "repos/$REPO/issues/166/comments" --raw-field body="$body" >/dev/null
+          gh api --method PATCH "repos/$REPO/pulls/$SELF_PR" -f state=closed >/dev/null
