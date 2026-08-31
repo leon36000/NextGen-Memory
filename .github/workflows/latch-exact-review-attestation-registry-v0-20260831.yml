@@ -1,0 +1,233 @@
+name: Latch exact review attestation registry v0 canonical state
+
+on:
+  push:
+    branches:
+      - bootstrap/latch-exact-review-attestation-registry-v0-20260831
+  workflow_dispatch:
+
+concurrency:
+  group: exact-review-attestation-registry-v0-canonical-latch-20260831
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: read
+
+jobs:
+  latch:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: candidate/exact-sha-review-attestation-registry-v0-20260824
+          fetch-depth: 0
+
+      - name: Wait for independent verification and review on one exact SHA
+        id: identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*'
+          base_sha='f4f3aca9759b5b7a60691017c2211152c011ea92'
+          candidate_sha=$(git rev-parse HEAD)
+          short=${candidate_sha:0:8}
+          green_branch="evidence/exact-sha-review-attestation-registry-v0-${short}-green-20260831"
+          green_path="evidence/exact-sha-review-attestation-registry-v0-${short}-green-20260831.json"
+          checkpoint_branch="evidence/exact-sha-review-attestation-registry-v0-${short}-checkpoint-20260831"
+          checkpoint_path="evidence/exact-sha-review-attestation-registry-v0-${short}-checkpoint-20260831.json"
+          review_branch="evidence/exact-sha-review-attestation-registry-v0-${short}-gpt56pro-review-20260831"
+          review_path="evidence/exact-sha-review-attestation-registry-v0-${short}-gpt56pro-review-20260831.json"
+          found=false
+          for attempt in $(seq 1 120); do
+            git fetch --no-tags origin \
+              "+refs/heads/$green_branch:refs/remotes/origin/$green_branch" \
+              "+refs/heads/$checkpoint_branch:refs/remotes/origin/$checkpoint_branch" \
+              "+refs/heads/$review_branch:refs/remotes/origin/$review_branch" \
+              2>/dev/null || true
+            if git show "origin/$green_branch:$green_path" >/tmp/green.json 2>/dev/null \
+              && git show "origin/$checkpoint_branch:$checkpoint_path" >/tmp/checkpoint.json 2>/dev/null \
+              && git show "origin/$review_branch:$review_path" >/tmp/review.json 2>/dev/null; then
+              found=true
+              break
+            fi
+            printf 'attempt=%s candidate=%s latch=pending\n' "$attempt" "$candidate_sha"
+            sleep 15
+          done
+          test "$found" = true
+          test "$(git merge-base "$base_sha" "$candidate_sha")" = "$base_sha"
+          jq -e --arg sha "$candidate_sha" '.status == "green_review_pending_unmerged" and .candidate.sha == $sha' /tmp/green.json >/dev/null
+          jq -e --arg sha "$candidate_sha" '.status == "approved_review_pending_merge_authorization" and .candidate_sha == $sha and .verdict == "APPROVE" and .merge_authorized == false' /tmp/review.json >/dev/null
+          test "$(jq -r '.candidate.sha' /tmp/checkpoint.json)" = "$candidate_sha"
+          test "$(jq -r '.evidence_sha256' /tmp/checkpoint.json)" = "$(sha256sum /tmp/green.json | awk '{print $1}')"
+          test "$(jq -r '.green_evidence_sha256' /tmp/review.json)" = "$(sha256sum /tmp/green.json | awk '{print $1}')"
+          green_commit=$(git rev-parse "origin/$green_branch")
+          checkpoint_commit=$(git rev-parse "origin/$checkpoint_branch")
+          review_commit=$(git rev-parse "origin/$review_branch")
+          printf 'base_sha=%s\ncandidate_sha=%s\nshort=%s\ngreen_branch=%s\ngreen_commit=%s\ncheckpoint_branch=%s\ncheckpoint_commit=%s\nreview_branch=%s\nreview_commit=%s\n' \
+            "$base_sha" "$candidate_sha" "$short" \
+            "$green_branch" "$green_commit" \
+            "$checkpoint_branch" "$checkpoint_commit" \
+            "$review_branch" "$review_commit" \
+            | tee -a "$GITHUB_OUTPUT"
+
+      - name: Resolve the single canonical product PR
+        id: product_pr
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          owner=${GITHUB_REPOSITORY%%/*}
+          pulls=$(gh api --method GET "repos/$GITHUB_REPOSITORY/pulls" \
+            -f state=open \
+            -f head="$owner:candidate/exact-sha-review-attestation-registry-v0-20260824" \
+            -f per_page=100)
+          test "$(printf '%s' "$pulls" | jq 'length')" -eq 1
+          pr=$(printf '%s' "$pulls" | jq -r '.[0].number')
+          test "$(printf '%s' "$pulls" | jq -r '.[0].draft')" = true
+          test "$(printf '%s' "$pulls" | jq -r '.[0].head.sha')" = '${{ steps.identity.outputs.candidate_sha }}'
+          test "$(printf '%s' "$pulls" | jq -r '.[0].base.ref')" = 'candidate/advisory-policy-promotion-gate-v0-20260824'
+          echo "number=$pr" >> "$GITHUB_OUTPUT"
+
+      - name: Build canonical Git-backed checkpoint
+        shell: bash
+        env:
+          BASE_SHA: ${{ steps.identity.outputs.base_sha }}
+          CANDIDATE_SHA: ${{ steps.identity.outputs.candidate_sha }}
+          PRODUCT_PR: ${{ steps.product_pr.outputs.number }}
+          GREEN_BRANCH: ${{ steps.identity.outputs.green_branch }}
+          GREEN_COMMIT: ${{ steps.identity.outputs.green_commit }}
+          CHECKPOINT_BRANCH: ${{ steps.identity.outputs.checkpoint_branch }}
+          CHECKPOINT_COMMIT: ${{ steps.identity.outputs.checkpoint_commit }}
+          REVIEW_BRANCH: ${{ steps.identity.outputs.review_branch }}
+          REVIEW_COMMIT: ${{ steps.identity.outputs.review_commit }}
+        run: |
+          python - <<'PY'
+          from __future__ import annotations
+
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+
+          green_raw = Path('/tmp/green.json').read_bytes()
+          review_raw = Path('/tmp/review.json').read_bytes()
+          green = json.loads(green_raw)
+          review = json.loads(review_raw)
+          checkpoint = {
+              'checkpoint_key': 'm-head:exact-sha-review-attestation-registry-v0:canonical-approved:20260831',
+              'status': 'green_review_approved_unmerged',
+              'repository': 'leon36000/NextGen-Memory',
+              'base': {
+                  'branch': 'candidate/advisory-policy-promotion-gate-v0-20260824',
+                  'sha': os.environ['BASE_SHA'],
+              },
+              'candidate': {
+                  'branch': 'candidate/exact-sha-review-attestation-registry-v0-20260824',
+                  'sha': os.environ['CANDIDATE_SHA'],
+                  'pull_request': int(os.environ['PRODUCT_PR']),
+                  'exact_path_count': 9,
+              },
+              'verification': green['verification'],
+              'contract': green['contract'],
+              'review': {
+                  'reviewer_runtime': review['reviewer_runtime'],
+                  'verdict': review['verdict'],
+                  'findings': review['findings'],
+                  'adversarial_checks': review['adversarial_checks'],
+                  'merge_authorized': False,
+              },
+              'immutable_evidence': {
+                  'green_branch': os.environ['GREEN_BRANCH'],
+                  'green_commit': os.environ['GREEN_COMMIT'],
+                  'green_sha256': hashlib.sha256(green_raw).hexdigest(),
+                  'checkpoint_branch': os.environ['CHECKPOINT_BRANCH'],
+                  'checkpoint_commit': os.environ['CHECKPOINT_COMMIT'],
+                  'review_branch': os.environ['REVIEW_BRANCH'],
+                  'review_commit': os.environ['REVIEW_COMMIT'],
+                  'review_sha256': hashlib.sha256(review_raw).hexdigest(),
+              },
+              'safety': {
+                  'actual_product_merge_performed': False,
+                  'merged': False,
+                  'production_database_contacted': False,
+                  'production_migration_applied': False,
+                  'production_application_data_written': False,
+                  'feedback_written': False,
+                  'policy_activated': False,
+                  'release_published': False,
+                  'tests_weakened': False,
+                  'stubs_added': False,
+                  'review_fabricated': False,
+              },
+              'merge_allowed': False,
+              'next_action': (
+                  'A separately authorized dependency-aware merge decision may now be considered. '
+                  'Merge must not imply migration, deployment, feedback, activation, or release.'
+              ),
+          }
+          Path('/tmp/canonical.json').write_text(
+              json.dumps(checkpoint, ensure_ascii=False, allow_nan=False, sort_keys=True, separators=(',', ':')) + '\n',
+              encoding='utf-8',
+          )
+          print(Path('/tmp/canonical.json').read_text(encoding='utf-8'), end='')
+          PY
+
+      - name: Publish immutable canonical branch and durable status
+        id: publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE_SHA: ${{ steps.identity.outputs.candidate_sha }}
+          PRODUCT_PR: ${{ steps.product_pr.outputs.number }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          branch='evidence/exact-sha-review-attestation-registry-v0-canonical-approved-20260831'
+          path='evidence/exact-sha-review-attestation-registry-v0-canonical-approved-20260831.json'
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git fetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*'
+          if git ls-remote --exit-code --heads origin "$branch"; then
+            git switch --detach "origin/$branch"
+            cmp /tmp/canonical.json "$path"
+          else
+            git switch -C "$branch" "$CANDIDATE_SHA"
+            mkdir -p evidence
+            cp /tmp/canonical.json "$path"
+            git add "$path"
+            git diff --cached --check
+            git commit -m 'evidence: latch exact review attestation registry v0 canonical state'
+            git push origin HEAD:"refs/heads/$branch"
+          fi
+          commit=$(git rev-parse HEAD)
+          body=$(cat <<EOF
+          ## Exact-SHA Review Attestation Registry v0 canonical latch
+
+          - candidate: \`$CANDIDATE_SHA\`;
+          - product PR: #$PRODUCT_PR;
+          - independent matrix: GREEN;
+          - independent technical review: APPROVE;
+          - canonical evidence: \`$branch\` at \`$commit\`;
+          - product merge performed: false;
+          - merge allowed by this latch: false.
+
+          The component is technically qualified at the exact SHA. A separate dependency-aware merge decision is still required; migration, deployment, feedback, policy activation, and release remain independent operations.
+          EOF
+          )
+          gh api "repos/$GITHUB_REPOSITORY/issues/165/comments" --raw-field body="$body" >/dev/null
+          echo "branch=$branch" >> "$GITHUB_OUTPUT"
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: exact-review-attestation-canonical-latch
+          path: |
+            /tmp/canonical.json
+            /tmp/green.json
+            /tmp/checkpoint.json
+            /tmp/review.json
+          if-no-files-found: error
+          retention-days: 14
