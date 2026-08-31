@@ -4,7 +4,7 @@ on:
   pull_request:
 
 concurrency:
-  group: exact-review-attestation-registry-r2-exact
+  group: exact-review-attestation-registry-r2-exact-v2
   cancel-in-progress: true
 
 permissions:
@@ -86,7 +86,7 @@ jobs:
         env:
           EVIDENCE_ROOT: ${{ runner.temp }}/exact-review-r2-${{ matrix.python-version }}
         run: |
-          bash controller/.github/controllers/verify_exact_review_attestation_registry_r2.sh \
+          bash controller/.github/controllers/verify_exact_review_attestation_registry_r2_v2.sh \
             "$GITHUB_WORKSPACE/product" \
             "$EVIDENCE_ROOT"
 
