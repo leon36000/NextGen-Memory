@@ -1,10 +1,10 @@
-name: Rebase merge readiness gate design and RED on R4
+name: Rebase merge readiness gate design and RED on R4 v2
 
 on:
   pull_request:
 
 concurrency:
-  group: exact-sha-merge-readiness-r4-rebase-v2
+  group: exact-sha-merge-readiness-r4-rebase-v3
   cancel-in-progress: true
 
 permissions:
@@ -37,18 +37,18 @@ jobs:
       - name: Install exact R4 development tools
         run: python -m pip install -e "$GITHUB_WORKSPACE/workspace[dev]"
 
-      - name: Rebase design and publish tests-only RED
+      - name: Publish R4-v2 design and tests-only RED
         env:
           GH_TOKEN: ${{ github.token }}
           SELF_PR: ${{ github.event.pull_request.number }}
         shell: bash
         run: |
-          bash controller/.github/controllers/rebase_merge_readiness_gate_on_r4.sh \
+          bash controller/.github/controllers/rebase_merge_readiness_gate_on_r4_v2.sh \
             "$GITHUB_WORKSPACE/workspace"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: merge-readiness-r4-rebase-evidence
+          name: merge-readiness-r4-v2-rebase-evidence
           path: |
             /tmp/merge-readiness-red-r4-ast.json
             /tmp/merge-readiness-r4-rebase-summary.json
