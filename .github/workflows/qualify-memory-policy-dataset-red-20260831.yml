@@ -1,0 +1,266 @@
+name: Qualify memory policy dataset v0 RED
+
+on:
+  push:
+    branches:
+      - bootstrap/qualify-memory-policy-dataset-red-20260831
+  workflow_dispatch:
+
+concurrency:
+  group: memory-policy-dataset-v0-red-20260831
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  qualify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: tdd/memory-policy-dataset-v0-red-20260831
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install exact qualification toolchain
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e '.[dev]'
+          python -m pip install 'ruff==0.16.4'
+          ruff --version
+
+      - name: Resolve the exact verified post-merge main base
+        id: identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*'
+          checkpoint_branch='evidence/m-head-main-postmerge-checkpoint-20260831'
+          checkpoint_path='evidence/m-head-main-postmerge-checkpoint-20260831.json'
+          git show "origin/$checkpoint_branch:$checkpoint_path" > /tmp/main-checkpoint.json
+          jq -e '.checkpoint_key == "m-head:main:postmerge-green:20260831"' /tmp/main-checkpoint.json >/dev/null
+          jq -e '.status == "main_postmerge_green_no_production_actions"' /tmp/main-checkpoint.json >/dev/null
+          base_sha=$(jq -r '.merge.main_merge_sha' /tmp/main-checkpoint.json)
+          test -n "$base_sha"
+          test "$base_sha" != null
+          test "$(git rev-parse origin/main)" = "$base_sha"
+          red_before=$(git rev-parse HEAD)
+          test "$(git merge-base "$base_sha" "$red_before")" = "$base_sha"
+          printf 'base_sha=%s\nred_before=%s\n' "$base_sha" "$red_before" | tee -a "$GITHUB_OUTPUT"
+
+      - name: Normalize only the three tests and prove static quality
+        shell: bash
+        run: |
+          set -euo pipefail
+          files=(
+            tests/test_memory_policy_dataset.py
+            tests/test_memory_policy_dataset_properties.py
+            tests/test_memory_policy_dataset_public_api.py
+          )
+          ruff check --fix "${files[@]}"
+          ruff format "${files[@]}"
+          ruff check "${files[@]}"
+          ruff format --check "${files[@]}"
+          python -m py_compile "${files[@]}"
+          git diff --check
+
+          mapfile -t modified < <(git diff --name-only | sort)
+          for path in "${modified[@]}"; do
+            case "$path" in
+              tests/test_memory_policy_dataset.py|tests/test_memory_policy_dataset_properties.py|tests/test_memory_policy_dataset_public_api.py)
+                ;;
+              *)
+                echo "unexpected normalized path: $path" >&2
+                exit 1
+                ;;
+            esac
+          done
+
+          for marker in '# noqa' 'pytest.mark.skip' 'pytest.mark.xfail' 'NotImplementedError'; do
+            if grep -RFn "$marker" "${files[@]}"; then
+              echo "forbidden RED weakening marker: $marker" >&2
+              exit 1
+            fi
+          done
+          grep -F 'range(5_000)' tests/test_memory_policy_dataset_properties.py >/dev/null
+          grep -F 'maximum_event_ordinal' docs/memory-policy-dataset-v0-red.md >/dev/null || true
+
+      - name: Commit any toolchain-only normalization and freeze the RED head
+        id: red
+        shell: bash
+        env:
+          BASE_SHA: ${{ steps.identity.outputs.base_sha }}
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add \
+            tests/test_memory_policy_dataset.py \
+            tests/test_memory_policy_dataset_properties.py \
+            tests/test_memory_policy_dataset_public_api.py
+          if ! git diff --cached --quiet; then
+            git diff --cached --check
+            git commit -m 'test: normalize memory policy dataset RED contract'
+            git push origin HEAD:tdd/memory-policy-dataset-v0-red-20260831
+          fi
+          red_sha=$(git rev-parse HEAD)
+          mapfile -t changed < <(git diff --name-only "$BASE_SHA"...HEAD | sort)
+          expected=(
+            docs/memory-policy-dataset-v0-red.md
+            tests/test_memory_policy_dataset.py
+            tests/test_memory_policy_dataset_properties.py
+            tests/test_memory_policy_dataset_public_api.py
+          )
+          test "${#changed[@]}" -eq "${#expected[@]}"
+          diff -u <(printf '%s\n' "${expected[@]}" | sort) <(printf '%s\n' "${changed[@]}")
+          test -z "$(git diff --name-only "$BASE_SHA"...HEAD -- '.github/workflows/**' 'migrations/**' pyproject.toml 'src/**')"
+          git diff --check "$BASE_SHA"...HEAD
+          test ! -e src/nextgen_memory/memory_policy_dataset.py
+          if grep -F 'memory_policy_dataset' src/nextgen_memory/__init__.py; then
+            echo 'base package root unexpectedly exports the absent dataset module' >&2
+            exit 1
+          fi
+          echo "red_sha=$red_sha" >> "$GITHUB_OUTPUT"
+          echo "short=${red_sha:0:8}" >> "$GITHUB_OUTPUT"
+
+      - name: Prove each test file independently reaches only module absence
+        shell: bash
+        env:
+          BASE_SHA: ${{ steps.identity.outputs.base_sha }}
+        run: |
+          set -euo pipefail
+          root="$RUNNER_TEMP/memory-policy-dataset-red"
+          rm -rf "$root"
+          git worktree add --detach "$root" "$BASE_SHA"
+          mkdir -p "$root/tests" "$root/docs"
+          files=(
+            tests/test_memory_policy_dataset.py
+            tests/test_memory_policy_dataset_properties.py
+            tests/test_memory_policy_dataset_public_api.py
+          )
+          for file in "${files[@]}"; do
+            cp "$file" "$root/$file"
+          done
+          cp docs/memory-policy-dataset-v0-red.md "$root/docs/"
+          cd "$root"
+          test ! -e src/nextgen_memory/memory_policy_dataset.py
+          if grep -F 'memory_policy_dataset' src/nextgen_memory/__init__.py; then
+            echo 'immutable base unexpectedly exports memory_policy_dataset' >&2
+            exit 1
+          fi
+
+          for file in "${files[@]}"; do
+            output="/tmp/$(basename "$file" .py)-red.txt"
+            set +e
+            PYTHONPATH="$PWD/src" python -m pytest --collect-only -q "$file" > "$output" 2>&1
+            rc=$?
+            set -e
+            test "$rc" -ne 0
+            FILE="$file" OUTPUT="$output" python - <<'PY'
+          from __future__ import annotations
+
+          import os
+          import re
+          from pathlib import Path
+
+          file = os.environ['FILE']
+          text = Path(os.environ['OUTPUT']).read_text(
+              encoding='utf-8',
+              errors='replace',
+          )
+          modules = set(
+              re.findall(
+                  r"ModuleNotFoundError: No module named '([^']+)'",
+                  text,
+              )
+          )
+          expected = {'nextgen_memory.memory_policy_dataset'}
+          if modules != expected:
+              raise SystemExit(
+                  f'{file}: unexpected missing-module set: {sorted(modules)!r}'
+              )
+          for marker in (
+              'SyntaxError',
+              'IndentationError',
+              'NameError',
+              'ERROR at setup',
+              'fixture ',
+          ):
+              if marker in text:
+                  raise SystemExit(f'{file}: unintended RED marker: {marker}')
+          PY
+          done
+
+      - name: Build and publish immutable RED qualification evidence
+        id: publish
+        shell: bash
+        env:
+          BASE_SHA: ${{ steps.identity.outputs.base_sha }}
+          RED_BEFORE: ${{ steps.identity.outputs.red_before }}
+          RED_SHA: ${{ steps.red.outputs.red_sha }}
+          SHORT: ${{ steps.red.outputs.short }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          jq -n \
+            --arg schema 'm-head-memory-policy-dataset-red-v1' \
+            --arg status 'tdd_red_accepted_unmerged' \
+            --arg repository '${{ github.repository }}' \
+            --arg base_branch 'main' \
+            --arg base_sha "$BASE_SHA" \
+            --arg red_branch 'tdd/memory-policy-dataset-v0-red-20260831' \
+            --arg red_before "$RED_BEFORE" \
+            --arg red_sha "$RED_SHA" \
+            --argjson run_id "$GITHUB_RUN_ID" \
+            '{schema:$schema,status:$status,repository:$repository,base:{branch:$base_branch,sha:$base_sha},red:{branch:$red_branch,sha:$red_sha,previous_sha:$red_before,exact_path_count:4,paths:["docs/memory-policy-dataset-v0-red.md","tests/test_memory_policy_dataset.py","tests/test_memory_policy_dataset_properties.py","tests/test_memory_policy_dataset_public_api.py"],ruff_version:"0.16.4",ruff_clean:true,format_clean:true,syntax_clean:true,individual_collection_proven:true,missing_module_set:["nextgen_memory.memory_policy_dataset"],generated_trace_contract:5000,trajectory_leakage_contract:true,absent_feedback_is_nonnegative:true,tests_weakened:false},verification:{run_id:$run_id,implementation_present:false,package_export_present:false},merge_allowed:false,safety:{merged:false,production_database_contacted:false,production_migration_applied:false,feedback_written:false,policy_activated:false,model_trained:false,release_published:false,stubs_added:false},next_action:"Overlay this exact four-path RED onto the design/plan feature branch, implement only the pure dataset contract, and require focused/full/audit/wheel verification before candidate publication."}' \
+            > /tmp/red-evidence.json
+
+          branch="evidence/memory-policy-dataset-v0-red-${SHORT}-20260831"
+          path="evidence/memory-policy-dataset-v0-red-${SHORT}-20260831.json"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git fetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*'
+          if git ls-remote --exit-code --heads origin "$branch"; then
+            git switch --detach "origin/$branch"
+            cmp /tmp/red-evidence.json "$path"
+          else
+            git switch -C "$branch" "$RED_SHA"
+            mkdir -p evidence
+            cp /tmp/red-evidence.json "$path"
+            git add "$path"
+            git diff --cached --check
+            git commit -m 'evidence: qualify memory policy dataset v0 RED'
+            git push origin HEAD:"refs/heads/$branch"
+          fi
+          commit=$(git rev-parse HEAD)
+          body=$(cat <<EOF
+          ## Memory Policy Dataset v0 tests-only RED accepted
+
+          - exact base main SHA: \`$BASE_SHA\`;
+          - immutable RED SHA: \`$RED_SHA\`;
+          - exact surface: four paths;
+          - Ruff 0.16.4, formatting, syntax: clean;
+          - each test file independently reaches only \`ModuleNotFoundError: nextgen_memory.memory_policy_dataset\`;
+          - generated trace contract: \`5,000\`;
+          - trajectory leakage and absent-feedback safety contracts: present;
+          - immutable evidence: \`$branch\` at \`$commit\`;
+          - implementation, model training, merge, deployment, migration, feedback, activation, release: none.
+          EOF
+          )
+          gh api "repos/$GITHUB_REPOSITORY/issues/23/comments" --raw-field body="$body" >/dev/null
+          echo "branch=$branch" >> "$GITHUB_OUTPUT"
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: memory-policy-dataset-v0-red
+          path: /tmp/red-evidence.json
+          if-no-files-found: error
+          retention-days: 14
