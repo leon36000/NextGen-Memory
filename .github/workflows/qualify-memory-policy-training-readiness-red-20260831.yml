@@ -1,0 +1,224 @@
+name: Qualify memory policy training readiness v0 RED
+
+on:
+  push:
+    branches:
+      - bootstrap/qualify-memory-policy-training-readiness-red-20260831
+  workflow_dispatch:
+
+concurrency:
+  group: memory-policy-training-readiness-red-20260831
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  qualify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: tdd/memory-policy-training-readiness-v0-red-20260831
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install exact qualification toolchain
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e '.[dev]'
+          python -m pip install 'ruff==0.16.4'
+          ruff --version
+
+      - name: Resolve exact post-dataset main and immutable RED
+        id: identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*'
+          checkpoint_branch='evidence/memory-policy-dataset-v0-postmerge-checkpoint-20260831'
+          checkpoint_path='evidence/memory-policy-dataset-v0-postmerge-checkpoint-20260831.json'
+          git show "origin/$checkpoint_branch:$checkpoint_path" > /tmp/dataset-checkpoint.json
+          jq -e '.checkpoint_key == "m-head:memory-policy-dataset-v0:postmerge-green:20260831"' /tmp/dataset-checkpoint.json >/dev/null
+          jq -e '.status == "dataset_postmerge_green_no_model_training"' /tmp/dataset-checkpoint.json >/dev/null
+          jq -e '.model_state.training_authorized == false and .model_state.training_performed == false' /tmp/dataset-checkpoint.json >/dev/null
+          base_sha=$(jq -r '.merge.main_merge_sha' /tmp/dataset-checkpoint.json)
+          test "$(git rev-parse origin/main)" = "$base_sha"
+          red_branch='tdd/memory-policy-training-readiness-v0-red-20260831'
+          red_sha=$(git rev-parse HEAD)
+          test "$(git rev-parse "origin/$red_branch")" = "$red_sha"
+          test "$(git merge-base "$base_sha" "$red_sha")" = "$base_sha"
+          printf 'base_sha=%s\nred_branch=%s\nred_sha=%s\nshort=%s\n' \
+            "$base_sha" "$red_branch" "$red_sha" "${red_sha:0:8}" \
+            | tee -a "$GITHUB_OUTPUT"
+
+      - name: Prove exact four-path tests-only surface and static quality
+        shell: bash
+        env:
+          BASE_SHA: ${{ steps.identity.outputs.base_sha }}
+        run: |
+          set -euo pipefail
+          mapfile -t changed < <(git diff --name-only "$BASE_SHA"...HEAD | sort)
+          expected=(
+            docs/memory-policy-training-readiness-v0-red.md
+            tests/test_memory_policy_training_readiness.py
+            tests/test_memory_policy_training_readiness_properties.py
+            tests/test_memory_policy_training_readiness_public_api.py
+          )
+          test "${#changed[@]}" -eq "${#expected[@]}"
+          diff -u <(printf '%s\n' "${expected[@]}" | sort) <(printf '%s\n' "${changed[@]}")
+          test -z "$(git diff --name-only "$BASE_SHA"...HEAD -- '.github/workflows/**' 'migrations/**' pyproject.toml 'src/**')"
+          git diff --check "$BASE_SHA"...HEAD
+          files=(
+            tests/test_memory_policy_training_readiness.py
+            tests/test_memory_policy_training_readiness_properties.py
+            tests/test_memory_policy_training_readiness_public_api.py
+          )
+          ruff check "${files[@]}"
+          ruff format --check "${files[@]}"
+          python -m py_compile "${files[@]}"
+          grep -F 'range(10_000)' tests/test_memory_policy_training_readiness_properties.py >/dev/null
+          for marker in '# noqa' 'pytest.mark.skip' 'pytest.mark.xfail' 'NotImplementedError'; do
+            if grep -RFn "$marker" "${files[@]}"; then
+              echo "forbidden RED weakening marker: $marker" >&2
+              exit 1
+            fi
+          done
+          test ! -e src/nextgen_memory/memory_policy_training_readiness.py
+          if grep -F 'memory_policy_training_readiness' src/nextgen_memory/__init__.py; then
+            echo 'base package root unexpectedly exports readiness module' >&2
+            exit 1
+          fi
+          test -z "$(git status --porcelain)"
+
+      - name: Prove every test file independently reaches only module absence
+        shell: bash
+        env:
+          BASE_SHA: ${{ steps.identity.outputs.base_sha }}
+        run: |
+          set -euo pipefail
+          root="$RUNNER_TEMP/memory-policy-training-readiness-red"
+          rm -rf "$root"
+          git worktree add --detach "$root" "$BASE_SHA"
+          mkdir -p "$root/tests" "$root/docs"
+          files=(
+            tests/test_memory_policy_training_readiness.py
+            tests/test_memory_policy_training_readiness_properties.py
+            tests/test_memory_policy_training_readiness_public_api.py
+          )
+          for file in "${files[@]}"; do cp "$file" "$root/$file"; done
+          cp docs/memory-policy-training-readiness-v0-red.md "$root/docs/"
+          cd "$root"
+          test ! -e src/nextgen_memory/memory_policy_training_readiness.py
+          if grep -F 'memory_policy_training_readiness' src/nextgen_memory/__init__.py; then
+            echo 'immutable base unexpectedly exports readiness module' >&2
+            exit 1
+          fi
+          for file in "${files[@]}"; do
+            output="/tmp/$(basename "$file" .py)-red.txt"
+            set +e
+            PYTHONPATH="$PWD/src" python -m pytest --collect-only -q "$file" > "$output" 2>&1
+            rc=$?
+            set -e
+            test "$rc" -ne 0
+            FILE="$file" OUTPUT="$output" python - <<'PY'
+          from __future__ import annotations
+
+          import os
+          import re
+          from pathlib import Path
+
+          file = os.environ['FILE']
+          text = Path(os.environ['OUTPUT']).read_text(
+              encoding='utf-8', errors='replace'
+          )
+          modules = set(
+              re.findall(
+                  r"ModuleNotFoundError: No module named '([^']+)'",
+                  text,
+              )
+          )
+          expected = {'nextgen_memory.memory_policy_training_readiness'}
+          if modules != expected:
+              raise SystemExit(
+                  f'{file}: unexpected missing-module set {sorted(modules)!r}'
+              )
+          for marker in (
+              'SyntaxError', 'IndentationError', 'NameError',
+              'ERROR at setup', 'fixture ',
+          ):
+              if marker in text:
+                  raise SystemExit(f'{file}: unintended RED marker {marker}')
+          PY
+          done
+
+      - name: Publish immutable RED qualification evidence
+        id: publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASE_SHA: ${{ steps.identity.outputs.base_sha }}
+          RED_BRANCH: ${{ steps.identity.outputs.red_branch }}
+          RED_SHA: ${{ steps.identity.outputs.red_sha }}
+          SHORT: ${{ steps.identity.outputs.short }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          jq -n \
+            --arg schema 'm-head-memory-policy-training-readiness-red-v1' \
+            --arg status 'tdd_red_accepted_unmerged' \
+            --arg repository '${{ github.repository }}' \
+            --arg base_sha "$BASE_SHA" \
+            --arg red_branch "$RED_BRANCH" \
+            --arg red_sha "$RED_SHA" \
+            --argjson run_id "$GITHUB_RUN_ID" \
+            '{schema:$schema,status:$status,repository:$repository,base:{branch:"main",sha:$base_sha},red:{branch:$red_branch,sha:$red_sha,exact_path_count:4,paths:["docs/memory-policy-training-readiness-v0-red.md","tests/test_memory_policy_training_readiness.py","tests/test_memory_policy_training_readiness_properties.py","tests/test_memory_policy_training_readiness_public_api.py"],ruff_version:"0.16.4",ruff_clean:true,format_clean:true,syntax_clean:true,individual_collection_proven:true,missing_module_set:["nextgen_memory.memory_policy_training_readiness"],generated_evaluation_contract:10000,all_reject_reasons_required:true,all_hold_reasons_required:true,ready_state_required:true,model_training_always_unauthorized:true,tests_weakened:false},verification:{run_id:$run_id,implementation_present:false,package_export_present:false},merge_allowed:false,safety:{merged:false,model_trained:false,production_database_contacted:false,production_migration_applied:false,feedback_written:false,policy_activated:false,release_published:false,stubs_added:false},next_action:"Overlay this exact RED onto the design/plan feature branch, implement only the pure readiness gate, and require focused/full/generated/audit/wheel verification before candidate publication."}' \
+            > /tmp/red.json
+
+          branch="evidence/memory-policy-training-readiness-v0-red-${SHORT}-20260831"
+          path="evidence/memory-policy-training-readiness-v0-red-${SHORT}-20260831.json"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git fetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*'
+          if git ls-remote --exit-code --heads origin "$branch"; then
+            git switch --detach "origin/$branch"
+            cmp /tmp/red.json "$path"
+          else
+            git switch -C "$branch" "$RED_SHA"
+            mkdir -p evidence
+            cp /tmp/red.json "$path"
+            git add "$path"
+            git diff --cached --check
+            git commit -m 'evidence: qualify memory policy training readiness RED'
+            git push origin HEAD:"refs/heads/$branch"
+          fi
+          commit=$(git rev-parse HEAD)
+          body=$(cat <<EOF
+          ## Memory Policy Training Readiness Gate v0 RED accepted
+
+          - exact base main SHA: \`$BASE_SHA\`;
+          - immutable RED SHA: \`$RED_SHA\`;
+          - exact surface: four paths;
+          - Ruff 0.16.4, format, syntax: clean;
+          - every test file reaches only \`ModuleNotFoundError: nextgen_memory.memory_policy_training_readiness\`;
+          - generated evaluation contract: \`10,000\`;
+          - all reject/hold/ready states required;
+          - model training authorized: \`false\`;
+          - immutable evidence: \`$branch\` at \`$commit\`.
+          EOF
+          )
+          gh api "repos/$GITHUB_REPOSITORY/issues/23/comments" --raw-field body="$body" >/dev/null
+          echo "branch=$branch" >> "$GITHUB_OUTPUT"
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: memory-policy-training-readiness-v0-red
+          path: /tmp/red.json
+          if-no-files-found: error
+          retention-days: 21
