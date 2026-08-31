@@ -56,6 +56,15 @@ def main() -> int:
             [sys.executable, str(patched_path), "--root", arguments.root],
             check=True,
         )
+
+    root = Path(arguments.root)
+    for relative_path in (
+        "docs/exact-sha-review-attestation-registry-v0.md",
+        "docs/superpowers/specs/2026-08-24-exact-sha-review-attestation-registry-v0-design.md",
+    ):
+        path = root / relative_path
+        normalized = path.read_text(encoding="utf-8").rstrip() + "\n"
+        path.write_text(normalized, encoding="utf-8")
     return 0
 
 
