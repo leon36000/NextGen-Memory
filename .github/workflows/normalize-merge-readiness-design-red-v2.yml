@@ -1,0 +1,151 @@
+name: Normalize merge readiness design and publish RED v2
+
+on:
+  pull_request:
+
+concurrency:
+  group: exact-sha-merge-readiness-red-v2-normalization
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+jobs:
+  normalize:
+    if: github.event.pull_request.head.ref == 'bootstrap/normalize-merge-readiness-design-red-v2-20260831'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Normalize feature documentation without changing semantics
+        id: feature
+        shell: bash
+        run: |
+          set -euo pipefail
+          feature_branch='feat/exact-sha-merge-readiness-gate-v0-20260830'
+          expected_before='b8f6f4834502749005d97485e205f5b9615fadeb'
+          git fetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*'
+          test "$(git rev-parse "origin/$feature_branch")" = "$expected_before"
+          git switch -C "$feature_branch" "origin/$feature_branch"
+          files=(
+            docs/superpowers/specs/2026-08-30-exact-sha-merge-readiness-gate-v0-design.md
+            docs/superpowers/plans/2026-08-30-exact-sha-merge-readiness-gate-v0.md
+          )
+          python - <<'PY'
+          from pathlib import Path
+
+          for raw in (
+              'docs/superpowers/specs/2026-08-30-exact-sha-merge-readiness-gate-v0-design.md',
+              'docs/superpowers/plans/2026-08-30-exact-sha-merge-readiness-gate-v0.md',
+          ):
+              path = Path(raw)
+              source = path.read_text(encoding='utf-8')
+              normalized = '\n'.join(line.rstrip() for line in source.splitlines()) + '\n'
+              path.write_text(normalized, encoding='utf-8')
+          PY
+          mapfile -t modified < <(git diff --name-only | sort)
+          test "${#modified[@]}" -ge 1
+          test "${#modified[@]}" -le 2
+          for path in "${modified[@]}"; do
+            case "$path" in
+              "${files[0]}"|"${files[1]}") ;;
+              *) echo "unexpected normalized path: $path" >&2; exit 1 ;;
+            esac
+          done
+          git diff --check
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add "${files[@]}"
+          git commit -m 'docs: normalize merge readiness design sources'
+          feature_sha=$(git rev-parse HEAD)
+          git push origin HEAD:"refs/heads/$feature_branch"
+          echo "feature_sha=$feature_sha" >> "$GITHUB_OUTPUT"
+
+      - name: Publish a clean immutable tests-only RED v2
+        id: red
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_red='d86e429d6b4cf104817297b5658d799858f82506'
+          red_branch='tdd/exact-sha-merge-readiness-gate-v0-red-v2-20260831'
+          git switch -C "$red_branch" '${{ steps.feature.outputs.feature_sha }}'
+          git checkout "$source_red" -- \
+            docs/exact-sha-merge-readiness-gate-v0-red.md \
+            tests/test_merge_readiness_gate.py \
+            tests/test_merge_readiness_gate_properties.py \
+            tests/test_merge_readiness_gate_public_api.py
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('docs/exact-sha-merge-readiness-gate-v0-red.md')
+          source = path.read_text(encoding='utf-8')
+          source = source.replace(
+              '**TDD branch:** `tdd/exact-sha-merge-readiness-gate-v0-red-20260830`',
+              '**TDD branch:** `tdd/exact-sha-merge-readiness-gate-v0-red-v2-20260831`',
+              1,
+          )
+          section = '''
+
+          ## Documentation normalization
+
+          RED v2 preserves the complete tests-only contract and every test source byte from RED v1. It is based on the whitespace-normalized design/plan head and removes only Markdown trailing whitespace from this evidence document. No fixture, assertion, test definition, generated case, expected reason, privacy boundary, or product behavior changes.
+          '''
+          section = '\n'.join(
+              line[10:] if line.startswith('          ') else line
+              for line in section.splitlines()
+          )
+          if '## Documentation normalization' not in source:
+              source += section
+          normalized = '\n'.join(line.rstrip() for line in source.splitlines()) + '\n'
+          path.write_text(normalized, encoding='utf-8')
+          PY
+          git diff --check
+          mapfile -t changed < <(git diff --name-only '${{ steps.feature.outputs.feature_sha }}'...HEAD 2>/dev/null || true)
+          git add \
+            docs/exact-sha-merge-readiness-gate-v0-red.md \
+            tests/test_merge_readiness_gate.py \
+            tests/test_merge_readiness_gate_properties.py \
+            tests/test_merge_readiness_gate_public_api.py
+          git diff --cached --check
+          git commit -m 'test: publish clean exact-SHA merge readiness RED v2'
+          red_sha=$(git rev-parse HEAD)
+          mapfile -t delta < <(git diff --name-only '${{ steps.feature.outputs.feature_sha }}'...HEAD | sort)
+          expected=(
+            docs/exact-sha-merge-readiness-gate-v0-red.md
+            tests/test_merge_readiness_gate.py
+            tests/test_merge_readiness_gate_properties.py
+            tests/test_merge_readiness_gate_public_api.py
+          )
+          test "${#delta[@]}" -eq "${#expected[@]}"
+          diff -u <(printf '%s\n' "${expected[@]}" | sort) \
+            <(printf '%s\n' "${delta[@]}")
+          git push origin HEAD:"refs/heads/$red_branch"
+          printf 'red_branch=%s\nred_sha=%s\n' "$red_branch" "$red_sha" \
+            | tee -a "$GITHUB_OUTPUT"
+
+      - name: Publish normalization result and close transport without merge
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SELF_PR: ${{ github.event.pull_request.number }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          body=$(cat <<EOF
+          ## Merge readiness design and RED v2 normalized
+
+          - normalized feature head: \`${{ steps.feature.outputs.feature_sha }}\`;
+          - immutable RED v2: \`${{ steps.red.outputs.red_sha }}\`;
+          - RED v2 branch: \`${{ steps.red.outputs.red_branch }}\`;
+          - changed semantics or tests: none;
+          - implementation and package exports: absent;
+          - merge allowed: false.
+          EOF
+          )
+          gh api "repos/$REPO/issues/166/comments" --raw-field body="$body" >/dev/null
+          gh api --method PATCH "repos/$REPO/pulls/$SELF_PR" -f state=closed >/dev/null
