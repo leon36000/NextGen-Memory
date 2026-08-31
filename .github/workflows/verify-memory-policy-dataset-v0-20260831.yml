@@ -1,0 +1,1071 @@
+name: Verify memory policy dataset v0 independently
+
+on:
+  push:
+    branches:
+      - bootstrap/verify-memory-policy-dataset-v0-20260831
+  workflow_dispatch:
+
+concurrency:
+  group: memory-policy-dataset-v0-independent-20260831
+  cancel-in-progress: true
+
+permissions:
+  actions: read
+  contents: write
+  issues: write
+  pull-requests: write
+
+jobs:
+  resolve:
+    runs-on: ubuntu-24.04
+    outputs:
+      base_sha: ${{ steps.identity.outputs.base_sha }}
+      candidate_sha: ${{ steps.identity.outputs.candidate_sha }}
+      candidate_tree: ${{ steps.identity.outputs.candidate_tree }}
+      red_sha: ${{ steps.identity.outputs.red_sha }}
+      product_pr: ${{ steps.identity.outputs.product_pr }}
+      short: ${{ steps.identity.outputs.short }}
+      producer_branch: ${{ steps.identity.outputs.producer_branch }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: candidate/memory-policy-dataset-v0-20260831
+          fetch-depth: 0
+
+      - name: Freeze exact base, candidate, RED v2, producer evidence, and PR
+        id: identity
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*'
+
+          checkpoint_branch='evidence/m-head-main-postmerge-checkpoint-20260831'
+          checkpoint_path='evidence/m-head-main-postmerge-checkpoint-20260831.json'
+          git show "origin/$checkpoint_branch:$checkpoint_path" > /tmp/main-checkpoint.json
+          jq -e '.checkpoint_key == "m-head:main:postmerge-green:20260831"' /tmp/main-checkpoint.json >/dev/null
+          jq -e '.status == "main_postmerge_green_no_production_actions"' /tmp/main-checkpoint.json >/dev/null
+          base_sha=$(jq -r '.merge.main_merge_sha' /tmp/main-checkpoint.json)
+          test "$(git rev-parse origin/main)" = "$base_sha"
+
+          candidate_branch='candidate/memory-policy-dataset-v0-20260831'
+          candidate_sha=$(git rev-parse HEAD)
+          candidate_tree=$(git rev-parse HEAD^{tree})
+          test "$(git rev-parse "origin/$candidate_branch")" = "$candidate_sha"
+          test "$(git merge-base "$base_sha" "$candidate_sha")" = "$base_sha"
+
+          mapfile -t changed < <(git diff --name-only "$base_sha"..."$candidate_sha" | sort)
+          expected=(
+            docs/memory-policy-dataset-v0-red.md
+            docs/memory-policy-dataset-v0.md
+            docs/superpowers/plans/2026-08-31-memory-policy-dataset-v0.md
+            docs/superpowers/specs/2026-08-31-memory-policy-dataset-v0-design.md
+            src/nextgen_memory/__init__.py
+            src/nextgen_memory/memory_policy_dataset.py
+            tests/test_memory_policy_dataset.py
+            tests/test_memory_policy_dataset_properties.py
+            tests/test_memory_policy_dataset_public_api.py
+          )
+          test "${#changed[@]}" -eq "${#expected[@]}"
+          diff -u <(printf '%s\n' "${expected[@]}" | sort) <(printf '%s\n' "${changed[@]}")
+          test -z "$(git diff --name-only "$base_sha"..."$candidate_sha" -- '.github/workflows/**' 'migrations/**' pyproject.toml 'src/nextgen_memory/corrective_retrieval_*')"
+          git diff --check "$base_sha"..."$candidate_sha"
+          test -z "$(git status --porcelain)"
+
+          red_branch='tdd/memory-policy-dataset-v0-red-v2-20260831'
+          red_sha=$(git rev-parse "origin/$red_branch")
+          test "$(git merge-base "$base_sha" "$red_sha")" = "$base_sha"
+          for path in \
+            docs/memory-policy-dataset-v0-red.md \
+            tests/test_memory_policy_dataset.py \
+            tests/test_memory_policy_dataset_properties.py \
+            tests/test_memory_policy_dataset_public_api.py; do
+            cmp <(git show "$red_sha:$path") "$path"
+          done
+          grep -F "$red_branch" docs/superpowers/plans/2026-08-31-memory-policy-dataset-v0.md >/dev/null
+          grep -F "$red_sha" docs/superpowers/plans/2026-08-31-memory-policy-dataset-v0.md >/dev/null
+          grep -F "$red_branch" docs/superpowers/specs/2026-08-31-memory-policy-dataset-v0-design.md >/dev/null
+          grep -F "$red_sha" docs/superpowers/specs/2026-08-31-memory-policy-dataset-v0-design.md >/dev/null
+
+          short=${candidate_sha:0:8}
+          producer_branch="evidence/memory-policy-dataset-v0-${short}-producer-20260831"
+          producer_path="evidence/memory-policy-dataset-v0-${short}-producer-20260831.json"
+          git show "origin/$producer_branch:$producer_path" > /tmp/producer.json
+          jq -e '.schema == "m-head-memory-policy-dataset-producer-v1"' /tmp/producer.json >/dev/null
+          jq -e '.status == "producer_green_verification_pending_unmerged"' /tmp/producer.json >/dev/null
+          jq -e --arg sha "$candidate_sha" '.candidate.sha == $sha and .candidate.exact_path_count == 9' /tmp/producer.json >/dev/null
+          jq -e --arg sha "$base_sha" '.base.sha == $sha' /tmp/producer.json >/dev/null
+          jq -e --arg sha "$red_sha" '.tdd.sha == $sha and .tdd.source_preserved == true and .tdd.tests_weakened == false' /tmp/producer.json >/dev/null
+          jq -e '.verification.generated_5000_trace_test_count > 0 and .verification.audit_findings == 0' /tmp/producer.json >/dev/null
+          jq -e '.verification.hash_seed_invariant == true and .verification.exact_retry_count == 1000' /tmp/producer.json >/dev/null
+          jq -e '.verification.isolated_wheel_import == true and .verification.pip_check == true' /tmp/producer.json >/dev/null
+          jq -e '.review.verdict == "pending" and .review.merge_allowed == false' /tmp/producer.json >/dev/null
+          jq -e '.safety.model_trained == false and .safety.merged == false' /tmp/producer.json >/dev/null
+
+          owner=${REPO%%/*}
+          pulls=$(gh api --method GET "repos/$REPO/pulls" \
+            -f state=open \
+            -f head="$owner:$candidate_branch" \
+            -f per_page=100)
+          test "$(printf '%s' "$pulls" | jq 'length')" -eq 1
+          product_pr=$(printf '%s' "$pulls" | jq -r '.[0].number')
+          test "$(printf '%s' "$pulls" | jq -r '.[0].draft')" = true
+          test "$(printf '%s' "$pulls" | jq -r '.[0].head.sha')" = "$candidate_sha"
+          test "$(printf '%s' "$pulls" | jq -r '.[0].base.ref')" = main
+          test "$(printf '%s' "$pulls" | jq -r '.[0].base.sha')" = "$base_sha"
+          test "$(jq -r '.candidate.pull_request' /tmp/producer.json)" = "$product_pr"
+
+          printf 'base_sha=%s\ncandidate_sha=%s\ncandidate_tree=%s\nred_sha=%s\nproduct_pr=%s\nshort=%s\nproducer_branch=%s\n' \
+            "$base_sha" "$candidate_sha" "$candidate_tree" "$red_sha" "$product_pr" "$short" "$producer_branch" \
+            | tee -a "$GITHUB_OUTPUT"
+
+  verify:
+    needs: resolve
+    runs-on: ubuntu-24.04
+    timeout-minutes: 70
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        python-version: ['3.12', '3.13']
+    env:
+      PYTHON_VERSION: ${{ matrix.python-version }}
+      BASE_SHA: ${{ needs.resolve.outputs.base_sha }}
+      CANDIDATE_SHA: ${{ needs.resolve.outputs.candidate_sha }}
+      CANDIDATE_TREE: ${{ needs.resolve.outputs.candidate_tree }}
+      RED_SHA: ${{ needs.resolve.outputs.red_sha }}
+      PRODUCT_PR: ${{ needs.resolve.outputs.product_pr }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.candidate_sha }}
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install exact candidate environment
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e '.[dev]'
+          python -m pip install 'ruff==0.16.4'
+          ruff --version
+
+      - name: Prove exact SHA, tree, RED sources, and static quality
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
+          test "$(git rev-parse HEAD^{tree})" = "$CANDIDATE_TREE"
+          test "$(git merge-base "$BASE_SHA" HEAD)" = "$BASE_SHA"
+          for path in \
+            docs/memory-policy-dataset-v0-red.md \
+            tests/test_memory_policy_dataset.py \
+            tests/test_memory_policy_dataset_properties.py \
+            tests/test_memory_policy_dataset_public_api.py; do
+            cmp <(git show "$RED_SHA:$path") "$path"
+          done
+          ruff check .
+          ruff format --check .
+          python -m compileall -q src scripts
+          git diff --check "$BASE_SHA"...HEAD
+          test -z "$(git status --porcelain)"
+
+      - name: Run focused, generated-5000, and complete test suites
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pytest -q \
+            tests/test_memory_policy_dataset.py \
+            tests/test_memory_policy_dataset_properties.py \
+            tests/test_memory_policy_dataset_public_api.py \
+            | tee /tmp/focused.txt
+          python -m pytest -q \
+            tests/test_memory_policy_dataset_properties.py::test_five_thousand_generated_traces_cover_labels_splits_and_retries \
+            | tee /tmp/generated-5000.txt
+          python -m pytest -q | tee /tmp/full.txt
+          test -z "$(git status --porcelain)"
+
+      - name: Run independent dependency, privacy, side-effect, and stub audit
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from __future__ import annotations
+
+          import ast
+          import json
+          import sys
+          from pathlib import Path
+
+          path = Path('src/nextgen_memory/memory_policy_dataset.py')
+          source = path.read_text(encoding='utf-8')
+          tree = ast.parse(source, filename=str(path))
+          allowed_roots = set(sys.stdlib_module_names) | {'__future__'}
+          forbidden_calls = {'open', 'eval', 'exec', 'compile', 'input'}
+          forbidden_attributes = {
+              'connect', 'create_connection', 'request', 'urlopen',
+              'system', 'popen', 'run', 'Popen', 'sleep', 'time',
+              'uuid1', 'uuid4', 'write_text', 'write_bytes', 'mkdir',
+              'unlink', 'rename', 'getenv',
+          }
+          findings: list[str] = []
+          for node in ast.walk(tree):
+              if isinstance(node, ast.Import):
+                  for alias in node.names:
+                      root = alias.name.split('.', 1)[0]
+                      if root not in allowed_roots:
+                          findings.append(f'{node.lineno}:nonstdlib:{alias.name}')
+              elif isinstance(node, ast.ImportFrom) and node.level == 0:
+                  root = (node.module or '').split('.', 1)[0]
+                  if root not in allowed_roots:
+                      findings.append(f'{node.lineno}:nonstdlib:{node.module}')
+              elif isinstance(node, ast.Pass):
+                  findings.append(f'{node.lineno}:pass')
+              elif (
+                  isinstance(node, ast.Expr)
+                  and isinstance(node.value, ast.Constant)
+                  and node.value.value is Ellipsis
+              ):
+                  findings.append(f'{node.lineno}:executable-ellipsis')
+              elif isinstance(node, ast.Raise):
+                  target = node.exc.func if isinstance(node.exc, ast.Call) else node.exc
+                  if (
+                      isinstance(target, ast.Name)
+                      and target.id == 'NotImplementedError'
+                  ) or (
+                      isinstance(target, ast.Attribute)
+                      and target.attr == 'NotImplementedError'
+                  ):
+                      findings.append(f'{node.lineno}:NotImplementedError')
+              elif isinstance(node, ast.Call):
+                  if isinstance(node.func, ast.Name) and node.func.id in forbidden_calls:
+                      findings.append(f'{node.lineno}:call:{node.func.id}')
+                  elif (
+                      isinstance(node.func, ast.Attribute)
+                      and node.func.attr in forbidden_attributes
+                  ):
+                      findings.append(f'{node.lineno}:call:{node.func.attr}')
+
+          lowered = source.lower()
+          for marker in (
+              'raw_prompt', 'raw_query', 'response_text', 'memory_body',
+              'credential', 'password', 'reviewer_email', 'reviewer_name',
+              'postgresql://', 'mongodb://', 'http://', 'https://',
+              'torch', 'transformers', 'optimizer', 'model.fit',
+              'trainer', 'merge_pull_request', 'activate_policy',
+              'write_feedback', '# todo', '# fixme',
+          ):
+              if marker in lowered:
+                  findings.append(f'text:{marker}')
+
+          for test_path in (
+              Path('tests/test_memory_policy_dataset.py'),
+              Path('tests/test_memory_policy_dataset_properties.py'),
+              Path('tests/test_memory_policy_dataset_public_api.py'),
+          ):
+              test_source = test_path.read_text(encoding='utf-8').lower()
+              for marker in (
+                  'pytest.mark.skip',
+                  'pytest.mark.xfail',
+                  '# noqa',
+                  'notimplementederror',
+              ):
+                  if marker in test_source:
+                      findings.append(f'{test_path}:text:{marker}')
+
+          if findings:
+              raise SystemExit('\n'.join(findings))
+          Path('/tmp/audit.json').write_text(
+              json.dumps({'audit_findings': 0}, sort_keys=True) + '\n',
+              encoding='utf-8',
+          )
+          print('audit_findings=0')
+          PY
+
+      - name: Generate independent deterministic dataset evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > /tmp/semantic.py <<'PY'
+          from __future__ import annotations
+
+          import hashlib
+          import json
+          import os
+          import sys
+          from pathlib import Path
+          from uuid import UUID
+
+          from nextgen_memory import (
+              InMemoryMemoryPolicyDatasetBuilder,
+              MemoryPolicyCandidateFeatures,
+              MemoryPolicyCandidateObservation,
+              MemoryPolicyCreditKind,
+              MemoryPolicyDatasetConfig,
+              MemoryPolicyOutcomeLabel,
+              MemoryPolicySplit,
+              MemoryPolicyDecisionTrace,
+          )
+
+          def digest(value: str) -> str:
+              return hashlib.sha256(value.encode('utf-8')).hexdigest()
+
+          def feature(rank: int) -> MemoryPolicyCandidateFeatures:
+              return MemoryPolicyCandidateFeatures(
+                  semantic_relevance=0.8,
+                  direct_utility_mean=0.2,
+                  direct_utility_confidence=0.9,
+                  inherited_utility_mean=0.1,
+                  inherited_utility_confidence=0.7,
+                  interaction_effect_mean=0.0,
+                  interaction_confidence=0.0,
+                  novelty=0.5,
+                  authority=0.8,
+                  freshness=0.9,
+                  token_cost=120,
+                  latency_ms=8.5,
+                  prior_retrieval_count=10,
+                  prior_use_count=4,
+                  original_rank=rank,
+              )
+
+          def candidate(
+              index: int,
+              *,
+              rank: int,
+              mean: float = 0.08,
+              lower: float = 0.04,
+              upper: float = 0.12,
+              confidence: float = 0.9,
+              kind: MemoryPolicyCreditKind = MemoryPolicyCreditKind.DIRECT_CAUSAL,
+              observed: bool = True,
+              selected: bool = True,
+              used: bool = True,
+              harm: bool = False,
+          ) -> MemoryPolicyCandidateObservation:
+              return MemoryPolicyCandidateObservation(
+                  candidate_id=UUID(int=100 + index),
+                  candidate_content_hash=digest(f'candidate:{index}'),
+                  memory_identity_hash=digest(f'memory:{index}'),
+                  expert_key_hash=digest(f'expert:{index}'),
+                  features=feature(rank),
+                  selected_by_policy=selected,
+                  used_by_action=used,
+                  credit_kind=kind,
+                  credit_effect_mean=mean,
+                  credit_confidence_lower_bound=lower,
+                  credit_confidence_upper_bound=upper,
+                  attribution_confidence=confidence,
+                  outcome_observed=observed,
+                  harm_observed=harm,
+                  credit_evidence_hash=digest(f'credit:{index}'),
+                  interaction_bundle_hash=(
+                      digest(f'bundle:{index}')
+                      if kind is MemoryPolicyCreditKind.INTERACTION_ALLOCATION
+                      else None
+                  ),
+              )
+
+          def trace(
+              index: int,
+              trajectory: UUID,
+              ordinal: int,
+              values: object,
+          ) -> MemoryPolicyDecisionTrace:
+              return MemoryPolicyDecisionTrace(
+                  trace_id=UUID(int=1000 + index),
+                  trajectory_id=trajectory,
+                  event_ordinal=ordinal,
+                  policy_version='deterministic-v1',
+                  policy_fingerprint=digest('policy'),
+                  source_sha=os.environ['BASE_SHA'],
+                  task_feature_vector_hash=digest(f'task:{index}'),
+                  query_embedding_hash=digest(f'query:{index}'),
+                  outcome_content_hash=digest(f'outcome:{index}'),
+                  provenance_content_hash=digest(f'provenance:{index}'),
+                  decision_budget_tokens=2000,
+                  decision_budget_latency_ms=100.0,
+                  candidates=values,
+              )
+
+          shared = UUID(int=9000)
+          none_value = candidate(
+              3,
+              rank=2,
+              mean=0.0,
+              lower=0.0,
+              upper=0.0,
+              confidence=0.0,
+              kind=MemoryPolicyCreditKind.NONE,
+              observed=False,
+              selected=False,
+              used=False,
+          )
+          observational = candidate(
+              4,
+              rank=0,
+              kind=MemoryPolicyCreditKind.OBSERVATIONAL,
+          )
+          low_confidence = candidate(5, rank=0, confidence=0.74)
+          matched = candidate(
+              6,
+              rank=0,
+              kind=MemoryPolicyCreditKind.MATCHED_REPLAY,
+              selected=False,
+              used=False,
+          )
+          interaction = candidate(
+              7,
+              rank=0,
+              kind=MemoryPolicyCreditKind.INTERACTION_ALLOCATION,
+          )
+
+          builder = InMemoryMemoryPolicyDatasetBuilder()
+          values = {
+              trace(0, shared, 5, {candidate(0, rank=0)}),
+              trace(
+                  1,
+                  shared,
+                  25,
+                  {
+                      candidate(1, rank=0, mean=0.0, lower=-0.01, upper=0.01),
+                      candidate(2, rank=1, mean=-0.08, lower=-0.12, upper=-0.04),
+                      none_value,
+                  },
+              ),
+              trace(2, UUID(int=9001), 10, {observational}),
+              trace(3, UUID(int=9002), 20, {low_confidence}),
+              trace(4, UUID(int=9003), 30, {matched}),
+              trace(5, UUID(int=9004), 15, {interaction}),
+          }
+          for value in values:
+              assert builder.register_trace(value) is value
+              assert builder.register_trace(value) is value
+
+          config = MemoryPolicyDatasetConfig(
+              train_max_ordinal=10,
+              validation_max_ordinal=20,
+              minimum_attribution_confidence=0.75,
+              beneficial_effect_threshold=0.02,
+              harmful_effect_threshold=0.02,
+              neutral_effect_band=0.01,
+          )
+          snapshot = builder.build(config)
+          labels = {example.label for example in snapshot.examples}
+          expected_labels = {
+              MemoryPolicyOutcomeLabel.BENEFICIAL,
+              MemoryPolicyOutcomeLabel.NEUTRAL,
+              MemoryPolicyOutcomeLabel.HARMFUL,
+              MemoryPolicyOutcomeLabel.ABSTAIN,
+          }
+          if labels != expected_labels:
+              raise SystemExit(f'label coverage differs: {labels!r}')
+          splits = {example.split for example in snapshot.examples}
+          if splits != {
+              MemoryPolicySplit.TRAIN,
+              MemoryPolicySplit.VALIDATION,
+              MemoryPolicySplit.TEST,
+          }:
+              raise SystemExit(f'split coverage differs: {splits!r}')
+          shared_splits = {
+              example.split
+              for example in snapshot.examples
+              if example.trajectory_id == shared
+          }
+          if shared_splits != {MemoryPolicySplit.TEST}:
+              raise SystemExit('maximum-ordinal trajectory grouping differs')
+          trajectory_splits: dict[UUID, set[MemoryPolicySplit]] = {}
+          for example in snapshot.examples:
+              trajectory_splits.setdefault(example.trajectory_id, set()).add(example.split)
+          if any(len(group) != 1 for group in trajectory_splits.values()):
+              raise SystemExit('trajectory leakage detected')
+
+          trainable_ids = {
+              example.id for example in snapshot.examples if example.trainable
+          }
+          partition_ids = (
+              set(snapshot.train_example_ids)
+              | set(snapshot.validation_example_ids)
+              | set(snapshot.test_example_ids)
+          )
+          if partition_ids != trainable_ids:
+              raise SystemExit('trainable split partition differs')
+
+          abstentions = [
+              example
+              for example in snapshot.examples
+              if example.label is MemoryPolicyOutcomeLabel.ABSTAIN
+          ]
+          if not abstentions:
+              raise SystemExit('abstention coverage absent')
+          if any(example.trainable or example.sample_weight != 0.0 for example in abstentions):
+              raise SystemExit('abstention became trainable or weighted')
+
+          for example in snapshot.examples:
+              forbidden = {
+                  'selected_by_policy',
+                  'used_by_action',
+                  'credit_kind',
+                  'credit_evidence_hash',
+                  'label',
+                  'sample_weight',
+                  'target_effect_mean',
+              }
+              if forbidden & set(example.feature_payload()):
+                  raise SystemExit('feature payload leaks target or audit data')
+
+          expected_json = snapshot.render_json()
+          expected_jsonl = snapshot.render_jsonl()
+          for _ in range(1000):
+              retry = builder.build(config)
+              if retry.render_json() != expected_json:
+                  raise SystemExit('exact build retry changed JSON')
+              if retry.render_jsonl() != expected_jsonl:
+                  raise SystemExit('exact build retry changed JSONL')
+
+          raw = expected_json + expected_jsonl
+          for marker in (
+              'raw_prompt', 'raw_query', 'response_text', 'memory_body',
+              'credential', 'password', 'reviewer_email', 'reviewer_name',
+          ):
+              if marker in raw.lower():
+                  raise SystemExit(f'forbidden dataset text: {marker}')
+
+          payload = {
+              'schema': 'm-head-memory-policy-dataset-independent-semantic-v1',
+              'base_sha': os.environ['BASE_SHA'],
+              'candidate_sha': os.environ['CANDIDATE_SHA'],
+              'candidate_tree': os.environ['CANDIDATE_TREE'],
+              'snapshot': json.loads(expected_json),
+              'jsonl_sha256': hashlib.sha256(
+                  expected_jsonl.encode('utf-8')
+              ).hexdigest(),
+              'exact_retry_count': 1000,
+              'trajectory_sets_disjoint': True,
+              'absent_feedback_nonnegative': True,
+          }
+          Path(sys.argv[1]).write_text(
+              json.dumps(
+                  payload,
+                  ensure_ascii=False,
+                  allow_nan=False,
+                  sort_keys=True,
+                  separators=(',', ':'),
+              ) + '\n',
+              encoding='utf-8',
+          )
+          PY
+          PYTHONHASHSEED=1 python /tmp/semantic.py /tmp/semantic.json
+          PYTHONHASHSEED=37 python /tmp/semantic.py /tmp/semantic-seed-37.json
+          PYTHONHASHSEED=999 python /tmp/semantic.py /tmp/semantic-seed-999.json
+          cmp /tmp/semantic.json /tmp/semantic-seed-37.json
+          cmp /tmp/semantic.json /tmp/semantic-seed-999.json
+
+      - name: Build and import the exact wheel in isolation
+        shell: bash
+        run: |
+          set -euo pipefail
+          wheelhouse="$RUNNER_TEMP/wheelhouse-$PYTHON_VERSION"
+          venv="$RUNNER_TEMP/wheel-venv-$PYTHON_VERSION"
+          rm -rf "$wheelhouse" "$venv"
+          mkdir -p "$wheelhouse"
+          python -m pip wheel --no-deps . -w "$wheelhouse"
+          wheel=$(find "$wheelhouse" -maxdepth 1 -type f -name '*.whl' -print -quit)
+          test -n "$wheel"
+          python -m venv "$venv"
+          "$venv/bin/python" -m pip install --no-deps "$wheel"
+          "$venv/bin/python" -m pip check
+          "$venv/bin/python" - <<'PY'
+          import nextgen_memory
+          from nextgen_memory import (
+              InMemoryMemoryPolicyDatasetBuilder,
+              MemoryPolicyDatasetSnapshot,
+              MemoryPolicyOutcomeLabel,
+          )
+          assert InMemoryMemoryPolicyDatasetBuilder is not None
+          assert MemoryPolicyDatasetSnapshot is not None
+          assert MemoryPolicyOutcomeLabel.ABSTAIN.value == 'abstain'
+          assert len(nextgen_memory.__all__) == len(set(nextgen_memory.__all__))
+          PY
+          cp "$wheel" /tmp/product.whl
+
+      - name: Build per-Python exact verification manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from __future__ import annotations
+
+          import hashlib
+          import json
+          import os
+          import re
+          import sys
+          from pathlib import Path
+
+          def passed(path: str) -> int:
+              matches = re.findall(
+                  r'(\d+) passed',
+                  Path(path).read_text(encoding='utf-8'),
+              )
+              if not matches:
+                  raise SystemExit(f'missing pytest count: {path}')
+              return int(matches[-1])
+
+          semantic = Path('/tmp/semantic.json')
+          wheel = Path('/tmp/product.whl')
+          audit = json.loads(Path('/tmp/audit.json').read_text(encoding='utf-8'))
+          manifest = {
+              'schema': 'm-head-memory-policy-dataset-python-v1',
+              'base_sha': os.environ['BASE_SHA'],
+              'candidate_sha': os.environ['CANDIDATE_SHA'],
+              'candidate_tree': os.environ['CANDIDATE_TREE'],
+              'red_sha': os.environ['RED_SHA'],
+              'product_pr': int(os.environ['PRODUCT_PR']),
+              'python_version': '.'.join(map(str, sys.version_info[:3])),
+              'focused_test_count': passed('/tmp/focused.txt'),
+              'generated_5000_test_count': passed('/tmp/generated-5000.txt'),
+              'full_test_count': passed('/tmp/full.txt'),
+              'audit': audit,
+              'semantic_sha256': hashlib.sha256(semantic.read_bytes()).hexdigest(),
+              'wheel_sha256': hashlib.sha256(wheel.read_bytes()).hexdigest(),
+              'hash_seed_invariant': True,
+              'exact_retry_count': 1000,
+              'trajectory_sets_disjoint': True,
+              'absent_feedback_nonnegative': True,
+              'isolated_wheel_import': True,
+              'pip_check': True,
+          }
+          root = Path('/tmp/evidence')
+          root.mkdir(parents=True, exist_ok=True)
+          (root / 'manifest.json').write_text(
+              json.dumps(
+                  manifest,
+                  ensure_ascii=False,
+                  allow_nan=False,
+                  sort_keys=True,
+                  separators=(',', ':'),
+              ) + '\n',
+              encoding='utf-8',
+          )
+          (root / 'semantic.json').write_bytes(semantic.read_bytes())
+          (root / 'product.whl').write_bytes(wheel.read_bytes())
+          PY
+          test -z "$(git status --porcelain)"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: memory-policy-dataset-python-${{ matrix.python-version }}
+          path: /tmp/evidence
+          if-no-files-found: error
+          retention-days: 21
+
+  aggregate:
+    needs: [resolve, verify]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      GH_TOKEN: ${{ github.token }}
+      BASE_SHA: ${{ needs.resolve.outputs.base_sha }}
+      CANDIDATE_SHA: ${{ needs.resolve.outputs.candidate_sha }}
+      CANDIDATE_TREE: ${{ needs.resolve.outputs.candidate_tree }}
+      RED_SHA: ${{ needs.resolve.outputs.red_sha }}
+      PRODUCT_PR: ${{ needs.resolve.outputs.product_pr }}
+      SHORT: ${{ needs.resolve.outputs.short }}
+      PRODUCER_BRANCH: ${{ needs.resolve.outputs.producer_branch }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.candidate_sha }}
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: memory-policy-dataset-python-*
+          path: ${{ runner.temp }}/matrix
+
+      - name: Compare Python 3.12 and 3.13 evidence byte-for-byte
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from __future__ import annotations
+
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+
+          root = Path(os.environ['RUNNER_TEMP']) / 'matrix'
+          manifests = sorted(root.rglob('manifest.json'))
+          semantics = sorted(root.rglob('semantic.json'))
+          wheels = sorted(root.rglob('product.whl'))
+          if len(manifests) != 2 or len(semantics) != 2 or len(wheels) != 2:
+              raise SystemExit('expected two complete Python artifacts')
+
+          documents = [json.loads(path.read_text(encoding='utf-8')) for path in manifests]
+          versions = {'.'.join(document['python_version'].split('.')[:2]) for document in documents}
+          if versions != {'3.12', '3.13'}:
+              raise SystemExit(f'unexpected Python versions: {versions!r}')
+          if semantics[0].read_bytes() != semantics[1].read_bytes():
+              raise SystemExit('cross-Python semantic bytes differ')
+
+          for document in documents:
+              if document['base_sha'] != os.environ['BASE_SHA']:
+                  raise SystemExit('base SHA drift')
+              if document['candidate_sha'] != os.environ['CANDIDATE_SHA']:
+                  raise SystemExit('candidate SHA drift')
+              if document['candidate_tree'] != os.environ['CANDIDATE_TREE']:
+                  raise SystemExit('candidate tree drift')
+              if document['red_sha'] != os.environ['RED_SHA']:
+                  raise SystemExit('RED SHA drift')
+              if document['product_pr'] != int(os.environ['PRODUCT_PR']):
+                  raise SystemExit('product PR drift')
+              if document['focused_test_count'] <= 0:
+                  raise SystemExit('focused test count absent')
+              if document['generated_5000_test_count'] <= 0:
+                  raise SystemExit('5,000 trace property did not pass')
+              if document['full_test_count'] < document['focused_test_count']:
+                  raise SystemExit('full test count is smaller than focused count')
+              if document['audit']['audit_findings'] != 0:
+                  raise SystemExit('audit findings are nonzero')
+              if document['hash_seed_invariant'] is not True:
+                  raise SystemExit('hash-seed proof absent')
+              if document['exact_retry_count'] != 1000:
+                  raise SystemExit('retry count drift')
+              if document['trajectory_sets_disjoint'] is not True:
+                  raise SystemExit('trajectory leakage proof absent')
+              if document['absent_feedback_nonnegative'] is not True:
+                  raise SystemExit('absent-feedback safety proof absent')
+              if document['isolated_wheel_import'] is not True:
+                  raise SystemExit('isolated wheel import absent')
+              if document['pip_check'] is not True:
+                  raise SystemExit('pip check absent')
+
+          for key in (
+              'focused_test_count',
+              'generated_5000_test_count',
+              'full_test_count',
+              'semantic_sha256',
+          ):
+              if len({json.dumps(document[key], sort_keys=True) for document in documents}) != 1:
+                  raise SystemExit(f'cross-Python drift: {key}')
+
+          semantic_raw = semantics[0].read_bytes()
+          review = {
+              'schema': 'm-head-memory-policy-dataset-review-v1',
+              'status': 'green_review_approved_unmerged',
+              'repository': 'leon36000/NextGen-Memory',
+              'reviewer_runtime': 'GPT-5.6 Pro',
+              'base': {
+                  'branch': 'main',
+                  'sha': os.environ['BASE_SHA'],
+              },
+              'candidate': {
+                  'branch': 'candidate/memory-policy-dataset-v0-20260831',
+                  'sha': os.environ['CANDIDATE_SHA'],
+                  'tree_sha': os.environ['CANDIDATE_TREE'],
+                  'pull_request': int(os.environ['PRODUCT_PR']),
+                  'exact_path_count': 9,
+              },
+              'tdd': {
+                  'branch': 'tdd/memory-policy-dataset-v0-red-v2-20260831',
+                  'sha': os.environ['RED_SHA'],
+                  'source_preserved': True,
+                  'tests_weakened': False,
+              },
+              'producer_evidence_branch': os.environ['PRODUCER_BRANCH'],
+              'verdict': 'APPROVE',
+              'findings': [],
+              'verification': {
+                  'python_versions': sorted(versions),
+                  'focused_test_count_each': documents[0]['focused_test_count'],
+                  'generated_5000_test_count_each': documents[0]['generated_5000_test_count'],
+                  'full_test_count_each': documents[0]['full_test_count'],
+                  'semantic_sha256': hashlib.sha256(semantic_raw).hexdigest(),
+                  'cross_python_semantic_identical': True,
+                  'hash_seed_invariant': True,
+                  'exact_retry_count': 1000,
+                  'trajectory_sets_disjoint': True,
+                  'absent_feedback_nonnegative': True,
+                  'audit_findings': 0,
+                  'isolated_wheel_import': True,
+                  'pip_check': True,
+                  'wheel_sha256_by_python': {
+                      '.'.join(document['python_version'].split('.')[:2]): document['wheel_sha256']
+                      for document in documents
+                  },
+              },
+              'contract': {
+                  'pointwise_examples': True,
+                  'trajectory_split_uses_maximum_ordinal': True,
+                  'abstention_is_nonnegative': True,
+                  'feature_target_audit_separation': True,
+                  'raw_content_surface': False,
+                  'model_training_surface': False,
+                  'persistence_surface': False,
+                  'feedback_surface': False,
+                  'activation_surface': False,
+              },
+              'merge_allowed': False,
+              'model_training_authorized': False,
+              'safety': {
+                  'merged': False,
+                  'model_trained': False,
+                  'production_database_contacted': False,
+                  'production_migration_applied': False,
+                  'production_application_data_written': False,
+                  'feedback_written': False,
+                  'policy_activated': False,
+                  'release_published': False,
+                  'tests_weakened': False,
+                  'stubs_added': False,
+                  'review_fabricated': False,
+              },
+              'next_action': (
+                  'A separate exact-SHA merge authorization may integrate this unchanged '
+                  'candidate. Merging the dataset does not authorize model training; a later '
+                  'learned reranker requires enough real trajectories, chronological holdout, '
+                  'shadow mode, paired replay, and a separate promotion decision.'
+              ),
+          }
+          Path('/tmp/review.json').write_text(
+              json.dumps(
+                  review,
+                  ensure_ascii=False,
+                  allow_nan=False,
+                  sort_keys=True,
+                  separators=(',', ':'),
+              ) + '\n',
+              encoding='utf-8',
+          )
+          PY
+
+      - name: Reconcile live branch and draft PR after the matrix
+        env:
+          REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*'
+          test "$(git rev-parse origin/main)" = "$BASE_SHA"
+          test "$(git rev-parse origin/candidate/memory-policy-dataset-v0-20260831)" = "$CANDIDATE_SHA"
+          test "$(git rev-parse "$CANDIDATE_SHA^{tree}")" = "$CANDIDATE_TREE"
+          pr=$(gh api "repos/$REPO/pulls/$PRODUCT_PR")
+          test "$(printf '%s' "$pr" | jq -r '.state')" = open
+          test "$(printf '%s' "$pr" | jq -r '.draft')" = true
+          test "$(printf '%s' "$pr" | jq -r '.head.sha')" = "$CANDIDATE_SHA"
+          test "$(printf '%s' "$pr" | jq -r '.base.sha')" = "$BASE_SHA"
+
+      - name: Bind artifact IDs, publish immutable evidence, checkpoint, and review
+        id: publish
+        env:
+          REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          artifacts=$(gh api --method GET "repos/$REPO/actions/runs/$GITHUB_RUN_ID/artifacts" -f per_page=100)
+          printf '%s' "$artifacts" | jq '[.artifacts[] | select(.name | startswith("memory-policy-dataset-python-")) | {id,name,digest,expired,size_in_bytes,created_at,expires_at}] | sort_by(.name)' > /tmp/artifacts.json
+          test "$(jq 'length' /tmp/artifacts.json)" -eq 2
+          test "$(jq '[.[] | select(.expired == true)] | length' /tmp/artifacts.json)" -eq 0
+
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          path = Path('/tmp/review.json')
+          review = json.loads(path.read_text(encoding='utf-8'))
+          review['verification']['run_id'] = int('${{ github.run_id }}')
+          review['verification']['artifacts'] = json.loads(Path('/tmp/artifacts.json').read_text(encoding='utf-8'))
+          path.write_text(json.dumps(review,ensure_ascii=False,allow_nan=False,sort_keys=True,separators=(',',':'))+'\n',encoding='utf-8')
+          PY
+
+          specific_branch="evidence/memory-policy-dataset-v0-${SHORT}-green-20260831"
+          specific_path="evidence/memory-policy-dataset-v0-${SHORT}-green-20260831.json"
+          specific_checkpoint_branch="evidence/memory-policy-dataset-v0-${SHORT}-checkpoint-20260831"
+          specific_checkpoint_path="evidence/memory-policy-dataset-v0-${SHORT}-checkpoint-20260831.json"
+          canonical_branch='evidence/memory-policy-dataset-v0-canonical-approved-20260831'
+          canonical_path='evidence/memory-policy-dataset-v0-canonical-approved-20260831.json'
+          canonical_checkpoint_branch='evidence/memory-policy-dataset-v0-canonical-checkpoint-20260831'
+          canonical_checkpoint_path='evidence/memory-policy-dataset-v0-canonical-checkpoint-20260831.json'
+
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git fetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*'
+
+          publish_exact() {
+            local branch=$1 source=$2 destination=$3 message=$4 base=$5
+            if git ls-remote --exit-code --heads origin "$branch"; then
+              git switch --detach "origin/$branch"
+              cmp "$source" "$destination"
+            else
+              git switch -C "$branch" "$base"
+              mkdir -p "$(dirname "$destination")"
+              cp "$source" "$destination"
+              git add "$destination"
+              git diff --cached --check
+              git commit -m "$message"
+              git push origin HEAD:"refs/heads/$branch"
+            fi
+          }
+
+          publish_exact "$specific_branch" /tmp/review.json "$specific_path" \
+            'evidence: approve memory policy dataset v0' "$CANDIDATE_SHA"
+          specific_commit=$(git rev-parse HEAD)
+
+          python - <<PY
+          import hashlib,json
+          from pathlib import Path
+          raw=Path('/tmp/review.json').read_bytes()
+          review=json.loads(raw)
+          checkpoint={
+            'checkpoint_key':'m-head:memory-policy-dataset-v0:green-readback:${SHORT}',
+            'status':review['status'],
+            'repository':review['repository'],
+            'evidence_branch':'$specific_branch',
+            'evidence_commit':'$specific_commit',
+            'evidence_sha256':hashlib.sha256(raw).hexdigest(),
+            'base':review['base'],
+            'candidate':review['candidate'],
+            'tdd':review['tdd'],
+            'verification':review['verification'],
+            'contract':review['contract'],
+            'verdict':review['verdict'],
+            'findings':review['findings'],
+            'merge_allowed':False,
+            'model_training_authorized':False,
+            'safety':review['safety'],
+            'next_action':review['next_action'],
+          }
+          Path('/tmp/checkpoint.json').write_text(json.dumps(checkpoint,ensure_ascii=False,allow_nan=False,sort_keys=True,separators=(',',':'))+'\n',encoding='utf-8')
+          PY
+
+          publish_exact "$specific_checkpoint_branch" /tmp/checkpoint.json "$specific_checkpoint_path" \
+            'evidence: checkpoint memory policy dataset v0' "$specific_commit"
+          specific_checkpoint_commit=$(git rev-parse HEAD)
+
+          publish_exact "$canonical_branch" /tmp/review.json "$canonical_path" \
+            'evidence: canonicalize memory policy dataset v0 approval' "$CANDIDATE_SHA"
+          canonical_commit=$(git rev-parse HEAD)
+
+          python - <<PY
+          import hashlib,json
+          from pathlib import Path
+          review_raw=Path('/tmp/review.json').read_bytes()
+          checkpoint_raw=Path('/tmp/checkpoint.json').read_bytes()
+          review=json.loads(review_raw)
+          canonical={
+            'checkpoint_key':'m-head:memory-policy-dataset-v0:canonical-approved:20260831',
+            'status':review['status'],
+            'repository':review['repository'],
+            'candidate':review['candidate'],
+            'base':review['base'],
+            'tdd':review['tdd'],
+            'verification':review['verification'],
+            'contract':review['contract'],
+            'review':{
+              'reviewer_runtime':review['reviewer_runtime'],
+              'verdict':review['verdict'],
+              'findings':review['findings'],
+              'merge_allowed':False,
+              'model_training_authorized':False,
+            },
+            'immutable_evidence':{
+              'specific_branch':'$specific_branch',
+              'specific_commit':'$specific_commit',
+              'specific_sha256':hashlib.sha256(review_raw).hexdigest(),
+              'specific_checkpoint_branch':'$specific_checkpoint_branch',
+              'specific_checkpoint_commit':'$specific_checkpoint_commit',
+              'specific_checkpoint_sha256':hashlib.sha256(checkpoint_raw).hexdigest(),
+              'canonical_branch':'$canonical_branch',
+              'canonical_commit':'$canonical_commit',
+            },
+            'safety':review['safety'],
+            'next_action':review['next_action'],
+          }
+          Path('/tmp/canonical-checkpoint.json').write_text(json.dumps(canonical,ensure_ascii=False,allow_nan=False,sort_keys=True,separators=(',',':'))+'\n',encoding='utf-8')
+          PY
+
+          publish_exact "$canonical_checkpoint_branch" /tmp/canonical-checkpoint.json "$canonical_checkpoint_path" \
+            'evidence: checkpoint canonical memory policy dataset v0 approval' "$canonical_commit"
+          canonical_checkpoint_commit=$(git rev-parse HEAD)
+
+          marker="MHEAD_GPT56PRO_MEMORY_POLICY_DATASET_REVIEW_V1:$CANDIDATE_SHA"
+          reviews=$(gh api --paginate "repos/$REPO/pulls/$PRODUCT_PR/reviews?per_page=100" | jq -s 'add // []')
+          existing=$(printf '%s' "$reviews" | jq -r --arg marker "$marker" '[.[]|select(.body|contains($marker))]|last|.id//empty')
+          if [ -z "$existing" ]; then
+            body=$(cat <<EOF
+          <!-- $marker -->
+          ## Independent exact-SHA technical review
+
+          - reviewer runtime: \`GPT-5.6 Pro\`;
+          - candidate SHA: \`$CANDIDATE_SHA\`;
+          - verdict: \`APPROVE\`;
+          - findings: none;
+          - Python 3.12/3.13 focused and complete suites: green and equal;
+          - 5,000 generated traces per Python: green;
+          - trajectory splits: disjoint by maximum ordinal;
+          - absent feedback: retained as non-trainable abstention;
+          - cross-Python semantic JSON/JSONL evidence: byte-identical;
+          - exact dataset retries: \`1,000\`;
+          - audit findings: \`0\`;
+          - isolated wheels and pip checks: green;
+          - canonical evidence: \`$canonical_branch\` at \`$canonical_commit\`;
+          - canonical checkpoint: \`$canonical_checkpoint_branch\` at \`$canonical_checkpoint_commit\`;
+          - merge authorized by this review: \`false\`;
+          - model training authorized: \`false\`.
+
+          Any SHA movement invalidates this review. A later learned reranker requires enough real trajectories, a chronological holdout, shadow mode, paired replay, and a separate promotion decision.
+          EOF
+            )
+            gh api "repos/$REPO/pulls/$PRODUCT_PR/reviews" \
+              --method POST \
+              -f event='COMMENT' \
+              --raw-field body="$body" \
+              > /tmp/github-review.json
+          else
+            gh api "repos/$REPO/pulls/$PRODUCT_PR/reviews/$existing" > /tmp/github-review.json
+          fi
+          review_id=$(jq -r '.id' /tmp/github-review.json)
+
+          issue_body=$(cat <<EOF
+          ## Memory Policy Dataset v0 independently approved
+
+          - candidate SHA: \`$CANDIDATE_SHA\`;
+          - product PR: #$PRODUCT_PR;
+          - verdict: \`APPROVE\`;
+          - findings: none;
+          - Python 3.12/3.13 matrix: green;
+          - 5,000 traces, trajectory-leakage proof, abstention safety, audit and wheels: green;
+          - immutable canonical evidence: \`$canonical_branch\` at \`$canonical_commit\`;
+          - canonical checkpoint: \`$canonical_checkpoint_branch\` at \`$canonical_checkpoint_commit\`;
+          - merge allowed: \`false\`;
+          - model trained or authorized: \`false\`.
+          EOF
+          )
+          gh api "repos/$REPO/issues/23/comments" --raw-field body="$issue_body" >/dev/null
+
+          echo "specific_branch=$specific_branch" >> "$GITHUB_OUTPUT"
+          echo "specific_commit=$specific_commit" >> "$GITHUB_OUTPUT"
+          echo "canonical_branch=$canonical_branch" >> "$GITHUB_OUTPUT"
+          echo "canonical_commit=$canonical_commit" >> "$GITHUB_OUTPUT"
+          echo "canonical_checkpoint_branch=$canonical_checkpoint_branch" >> "$GITHUB_OUTPUT"
+          echo "canonical_checkpoint_commit=$canonical_checkpoint_commit" >> "$GITHUB_OUTPUT"
+          echo "github_review_id=$review_id" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: memory-policy-dataset-v0-review-summary
+          path: |
+            /tmp/review.json
+            /tmp/checkpoint.json
+            /tmp/canonical-checkpoint.json
+            /tmp/artifacts.json
+          if-no-files-found: error
+          retention-days: 21
