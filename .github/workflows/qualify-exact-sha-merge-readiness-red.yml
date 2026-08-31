@@ -1,10 +1,10 @@
-name: Qualify exact-SHA merge readiness gate RED
+name: Qualify exact-SHA merge readiness gate RED v2
 
 on:
   pull_request:
 
 concurrency:
-  group: exact-sha-merge-readiness-red
+  group: exact-sha-merge-readiness-red-v2
   cancel-in-progress: true
 
 permissions:
@@ -20,7 +20,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: tdd/exact-sha-merge-readiness-gate-v0-red-20260830
+          ref: tdd/exact-sha-merge-readiness-gate-v0-red-v2-20260831
           fetch-depth: 0
 
       - uses: actions/setup-python@v5
@@ -37,8 +37,8 @@ jobs:
         run: |
           set -euo pipefail
           base_sha='f4d9388c14dd1f746f904b3724767f73f82786fd'
-          design_sha='b8f6f4834502749005d97485e205f5b9615fadeb'
-          red_sha='d86e429d6b4cf104817297b5658d799858f82506'
+          design_sha='c5e14f8d8db744b457b1f3f84cac249b1d7d5c70'
+          red_sha='6f7f9adbfe4020cbf4135206162ec4335b8d8373'
           test "$(git rev-parse HEAD)" = "$red_sha"
           test "$(git merge-base "$base_sha" "$design_sha")" = "$base_sha"
           test "$(git merge-base "$design_sha" "$red_sha")" = "$design_sha"
@@ -90,7 +90,7 @@ jobs:
           BASE_SHA: ${{ steps.identity.outputs.base_sha }}
         run: |
           set -euo pipefail
-          red_root="$RUNNER_TEMP/exact-sha-merge-readiness-red"
+          red_root="$RUNNER_TEMP/exact-sha-merge-readiness-red-v2"
           rm -rf "$red_root"
           git worktree add --detach "$red_root" "$BASE_SHA"
           mkdir -p "$red_root/tests" "$red_root/docs"
@@ -111,7 +111,7 @@ jobs:
           fi
 
           for file in "${files[@]}"; do
-            output="/tmp/$(basename "$file" .py)-merge-readiness-red.txt"
+            output="/tmp/$(basename "$file" .py)-merge-readiness-red-v2.txt"
             set +e
             PYTHONPATH="$PWD/src" python -m pytest --collect-only -q "$file" \
               > "$output" 2>&1
@@ -162,15 +162,15 @@ jobs:
         run: |
           set -euo pipefail
           body=$(cat <<EOF
-          ## Exact-SHA Merge Readiness Gate v0 RED accepted
+          ## Exact-SHA Merge Readiness Gate v0 RED v2 accepted
 
-          - immutable product base: `${{ steps.identity.outputs.base_sha }}`;
-          - committed design/plan: `${{ steps.identity.outputs.design_sha }}`;
-          - tests-only RED head: `${{ steps.identity.outputs.red_sha }}`;
+          - immutable product base: \`${{ steps.identity.outputs.base_sha }}\`;
+          - normalized design/plan: \`${{ steps.identity.outputs.design_sha }}\`;
+          - tests-only RED v2 head: \`${{ steps.identity.outputs.red_sha }}\`;
           - design-to-RED surface: four paths;
           - base-to-RED surface: six paths;
           - Ruff, formatting, and syntax: clean;
-          - each test independently reaches only `ModuleNotFoundError: nextgen_memory.merge_readiness_gate`;
+          - each test independently reaches only \`ModuleNotFoundError: nextgen_memory.merge_readiness_gate\`;
           - implementation, package exports, workflows in product scope, migrations, persistence, merge execution, activation, deployment, feedback, and release: absent;
           - merge allowed: false.
           EOF
