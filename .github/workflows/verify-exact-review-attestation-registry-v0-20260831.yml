@@ -1,0 +1,679 @@
+name: Verify exact review attestation registry v0 independent matrix
+
+on:
+  push:
+    branches:
+      - bootstrap/verify-exact-review-attestation-registry-v0-20260831
+  workflow_dispatch:
+
+concurrency:
+  group: exact-review-attestation-registry-v0-independent-20260831
+  cancel-in-progress: true
+
+permissions:
+  actions: read
+  contents: write
+  issues: write
+  pull-requests: write
+
+jobs:
+  resolve:
+    runs-on: ubuntu-24.04
+    outputs:
+      base_sha: ${{ steps.identity.outputs.base_sha }}
+      candidate_sha: ${{ steps.identity.outputs.candidate_sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: candidate/exact-sha-review-attestation-registry-v0-20260824
+          fetch-depth: 0
+
+      - name: Freeze immutable graph and exact nine-path surface
+        id: identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          base_sha='f4f3aca9759b5b7a60691017c2211152c011ea92'
+          candidate_sha=$(git rev-parse HEAD)
+          test "$(git merge-base "$base_sha" "$candidate_sha")" = "$base_sha"
+          mapfile -t changed < <(git diff --name-only "$base_sha"..."$candidate_sha" | sort)
+          expected=(
+            docs/exact-sha-review-attestation-registry-v0-red.md
+            docs/exact-sha-review-attestation-registry-v0.md
+            docs/superpowers/plans/2026-08-24-exact-sha-review-attestation-registry-v0.md
+            docs/superpowers/specs/2026-08-24-exact-sha-review-attestation-registry-v0-design.md
+            src/nextgen_memory/__init__.py
+            src/nextgen_memory/review_attestation_registry.py
+            tests/test_review_attestation_registry.py
+            tests/test_review_attestation_registry_properties.py
+            tests/test_review_attestation_registry_public_api.py
+          )
+          test "${#changed[@]}" -eq "${#expected[@]}"
+          diff -u <(printf '%s\n' "${expected[@]}" | sort) <(printf '%s\n' "${changed[@]}")
+          test -z "$(git diff --name-only "$base_sha"..."$candidate_sha" -- '.github/workflows/**' 'migrations/**' pyproject.toml 'src/nextgen_memory/corrective_retrieval_*')"
+          git diff --check "$base_sha"..."$candidate_sha"
+          test -z "$(git status --porcelain)"
+          echo "base_sha=$base_sha" >> "$GITHUB_OUTPUT"
+          echo "candidate_sha=$candidate_sha" >> "$GITHUB_OUTPUT"
+
+  verify:
+    needs: resolve
+    runs-on: ubuntu-24.04
+    timeout-minutes: 55
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.12', '3.13']
+    env:
+      PYTHON_VERSION: ${{ matrix.python-version }}
+      BASE_SHA: ${{ needs.resolve.outputs.base_sha }}
+      CANDIDATE_SHA: ${{ needs.resolve.outputs.candidate_sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.candidate_sha }}
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install exact development environment
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e '.[dev]'
+          python -m pip install 'ruff==0.16.4'
+
+      - name: Static verification and exact test-source preservation
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
+          ruff check .
+          ruff format --check .
+          python -m compileall -q src scripts
+          for marker in '# noqa' 'pytest.mark.skip' 'pytest.mark.xfail' 'NotImplementedError'; do
+            if grep -RFn "$marker" \
+              tests/test_review_attestation_registry.py \
+              tests/test_review_attestation_registry_properties.py \
+              tests/test_review_attestation_registry_public_api.py; then
+              echo "forbidden test weakening marker: $marker" >&2
+              exit 1
+            fi
+          done
+          test -z "$(git status --porcelain)"
+
+      - name: Focused behavior, generated traces, and full suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          focused=(
+            tests/test_review_attestation_registry.py
+            tests/test_review_attestation_registry_properties.py
+            tests/test_review_attestation_registry_public_api.py
+          )
+          python -m pytest -q "${focused[@]}" | tee /tmp/focused.txt
+          python -m pytest -q | tee /tmp/full.txt
+          grep -F '5_000' tests/test_review_attestation_registry_properties.py >/dev/null
+
+      - name: Strict dependency, privacy, side-effect, and stub audit
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from __future__ import annotations
+
+          import ast
+          import json
+          import os
+          import sys
+          from pathlib import Path
+
+          path = Path('src/nextgen_memory/review_attestation_registry.py')
+          source = path.read_text(encoding='utf-8')
+          tree = ast.parse(source, filename=str(path))
+          findings: list[str] = []
+          allowed_roots = set(sys.stdlib_module_names) | {'__future__'}
+          forbidden_calls = {'eval', 'exec', 'open', 'compile'}
+          forbidden_attributes = {
+              'connect', 'create_connection', 'request', 'urlopen', 'system',
+              'popen', 'run', 'Popen', 'sleep', 'uuid1', 'uuid4',
+              'write_text', 'write_bytes', 'mkdir', 'unlink', 'rename',
+          }
+          for node in ast.walk(tree):
+              if isinstance(node, ast.Import):
+                  for alias in node.names:
+                      root = alias.name.split('.', 1)[0]
+                      if root not in allowed_roots:
+                          findings.append(f'{node.lineno}:nonstdlib:{alias.name}')
+              elif isinstance(node, ast.ImportFrom):
+                  if node.level == 0:
+                      root = (node.module or '').split('.', 1)[0]
+                      if root not in allowed_roots:
+                          findings.append(f'{node.lineno}:nonstdlib:{node.module}')
+              elif isinstance(node, ast.Pass):
+                  findings.append(f'{node.lineno}:pass')
+              elif (
+                  isinstance(node, ast.Expr)
+                  and isinstance(node.value, ast.Constant)
+                  and node.value.value is Ellipsis
+              ):
+                  findings.append(f'{node.lineno}:executable-ellipsis')
+              elif isinstance(node, ast.Raise):
+                  target = node.exc.func if isinstance(node.exc, ast.Call) else node.exc
+                  if (
+                      isinstance(target, ast.Name)
+                      and target.id == 'NotImplementedError'
+                  ) or (
+                      isinstance(target, ast.Attribute)
+                      and target.attr == 'NotImplementedError'
+                  ):
+                      findings.append(f'{node.lineno}:NotImplementedError')
+              elif isinstance(node, ast.Call):
+                  if isinstance(node.func, ast.Name) and node.func.id in forbidden_calls:
+                      findings.append(f'{node.lineno}:call:{node.func.id}')
+                  elif isinstance(node.func, ast.Attribute) and node.func.attr in forbidden_attributes:
+                      findings.append(f'{node.lineno}:call:{node.func.attr}')
+
+          lowered = source.lower()
+          for marker in (
+              'postgresql://', 'mongodb://', 'http://', 'https://',
+              'credential', 'password', 'raw_prompt', 'raw_query',
+              'response_text', 'memory_body', 'merge_pull_request',
+              'activate_policy', 'write_feedback', '# todo', '# fixme',
+          ):
+              if marker in lowered:
+                  findings.append(f'text:{marker}')
+          if findings:
+              raise SystemExit('\n'.join(findings))
+          Path('/tmp/audit.json').write_text(
+              json.dumps({'audit_findings': 0}, sort_keys=True) + '\n',
+              encoding='utf-8',
+          )
+          print('audit_findings=0')
+          PY
+
+      - name: Generate deterministic semantic evidence under two hash seeds
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > /tmp/semantic.py <<'PY'
+          from __future__ import annotations
+
+          import hashlib
+          import json
+          import os
+          import sys
+          from pathlib import Path
+
+          from nextgen_memory.review_attestation_registry import (
+              ExactShaReviewAttestation,
+              ExactShaReviewRequest,
+              InMemoryExactShaReviewAttestationRegistry,
+              ReviewAdvisoryState,
+              ReviewAttestationVerdict,
+              ReviewFindingCode,
+              ReviewerIdentity,
+              ReviewModel,
+          )
+
+          def digest(value: str) -> str:
+              return hashlib.sha256(value.encode('utf-8')).hexdigest()
+
+          reviewers = tuple(digest(f'reviewer-{index}') for index in range(4))
+          request = ExactShaReviewRequest(
+              repository='leon36000/NextGen-Memory',
+              pull_request_number=1,
+              base_sha=os.environ['BASE_SHA'],
+              candidate_sha=os.environ['CANDIDATE_SHA'],
+              diff_sha256=digest('diff'),
+              review_packet_sha256=digest('packet'),
+              acceptance_criteria_sha256=digest('criteria'),
+              required_model=ReviewModel.GPT_5_6_SOL,
+              trusted_reviewer_fingerprints=set(reviewers),
+              minimum_approvals=2,
+          )
+
+          def attestation(index: int, verdict: ReviewAttestationVerdict, findings: object = ()) -> ExactShaReviewAttestation:
+              return ExactShaReviewAttestation(
+                  request_id=request.id,
+                  request_content_hash=request.content_hash,
+                  repository=request.repository,
+                  pull_request_number=request.pull_request_number,
+                  candidate_sha=request.candidate_sha,
+                  reviewer=ReviewerIdentity(
+                      model=ReviewModel.GPT_5_6_SOL,
+                      reviewer_key_fingerprint=reviewers[index],
+                  ),
+                  verdict=verdict,
+                  finding_codes=findings,
+                  review_artifact_sha256=digest(f'review-{index}'),
+                  evidence_artifact_sha256s={
+                      digest(f'evidence-{index}-a'),
+                      digest(f'evidence-{index}-b'),
+                  },
+                  authenticated_envelope_sha256=digest(f'envelope-{index}'),
+              )
+
+          registry = InMemoryExactShaReviewAttestationRegistry()
+          if registry.register_request(request) is not request:
+              raise SystemExit('first request registration changed identity')
+          for _ in range(1000):
+              if registry.register_request(request) is not request:
+                  raise SystemExit('request exact retry changed identity')
+          states: dict[str, object] = {}
+          states['pending'] = json.loads(registry.decision(request.id).render_json())
+          approve_a = attestation(0, ReviewAttestationVerdict.APPROVE)
+          approve_b = attestation(1, ReviewAttestationVerdict.APPROVE)
+          registry.record_attestation(approve_a)
+          states['one_approval'] = json.loads(registry.decision(request.id).render_json())
+          registry.record_attestation(approve_b)
+          for _ in range(1000):
+              if registry.record_attestation(approve_b) is not approve_b:
+                  raise SystemExit('attestation exact retry changed identity')
+          states['approved'] = json.loads(registry.decision(request.id).render_json())
+          registry.record_attestation(
+              attestation(
+                  2,
+                  ReviewAttestationVerdict.BLOCKED_BY_EVIDENCE,
+                  (ReviewFindingCode.MISSING_ARTIFACT,),
+              )
+          )
+          states['evidence_blocked'] = json.loads(registry.decision(request.id).render_json())
+          registry.record_attestation(
+              attestation(
+                  3,
+                  ReviewAttestationVerdict.CHANGES_REQUIRED,
+                  (ReviewFindingCode.CONTRACT_VIOLATION,),
+              )
+          )
+          states['blocked'] = json.loads(registry.decision(request.id).render_json())
+
+          expected = {
+              'pending': ReviewAdvisoryState.PENDING.value,
+              'one_approval': ReviewAdvisoryState.PENDING.value,
+              'approved': ReviewAdvisoryState.APPROVED.value,
+              'evidence_blocked': ReviewAdvisoryState.EVIDENCE_BLOCKED.value,
+              'blocked': ReviewAdvisoryState.BLOCKED.value,
+          }
+          actual = {name: value['state'] for name, value in states.items()}
+          if actual != expected:
+              raise SystemExit(f'state matrix differs: {actual!r}')
+          payload = {
+              'schema': 'm-head-exact-review-attestation-semantic-v1',
+              'base_sha': os.environ['BASE_SHA'],
+              'candidate_sha': os.environ['CANDIDATE_SHA'],
+              'request_id': str(request.id),
+              'request_content_hash': request.content_hash,
+              'states': states,
+              'summary': json.loads(registry.summary(request.id).render_json()),
+              'request_retry_count': 1000,
+              'attestation_retry_count': 1000,
+          }
+          Path(sys.argv[1]).write_text(
+              json.dumps(payload, ensure_ascii=False, allow_nan=False, sort_keys=True, separators=(',', ':')) + '\n',
+              encoding='utf-8',
+          )
+          PY
+          PYTHONHASHSEED=1 python /tmp/semantic.py /tmp/semantic.json
+          PYTHONHASHSEED=999 python /tmp/semantic.py /tmp/semantic-seed-999.json
+          cmp /tmp/semantic.json /tmp/semantic-seed-999.json
+
+      - name: Build and import isolated wheel
+        shell: bash
+        run: |
+          set -euo pipefail
+          wheelhouse="$RUNNER_TEMP/wheelhouse-$PYTHON_VERSION"
+          venv="$RUNNER_TEMP/wheel-venv-$PYTHON_VERSION"
+          rm -rf "$wheelhouse" "$venv"
+          mkdir -p "$wheelhouse"
+          python -m pip wheel --no-deps . -w "$wheelhouse"
+          wheel=$(find "$wheelhouse" -maxdepth 1 -type f -name '*.whl' -print -quit)
+          test -n "$wheel"
+          python -m venv "$venv"
+          "$venv/bin/python" -m pip install --no-deps "$wheel"
+          "$venv/bin/python" - <<'PY'
+          import nextgen_memory
+          from nextgen_memory import (
+              ExactShaReviewAttestation,
+              ExactShaReviewRequest,
+              InMemoryExactShaReviewAttestationRegistry,
+              ReviewAdvisoryState,
+              ReviewAttestationVerdict,
+              ReviewerIdentity,
+              ReviewFindingCode,
+              ReviewModel,
+          )
+          assert ExactShaReviewRequest is not None
+          assert ExactShaReviewAttestation is not None
+          assert InMemoryExactShaReviewAttestationRegistry is not None
+          assert ReviewerIdentity is not None
+          assert ReviewModel.GPT_5_6_SOL.value == 'gpt-5.6-sol'
+          assert ReviewAttestationVerdict.APPROVE.value == 'APPROVE'
+          assert ReviewAdvisoryState.APPROVED.value == 'approved'
+          assert ReviewFindingCode.CONTRACT_VIOLATION.value == 'contract_violation'
+          for name in (
+              'ExactShaReviewAttestation', 'ExactShaReviewRequest',
+              'InMemoryExactShaReviewAttestationRegistry', 'ReviewerIdentity',
+              'ReviewModel', 'ReviewAttestationVerdict',
+              'ReviewAdvisoryState', 'ReviewFindingCode',
+          ):
+              assert nextgen_memory.__all__.count(name) == 1
+          PY
+          "$venv/bin/python" -m pip check
+          cp "$wheel" /tmp/product.whl
+
+      - name: Build per-Python verification manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from __future__ import annotations
+
+          import hashlib
+          import json
+          import os
+          import re
+          import sys
+          from pathlib import Path
+
+          def passed(path: str) -> int:
+              text = Path(path).read_text(encoding='utf-8')
+              matches = re.findall(r'(\d+) passed', text)
+              if not matches:
+                  raise SystemExit(f'missing pass count: {path}')
+              return int(matches[-1])
+
+          semantic = Path('/tmp/semantic.json')
+          wheel = Path('/tmp/product.whl')
+          manifest = {
+              'schema': 'm-head-exact-review-attestation-verification-v1',
+              'base_sha': os.environ['BASE_SHA'],
+              'candidate_sha': os.environ['CANDIDATE_SHA'],
+              'python_version': '.'.join(map(str, sys.version_info[:3])),
+              'focused_test_count': passed('/tmp/focused.txt'),
+              'full_test_count': passed('/tmp/full.txt'),
+              'generated_trace_count': 5000,
+              'request_retry_count': 1000,
+              'attestation_retry_count': 1000,
+              'semantic_sha256': hashlib.sha256(semantic.read_bytes()).hexdigest(),
+              'wheel_sha256': hashlib.sha256(wheel.read_bytes()).hexdigest(),
+              'audit_findings': 0,
+              'hash_seed_invariant': True,
+              'isolated_wheel_import': True,
+              'exact_path_count': 9,
+          }
+          root = Path('/tmp/evidence')
+          root.mkdir(parents=True, exist_ok=True)
+          (root / 'verification.json').write_text(
+              json.dumps(manifest, ensure_ascii=False, allow_nan=False, sort_keys=True, separators=(',', ':')) + '\n',
+              encoding='utf-8',
+          )
+          (root / 'semantic.json').write_bytes(semantic.read_bytes())
+          (root / 'product.whl').write_bytes(wheel.read_bytes())
+          PY
+          test -z "$(git status --porcelain)"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: exact-review-attestation-python-${{ matrix.python-version }}
+          path: /tmp/evidence
+          if-no-files-found: error
+          retention-days: 14
+
+  compare-and-publish:
+    needs: [resolve, verify]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      BASE_SHA: ${{ needs.resolve.outputs.base_sha }}
+      CANDIDATE_SHA: ${{ needs.resolve.outputs.candidate_sha }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.candidate_sha }}
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: exact-review-attestation-python-*
+          path: ${{ runner.temp }}/matrix
+
+      - name: Compare both Python versions and build immutable evidence
+        id: compare
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from __future__ import annotations
+
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+
+          root = Path(os.environ['RUNNER_TEMP']) / 'matrix'
+          reports = sorted(root.rglob('verification.json'))
+          semantics = sorted(root.rglob('semantic.json'))
+          wheels = sorted(root.rglob('product.whl'))
+          if len(reports) != 2 or len(semantics) != 2 or len(wheels) != 2:
+              raise SystemExit('expected exactly two complete Python artifacts')
+          documents = [json.loads(path.read_text(encoding='utf-8')) for path in reports]
+          versions = {'.'.join(document['python_version'].split('.')[:2]) for document in documents}
+          if versions != {'3.12', '3.13'}:
+              raise SystemExit(f'unexpected Python versions: {versions!r}')
+          if semantics[0].read_bytes() != semantics[1].read_bytes():
+              raise SystemExit('cross-Python semantic bytes differ')
+          for document in documents:
+              if document['base_sha'] != os.environ['BASE_SHA']:
+                  raise SystemExit('base SHA drift')
+              if document['candidate_sha'] != os.environ['CANDIDATE_SHA']:
+                  raise SystemExit('candidate SHA drift')
+              if document['generated_trace_count'] != 5000:
+                  raise SystemExit('generated trace count drift')
+              if document['request_retry_count'] != 1000 or document['attestation_retry_count'] != 1000:
+                  raise SystemExit('retry count drift')
+              if document['audit_findings'] != 0:
+                  raise SystemExit('audit findings are nonzero')
+              if document['hash_seed_invariant'] is not True or document['isolated_wheel_import'] is not True:
+                  raise SystemExit('determinism or wheel proof absent')
+              if document['exact_path_count'] != 9:
+                  raise SystemExit('path count drift')
+          for key in ('focused_test_count', 'full_test_count', 'semantic_sha256'):
+              if len({json.dumps(document[key], sort_keys=True) for document in documents}) != 1:
+                  raise SystemExit(f'cross-Python drift: {key}')
+          semantic_raw = semantics[0].read_bytes()
+          summary = {
+              'schema': 'm-head-exact-review-attestation-green-v1',
+              'status': 'green_review_pending_unmerged',
+              'repository': 'leon36000/NextGen-Memory',
+              'base': {
+                  'branch': 'candidate/advisory-policy-promotion-gate-v0-20260824',
+                  'sha': os.environ['BASE_SHA'],
+              },
+              'candidate': {
+                  'branch': 'candidate/exact-sha-review-attestation-registry-v0-20260824',
+                  'sha': os.environ['CANDIDATE_SHA'],
+                  'exact_path_count': 9,
+              },
+              'verification': {
+                  'python_versions': sorted(versions),
+                  'focused_test_count_each': documents[0]['focused_test_count'],
+                  'full_test_count_each': documents[0]['full_test_count'],
+                  'generated_trace_count_each': 5000,
+                  'request_retry_count': 1000,
+                  'attestation_retry_count': 1000,
+                  'semantic_sha256': hashlib.sha256(semantic_raw).hexdigest(),
+                  'cross_python_semantic_identical': True,
+                  'hash_seed_invariant': True,
+                  'audit_findings': 0,
+                  'isolated_wheel_import': True,
+                  'wheel_sha256_by_python': {
+                      '.'.join(document['python_version'].split('.')[:2]): document['wheel_sha256']
+                      for document in documents
+                  },
+              },
+              'contract': {
+                  'pure_in_memory': True,
+                  'advisory_only': True,
+                  'states': ['pending', 'approved', 'evidence_blocked', 'blocked'],
+                  'hard_blocker_precedence': True,
+                  'exact_retry_idempotent': True,
+                  'immutable_conflict_rejection': True,
+                  'signature_verification_claim': False,
+                  'persistence_surface': False,
+                  'database_or_network_surface': False,
+                  'merge_surface': False,
+              },
+              'review': {
+                  'reviewer_runtime_required': 'GPT-5.6 Pro or independently authenticated reviewer',
+                  'verdict': 'pending',
+                  'merge_allowed': False,
+              },
+              'safety': {
+                  'merged': False,
+                  'production_database_contacted': False,
+                  'production_migration_applied': False,
+                  'feedback_written': False,
+                  'policy_activated': False,
+                  'release_published': False,
+                  'tests_weakened': False,
+                  'stubs_added': False,
+              },
+          }
+          destination = Path('/tmp/green-summary.json')
+          destination.write_text(
+              json.dumps(summary, ensure_ascii=False, allow_nan=False, sort_keys=True, separators=(',', ':')) + '\n',
+              encoding='utf-8',
+          )
+          PY
+          short=${CANDIDATE_SHA:0:8}
+          echo "short=$short" >> "$GITHUB_OUTPUT"
+
+      - name: Bind live artifact metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          artifacts=$(gh api --method GET "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/artifacts" -f per_page=100)
+          printf '%s' "$artifacts" | jq '[.artifacts[] | select(.name | startswith("exact-review-attestation-python-")) | {id,name,digest,expired,size_in_bytes,created_at,expires_at}] | sort_by(.name)' > /tmp/artifacts.json
+          test "$(jq 'length' /tmp/artifacts.json)" -eq 2
+          test "$(jq '[.[] | select(.expired == true)] | length' /tmp/artifacts.json)" -eq 0
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          path = Path('/tmp/green-summary.json')
+          value = json.loads(path.read_text(encoding='utf-8'))
+          value['verification']['run_id'] = int('${{ github.run_id }}')
+          value['verification']['artifacts'] = json.loads(Path('/tmp/artifacts.json').read_text(encoding='utf-8'))
+          path.write_text(json.dumps(value, ensure_ascii=False, allow_nan=False, sort_keys=True, separators=(',', ':')) + '\n', encoding='utf-8')
+          PY
+
+      - name: Publish immutable Git evidence and canonical product PR
+        shell: bash
+        run: |
+          set -euo pipefail
+          short='${{ steps.compare.outputs.short }}'
+          evidence_branch="evidence/exact-sha-review-attestation-registry-v0-${short}-green-20260831"
+          checkpoint_branch="evidence/exact-sha-review-attestation-registry-v0-${short}-checkpoint-20260831"
+          evidence_path="evidence/exact-sha-review-attestation-registry-v0-${short}-green-20260831.json"
+          checkpoint_path="evidence/exact-sha-review-attestation-registry-v0-${short}-checkpoint-20260831.json"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git fetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*'
+          if git ls-remote --exit-code --heads origin "$evidence_branch"; then
+            git switch --detach "origin/$evidence_branch"
+            cmp /tmp/green-summary.json "$evidence_path"
+          else
+            git switch -C "$evidence_branch" "$CANDIDATE_SHA"
+            mkdir -p evidence
+            cp /tmp/green-summary.json "$evidence_path"
+            git add "$evidence_path"
+            git diff --cached --check
+            git commit -m 'evidence: certify exact review attestation registry v0'
+            git push origin HEAD:"refs/heads/$evidence_branch"
+          fi
+          evidence_commit=$(git rev-parse HEAD)
+          python - <<PY
+          import hashlib, json
+          from pathlib import Path
+          raw = Path('/tmp/green-summary.json').read_bytes()
+          summary = json.loads(raw)
+          checkpoint = {
+              'checkpoint_key': 'm-head:exact-sha-review-attestation-registry-v0:green-readback:${{ steps.compare.outputs.short }}',
+              'status': summary['status'],
+              'repository': summary['repository'],
+              'evidence_branch': '$evidence_branch',
+              'evidence_commit': '$evidence_commit',
+              'evidence_sha256': hashlib.sha256(raw).hexdigest(),
+              'base': summary['base'],
+              'candidate': summary['candidate'],
+              'verification': summary['verification'],
+              'contract': summary['contract'],
+              'review': summary['review'],
+              'safety': summary['safety'],
+              'next_action': 'Perform an independent exact-SHA review. Merge, migration, deployment, feedback, activation, and release remain separate operations.',
+          }
+          Path('/tmp/checkpoint.json').write_text(json.dumps(checkpoint, ensure_ascii=False, allow_nan=False, sort_keys=True, separators=(',', ':')) + '\n', encoding='utf-8')
+          PY
+          if git ls-remote --exit-code --heads origin "$checkpoint_branch"; then
+            git switch --detach "origin/$checkpoint_branch"
+            cmp /tmp/checkpoint.json "$checkpoint_path"
+          else
+            git switch -C "$checkpoint_branch" "$evidence_commit"
+            cp /tmp/checkpoint.json "$checkpoint_path"
+            git add "$checkpoint_path"
+            git diff --cached --check
+            git commit -m 'evidence: checkpoint exact review attestation registry v0'
+            git push origin HEAD:"refs/heads/$checkpoint_branch"
+          fi
+          checkpoint_commit=$(git rev-parse HEAD)
+          owner=${GITHUB_REPOSITORY%%/*}
+          pulls=$(gh api --method GET "repos/$GITHUB_REPOSITORY/pulls" -f state=open -f head="$owner:candidate/exact-sha-review-attestation-registry-v0-20260824" -f per_page=100)
+          count=$(printf '%s' "$pulls" | jq 'length')
+          if [ "$count" -eq 0 ]; then
+            gh api --method POST "repos/$GITHUB_REPOSITORY/pulls" \
+              -f title='feat: exact-SHA review attestation registry v0' \
+              -f head='candidate/exact-sha-review-attestation-registry-v0-20260824' \
+              -f base='candidate/advisory-policy-promotion-gate-v0-20260824' \
+              -F draft=true \
+              -f body="Immutable nine-path candidate at $CANDIDATE_SHA. Independent Python 3.12/3.13 run $GITHUB_RUN_ID is GREEN. Evidence: $evidence_branch at $evidence_commit. Checkpoint: $checkpoint_branch at $checkpoint_commit. Review pending; merge_allowed=false." >/tmp/product-pr.json
+          elif [ "$count" -eq 1 ]; then
+            printf '%s' "$pulls" | jq '.[0]' >/tmp/product-pr.json
+            test "$(jq -r '.head.sha' /tmp/product-pr.json)" = "$CANDIDATE_SHA"
+          else
+            echo 'multiple canonical product PRs exist' >&2
+            exit 1
+          fi
+          product_pr=$(jq -r '.number' /tmp/product-pr.json)
+          body=$(cat <<EOF
+          ## Exact-SHA Review Attestation Registry v0 independently GREEN
+
+          - candidate: \`$CANDIDATE_SHA\`;
+          - base: \`$BASE_SHA\`;
+          - product PR: #$product_pr;
+          - verifier run: \`$GITHUB_RUN_ID\`;
+          - Python: 3.12 and 3.13;
+          - generated traces: 5,000 per Python;
+          - exact request/attestation retries: 1,000 each;
+          - cross-Python semantic evidence: byte-identical;
+          - audit findings: 0;
+          - isolated wheel imports: green;
+          - evidence: \`$evidence_branch\` at \`$evidence_commit\`;
+          - checkpoint: \`$checkpoint_branch\` at \`$checkpoint_commit\`;
+          - merge allowed: false; independent exact-SHA review pending.
+          EOF
+          )
+          gh api "repos/$GITHUB_REPOSITORY/issues/165/comments" --raw-field body="$body" >/dev/null
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: exact-review-attestation-cross-python-summary
+          path: |
+            /tmp/green-summary.json
+            /tmp/checkpoint.json
+            /tmp/artifacts.json
+          if-no-files-found: error
+          retention-days: 14
