@@ -1,0 +1,75 @@
+name: Implement exact review attestation registry v0
+
+on:
+  pull_request:
+
+concurrency:
+  group: exact-review-attestation-registry-v0-product-v11-diagnostic
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+jobs:
+  implement:
+    if: github.event.pull_request.head.ref == 'bootstrap/implement-exact-review-attestation-registry-v0-20260825'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: bootstrap/implement-exact-review-attestation-registry-v0-20260825
+          path: controller
+          fetch-depth: 0
+
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/exact-sha-review-attestation-registry-v0-20260824
+          path: product
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: product/pyproject.toml
+
+      - name: Execute exact product controller v11 with durable diagnostics
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -o pipefail
+          bash -x controller/.github/controllers/run_implement_exact_review_attestation_registry_v0_v11.sh \
+            "$GITHUB_WORKSPACE/controller" \
+            "$GITHUB_WORKSPACE/product" \
+            2>&1 | tee /tmp/exact-review-attestation-controller-v11.log
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: exact-review-attestation-registry-v0-diagnostics
+          path: |
+            /tmp/exact-review-attestation-controller-v11.log
+            ${{ runner.temp }}/run_implement_exact_review_attestation_registry_v0_v11.sh
+            ${{ runner.temp }}/generate_exact_review_attestation_registry_v7_only.sh
+            ${{ runner.temp }}/implement_exact_review_attestation_registry_v0_v7.sh
+            ${{ runner.temp }}/implement_exact_review_attestation_registry_v0_v10.sh
+          if-no-files-found: warn
+          retention-days: 7
+
+      - uses: actions/upload-artifact@v4
+        if: success()
+        with:
+          name: exact-review-attestation-registry-v0-producer
+          path: |
+            /tmp/exact-review-attestation-producer-summary.json
+            /tmp/exact-review-attestation-product.patch
+            /tmp/exact-review-attestation-wheel.whl
+            /tmp/exact-review-attestation-focused.txt
+            /tmp/exact-review-attestation-full.txt
+            /tmp/exact-review-attestation-red-v5-preservation.json
+          if-no-files-found: error
+          retention-days: 7

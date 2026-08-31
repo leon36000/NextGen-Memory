@@ -1,0 +1,2 @@
+trigger=2026-08-31T00:00:00Z
+purpose=resume exact-sha review attestation registry v0 producer from qualified RED v5
