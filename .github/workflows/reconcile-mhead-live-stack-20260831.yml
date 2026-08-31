@@ -1,0 +1,259 @@
+name: Reconcile M-HEAD live learning-policy stack 20260831
+
+on:
+  push:
+    branches:
+      - bootstrap/reconcile-mhead-live-stack-20260831
+  workflow_dispatch:
+
+concurrency:
+  group: m-head-live-stack-reconciliation-20260831
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: read
+
+jobs:
+  reconcile:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Fetch immutable source documents and live refs
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*'
+          queue_branch='evidence/learning-policy-stack-sol-review-queue-chatgpt-attested-20260824'
+          queue_file='evidence/learning-policy-stack-sol-review-queue-chatgpt-attested-20260824.json'
+          rehearsal_branch='evidence/learning-policy-stack-merge-rehearsal-chatgpt-attested-20260824'
+          rehearsal_file='evidence/learning-policy-stack-merge-rehearsal-chatgpt-attested-20260824.json'
+          registry_branch='evidence/exact-sha-review-attestation-registry-v0-canonical-approved-20260831'
+          registry_file='evidence/exact-sha-review-attestation-registry-v0-canonical-approved-20260831.json'
+          ingress_branch='review/learning-policy-stack-sol-verdict-ingress-20260824'
+          ingress_file='review/sol-verdicts/responses.json'
+          git show "origin/$queue_branch:$queue_file" > /tmp/queue.json
+          git show "origin/$rehearsal_branch:$rehearsal_file" > /tmp/rehearsal.json
+          git show "origin/$registry_branch:$registry_file" > /tmp/review-registry.json
+          git show "origin/$ingress_branch:$ingress_file" > /tmp/responses.json
+          printf 'CURRENT_MAIN_SHA=%s\nQUEUE_BRANCH=%s\nREHEARSAL_BRANCH=%s\nREGISTRY_BRANCH=%s\nINGRESS_BRANCH=%s\n' \
+            "$(git rev-parse origin/main)" "$queue_branch" "$rehearsal_branch" "$registry_branch" "$ingress_branch" \
+            | tee -a "$GITHUB_ENV"
+
+      - name: Reconcile six historical candidates and canonical PRs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          jq -e '.attestation_key == "m-head:learning-policy-stack:sol-review-queue-chatgpt-attested:20260824"' /tmp/queue.json >/dev/null
+          jq -e '.status == "review_packets_ready_unmerged"' /tmp/queue.json >/dev/null
+          jq -e '.candidates | length == 6' /tmp/queue.json >/dev/null
+          jq -e '[.candidates[].ordinal] == [1,2,3,4,5,6]' /tmp/queue.json >/dev/null
+          owner=${REPO%%/*}
+          rm -rf /tmp/components
+          mkdir -p /tmp/components
+          for index in $(seq 0 5); do
+            component=$(jq -r ".candidates[$index].component" /tmp/queue.json)
+            branch=$(jq -r ".candidates[$index].branch" /tmp/queue.json)
+            expected_sha=$(jq -r ".candidates[$index].sha" /tmp/queue.json)
+            expected_pr=$(jq -r ".candidates[$index].pull_request" /tmp/queue.json)
+            expected_base_branch=$(jq -r ".candidates[$index].base_branch" /tmp/queue.json)
+            expected_base_sha=$(jq -r ".candidates[$index].base_sha" /tmp/queue.json)
+            live_sha=$(git rev-parse "origin/$branch")
+            live_base_sha=$(git rev-parse "origin/$expected_base_branch")
+            branch_exact=false
+            base_exact=false
+            ancestry_exact=false
+            [ "$live_sha" = "$expected_sha" ] && branch_exact=true
+            [ "$live_base_sha" = "$expected_base_sha" ] && base_exact=true
+            if [ "$(git merge-base "$expected_base_sha" "$expected_sha")" = "$expected_base_sha" ]; then ancestry_exact=true; fi
+            pulls=$(gh api --method GET "repos/$REPO/pulls" -f state=open -f head="$owner:$branch" -f per_page=100)
+            pr_count=$(printf '%s' "$pulls" | jq 'length')
+            pr_exact=false
+            draft=false
+            if [ "$pr_count" -eq 1 ]; then
+              live_pr=$(printf '%s' "$pulls" | jq -r '.[0].number')
+              live_pr_sha=$(printf '%s' "$pulls" | jq -r '.[0].head.sha')
+              live_pr_base=$(printf '%s' "$pulls" | jq -r '.[0].base.ref')
+              draft=$(printf '%s' "$pulls" | jq -r '.[0].draft')
+              if [ "$live_pr" = "$expected_pr" ] \
+                && [ "$live_pr_sha" = "$expected_sha" ] \
+                && [ "$live_pr_base" = "$expected_base_branch" ]; then
+                pr_exact=true
+              fi
+            fi
+            jq -n \
+              --argjson ordinal "$((index + 1))" \
+              --arg component "$component" \
+              --arg branch "$branch" \
+              --arg expected_sha "$expected_sha" \
+              --arg live_sha "$live_sha" \
+              --arg base_branch "$expected_base_branch" \
+              --arg expected_base_sha "$expected_base_sha" \
+              --arg live_base_sha "$live_base_sha" \
+              --argjson pull_request "$expected_pr" \
+              --argjson branch_exact "$branch_exact" \
+              --argjson base_exact "$base_exact" \
+              --argjson ancestry_exact "$ancestry_exact" \
+              --argjson pr_exact "$pr_exact" \
+              --argjson draft "$draft" \
+              '{ordinal:$ordinal,component:$component,branch:$branch,expected_sha:$expected_sha,live_sha:$live_sha,base_branch:$base_branch,expected_base_sha:$expected_base_sha,live_base_sha:$live_base_sha,pull_request:$pull_request,branch_exact:$branch_exact,base_exact:$base_exact,ancestry_exact:$ancestry_exact,canonical_open_pr_exact:$pr_exact,draft:$draft}' \
+              > "/tmp/components/$index.json"
+          done
+          jq -s 'sort_by(.ordinal)' /tmp/components/*.json > /tmp/components.json
+
+      - name: Reconcile authenticated review ingress and exact review registry
+        shell: bash
+        run: |
+          set -euo pipefail
+          jq -e '.schema == "m-head-learning-policy-stack-sol-verdict-ingress-v1"' /tmp/responses.json >/dev/null
+          response_count=$(jq '.responses | length' /tmp/responses.json)
+          approved_count=$(jq '[.responses[] | select(.verdict == "APPROVE")] | length' /tmp/responses.json)
+          changes_count=$(jq '[.responses[] | select(.verdict == "CHANGES_REQUIRED")] | length' /tmp/responses.json)
+          evidence_blocked_count=$(jq '[.responses[] | select(.verdict == "BLOCKED_BY_EVIDENCE")] | length' /tmp/responses.json)
+          jq -e '.checkpoint_key == "m-head:exact-sha-review-attestation-registry-v0:canonical-approved:20260831"' /tmp/review-registry.json >/dev/null
+          jq -e '.status == "green_review_approved_unmerged"' /tmp/review-registry.json >/dev/null
+          jq -e '.review.verdict == "APPROVE" and .review.merge_authorized == false' /tmp/review-registry.json >/dev/null
+          jq -e '.merge_allowed == false and .safety.merged == false' /tmp/review-registry.json >/dev/null
+          rehearsal_main=$(jq -r '.main_sha // .attested_main_sha // empty' /tmp/rehearsal.json)
+          if [ -z "$rehearsal_main" ]; then
+            rehearsal_main=$(jq -r '.merge_rehearsal.attested_main_sha // empty' /tmp/rehearsal.json)
+          fi
+          rehearsal_current=false
+          if [ -n "$rehearsal_main" ] && [ "$rehearsal_main" = "$CURRENT_MAIN_SHA" ]; then rehearsal_current=true; fi
+          printf 'RESPONSE_COUNT=%s\nAPPROVED_COUNT=%s\nCHANGES_COUNT=%s\nEVIDENCE_BLOCKED_COUNT=%s\nREHEARSAL_MAIN=%s\nREHEARSAL_CURRENT=%s\n' \
+            "$response_count" "$approved_count" "$changes_count" "$evidence_blocked_count" "$rehearsal_main" "$rehearsal_current" \
+            | tee -a "$GITHUB_ENV"
+
+      - name: Build fail-closed live-stack report
+        shell: bash
+        run: |
+          set -euo pipefail
+          all_candidates_exact=$(jq '[.[] | select(.branch_exact != true or .base_exact != true or .ancestry_exact != true or .canonical_open_pr_exact != true or .draft != true)] | length == 0' /tmp/components.json)
+          review_registry_approved=true
+          all_six_approved=false
+          if [ "$RESPONSE_COUNT" -eq 6 ] \
+            && [ "$APPROVED_COUNT" -eq 6 ] \
+            && [ "$CHANGES_COUNT" -eq 0 ] \
+            && [ "$EVIDENCE_BLOCKED_COUNT" -eq 0 ]; then
+            all_six_approved=true
+          fi
+          merge_ready=false
+          if [ "$all_candidates_exact" = true ] \
+            && [ "$all_six_approved" = true ] \
+            && [ "$review_registry_approved" = true ] \
+            && [ "$REHEARSAL_CURRENT" = true ]; then
+            merge_ready=true
+          fi
+          if [ "$all_candidates_exact" != true ]; then
+            status='candidate_graph_drift_unmerged'
+            next='Repair or re-verify the moved candidate graph before reviews or merge.'
+          elif [ "$CHANGES_COUNT" -gt 0 ]; then
+            status='review_changes_required_unmerged'
+            next='Correct the reviewed candidate findings and create new immutable candidates.'
+          elif [ "$EVIDENCE_BLOCKED_COUNT" -gt 0 ]; then
+            status='review_evidence_blocked_unmerged'
+            next='Provide the missing review evidence and repeat exact-SHA review.'
+          elif [ "$all_six_approved" != true ]; then
+            status='awaiting_authenticated_stack_reviews_unmerged'
+            next='Complete genuine authenticated reviews for all six historical candidates; missing evidence is non-approval.'
+          elif [ "$REHEARSAL_CURRENT" != true ]; then
+            status='all_components_reviewed_merge_rehearsal_stale_unmerged'
+            next='Re-run the dependency-ordered merge rehearsal against current main before any merge decision.'
+          else
+            status='stack_technically_merge_ready_unmerged'
+            next='A separate authorized merge controller may revalidate and merge dependency order without deploying or activating anything.'
+          fi
+          jq -n \
+            --arg schema 'm-head-live-stack-reconciliation-v1' \
+            --arg status "$status" \
+            --arg repository '${{ github.repository }}' \
+            --arg current_main_sha "$CURRENT_MAIN_SHA" \
+            --arg queue_branch "$QUEUE_BRANCH" \
+            --arg rehearsal_branch "$REHEARSAL_BRANCH" \
+            --arg registry_branch "$REGISTRY_BRANCH" \
+            --arg ingress_branch "$INGRESS_BRANCH" \
+            --arg rehearsal_main_sha "$REHEARSAL_MAIN" \
+            --argjson rehearsal_current "$REHEARSAL_CURRENT" \
+            --argjson components "$(cat /tmp/components.json)" \
+            --argjson all_candidates_exact "$all_candidates_exact" \
+            --argjson response_count "$RESPONSE_COUNT" \
+            --argjson approved_count "$APPROVED_COUNT" \
+            --argjson changes_required_count "$CHANGES_COUNT" \
+            --argjson evidence_blocked_count "$EVIDENCE_BLOCKED_COUNT" \
+            --argjson all_six_approved "$all_six_approved" \
+            --argjson review_registry_approved "$review_registry_approved" \
+            --argjson merge_ready "$merge_ready" \
+            --arg next_action "$next" \
+            '{schema:$schema,status:$status,repository:$repository,current_main_sha:$current_main_sha,sources:{review_queue_branch:$queue_branch,merge_rehearsal_branch:$rehearsal_branch,exact_review_registry_branch:$registry_branch,review_ingress_branch:$ingress_branch},components:$components,graph:{all_candidates_exact:$all_candidates_exact},reviews:{required_historical_candidate_count:6,authenticated_response_count:$response_count,approved_count:$approved_count,changes_required_count:$changes_required_count,evidence_blocked_count:$evidence_blocked_count,all_six_approved:$all_six_approved,exact_review_registry_approved:$review_registry_approved},merge_rehearsal:{attested_main_sha:$rehearsal_main_sha,current:$rehearsal_current},merge_ready:$merge_ready,safety:{actual_product_merge_performed:false,merged:false,production_database_contacted:false,production_migration_applied:false,production_application_data_written:false,feedback_written:false,policy_activated:false,release_published:false,tests_weakened:false,stubs_added:false,review_fabricated:false},next_action:$next}' \
+            > /tmp/live-stack.json
+          cat /tmp/live-stack.json
+
+      - name: Publish immutable reconciliation and durable issue status
+        id: publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          branch='evidence/m-head-live-stack-reconciliation-20260831'
+          path='evidence/m-head-live-stack-reconciliation-20260831.json'
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git fetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*'
+          if git ls-remote --exit-code --heads origin "$branch"; then
+            git switch --detach "origin/$branch"
+            cmp /tmp/live-stack.json "$path"
+          else
+            git switch -C "$branch" origin/main
+            mkdir -p evidence
+            cp /tmp/live-stack.json "$path"
+            git add "$path"
+            git diff --cached --check
+            git commit -m 'evidence: reconcile M-HEAD live learning-policy stack'
+            git push origin HEAD:"refs/heads/$branch"
+          fi
+          commit=$(git rev-parse HEAD)
+          status=$(jq -r '.status' /tmp/live-stack.json)
+          response_count=$(jq -r '.reviews.authenticated_response_count' /tmp/live-stack.json)
+          approved_count=$(jq -r '.reviews.approved_count' /tmp/live-stack.json)
+          exact_graph=$(jq -r '.graph.all_candidates_exact' /tmp/live-stack.json)
+          rehearsal_current=$(jq -r '.merge_rehearsal.current' /tmp/live-stack.json)
+          merge_ready=$(jq -r '.merge_ready' /tmp/live-stack.json)
+          body=$(cat <<EOF
+          ## M-HEAD live stack reconciliation
+
+          - status: \`$status\`;
+          - historical candidate graph exact: \`$exact_graph\`;
+          - authenticated historical reviews: \`$response_count/6\`;
+          - approved historical reviews: \`$approved_count/6\`;
+          - Exact-SHA Review Attestation Registry approved: \`true\`;
+          - merge rehearsal current: \`$rehearsal_current\`;
+          - merge ready: \`$merge_ready\`;
+          - immutable report: \`$branch\` at \`$commit\`.
+
+          No merge, migration, deployment, feedback write, policy activation, or release occurred.
+          EOF
+          )
+          gh api "repos/$GITHUB_REPOSITORY/issues/23/comments" --raw-field body="$body" >/dev/null
+          echo "branch=$branch" >> "$GITHUB_OUTPUT"
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: m-head-live-stack-reconciliation-20260831
+          path: |
+            /tmp/live-stack.json
+            /tmp/components.json
+            /tmp/responses.json
+            /tmp/review-registry.json
+          if-no-files-found: error
+          retention-days: 14
