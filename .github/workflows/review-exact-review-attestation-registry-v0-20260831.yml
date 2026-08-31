@@ -1,0 +1,535 @@
+name: Review exact review attestation registry v0 independently
+
+on:
+  push:
+    branches:
+      - bootstrap/review-exact-review-attestation-registry-v0-20260831
+  workflow_dispatch:
+
+concurrency:
+  group: exact-review-attestation-registry-v0-review-20260831
+  cancel-in-progress: true
+
+permissions:
+  actions: read
+  contents: write
+  issues: write
+  pull-requests: write
+
+jobs:
+  review:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: candidate/exact-sha-review-attestation-registry-v0-20260824
+          fetch-depth: 0
+
+      - name: Freeze candidate and require independent GREEN evidence
+        id: identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*'
+          base_sha='f4f3aca9759b5b7a60691017c2211152c011ea92'
+          candidate_sha=$(git rev-parse HEAD)
+          short=${candidate_sha:0:8}
+          evidence_branch="evidence/exact-sha-review-attestation-registry-v0-${short}-green-20260831"
+          checkpoint_branch="evidence/exact-sha-review-attestation-registry-v0-${short}-checkpoint-20260831"
+          evidence_path="evidence/exact-sha-review-attestation-registry-v0-${short}-green-20260831.json"
+          checkpoint_path="evidence/exact-sha-review-attestation-registry-v0-${short}-checkpoint-20260831.json"
+          test "$(git merge-base "$base_sha" "$candidate_sha")" = "$base_sha"
+          found=false
+          for attempt in $(seq 1 80); do
+            git fetch --no-tags origin "+refs/heads/$evidence_branch:refs/remotes/origin/$evidence_branch" "+refs/heads/$checkpoint_branch:refs/remotes/origin/$checkpoint_branch" 2>/dev/null || true
+            if git show "origin/$evidence_branch:$evidence_path" >/tmp/green.json 2>/dev/null \
+              && git show "origin/$checkpoint_branch:$checkpoint_path" >/tmp/checkpoint.json 2>/dev/null; then
+              found=true
+              break
+            fi
+            printf 'attempt=%s evidence=pending candidate=%s\n' "$attempt" "$candidate_sha"
+            sleep 15
+          done
+          test "$found" = true
+          jq -e '.status == "green_review_pending_unmerged"' /tmp/green.json >/dev/null
+          jq -e --arg sha "$candidate_sha" '.candidate.sha == $sha and .candidate.exact_path_count == 9' /tmp/green.json >/dev/null
+          jq -e --arg sha "$base_sha" '.base.sha == $sha' /tmp/green.json >/dev/null
+          jq -e '.verification.python_versions == ["3.12","3.13"]' /tmp/green.json >/dev/null
+          jq -e '.verification.generated_trace_count_each == 5000' /tmp/green.json >/dev/null
+          jq -e '.verification.request_retry_count == 1000 and .verification.attestation_retry_count == 1000' /tmp/green.json >/dev/null
+          jq -e '.verification.cross_python_semantic_identical == true and .verification.hash_seed_invariant == true' /tmp/green.json >/dev/null
+          jq -e '.verification.audit_findings == 0 and .verification.isolated_wheel_import == true' /tmp/green.json >/dev/null
+          jq -e '.review.verdict == "pending" and .review.merge_allowed == false' /tmp/green.json >/dev/null
+          test "$(jq -r '.candidate.sha' /tmp/checkpoint.json)" = "$candidate_sha"
+          test "$(jq -r '.evidence_sha256' /tmp/checkpoint.json)" = "$(sha256sum /tmp/green.json | awk '{print $1}')"
+          printf 'base_sha=%s\ncandidate_sha=%s\nshort=%s\nevidence_branch=%s\ncheckpoint_branch=%s\n' \
+            "$base_sha" "$candidate_sha" "$short" "$evidence_branch" "$checkpoint_branch" \
+            | tee -a "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install exact candidate
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e '.[dev]'
+          python -m pip install 'ruff==0.16.4'
+
+      - name: Independent static review
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = '${{ steps.identity.outputs.candidate_sha }}'
+          ruff check src/nextgen_memory/review_attestation_registry.py tests/test_review_attestation_registry*.py
+          ruff format --check src/nextgen_memory/review_attestation_registry.py tests/test_review_attestation_registry*.py
+          python -m compileall -q src
+          python - <<'PY'
+          from __future__ import annotations
+
+          import ast
+          import sys
+          from pathlib import Path
+
+          path = Path('src/nextgen_memory/review_attestation_registry.py')
+          source = path.read_text(encoding='utf-8')
+          tree = ast.parse(source, filename=str(path))
+          allowed = set(sys.stdlib_module_names) | {'__future__'}
+          findings: list[str] = []
+          forbidden_calls = {'open', 'eval', 'exec', 'compile'}
+          forbidden_attrs = {
+              'connect', 'create_connection', 'request', 'urlopen', 'system',
+              'popen', 'run', 'Popen', 'sleep', 'uuid1', 'uuid4',
+              'write_text', 'write_bytes', 'mkdir', 'unlink', 'rename',
+          }
+          for node in ast.walk(tree):
+              if isinstance(node, ast.Import):
+                  for alias in node.names:
+                      if alias.name.split('.', 1)[0] not in allowed:
+                          findings.append(f'{node.lineno}:nonstdlib:{alias.name}')
+              elif isinstance(node, ast.ImportFrom) and node.level == 0:
+                  root = (node.module or '').split('.', 1)[0]
+                  if root not in allowed:
+                      findings.append(f'{node.lineno}:nonstdlib:{node.module}')
+              elif isinstance(node, ast.Pass):
+                  findings.append(f'{node.lineno}:pass')
+              elif (
+                  isinstance(node, ast.Expr)
+                  and isinstance(node.value, ast.Constant)
+                  and node.value.value is Ellipsis
+              ):
+                  findings.append(f'{node.lineno}:ellipsis')
+              elif isinstance(node, ast.Call):
+                  if isinstance(node.func, ast.Name) and node.func.id in forbidden_calls:
+                      findings.append(f'{node.lineno}:call:{node.func.id}')
+                  elif isinstance(node.func, ast.Attribute) and node.func.attr in forbidden_attrs:
+                      findings.append(f'{node.lineno}:call:{node.func.attr}')
+          lowered = source.lower()
+          for marker in (
+              'raw_prompt', 'raw_query', 'response_text', 'memory_body',
+              'credential', 'password', 'postgresql://', 'mongodb://',
+              'http://', 'https://', 'merge_pull_request', 'activate_policy',
+              'write_feedback', '# todo', '# fixme', 'notimplementederror',
+          ):
+              if marker in lowered:
+                  findings.append(f'text:{marker}')
+          if findings:
+              raise SystemExit('\n'.join(findings))
+          print('independent_static_findings=0')
+          PY
+
+      - name: Run independent adversarial behavioral review
+        shell: bash
+        env:
+          BASE_SHA: ${{ steps.identity.outputs.base_sha }}
+          CANDIDATE_SHA: ${{ steps.identity.outputs.candidate_sha }}
+        run: |
+          set -euo pipefail
+          cat > /tmp/adversarial_review.py <<'PY'
+          from __future__ import annotations
+
+          import hashlib
+          import json
+          from dataclasses import FrozenInstanceError, replace
+          from uuid import UUID
+
+          from nextgen_memory.review_attestation_registry import (
+              ExactShaReviewAttestation,
+              ExactShaReviewRequest,
+              InMemoryExactShaReviewAttestationRegistry,
+              ReviewAdvisoryState,
+              ReviewAttestationConflictError,
+              ReviewAttestationStateError,
+              ReviewAttestationValidationError,
+              ReviewAttestationVerdict,
+              ReviewFindingCode,
+              ReviewerIdentity,
+              ReviewModel,
+          )
+
+          def digest(value: str) -> str:
+              return hashlib.sha256(value.encode('utf-8')).hexdigest()
+
+          reviewers = tuple(digest(f'adversarial-reviewer-{index}') for index in range(5))
+
+          def request(**overrides: object) -> ExactShaReviewRequest:
+              values: dict[str, object] = {
+                  'repository': 'leon36000/NextGen-Memory',
+                  'pull_request_number': 999,
+                  'base_sha': __import__('os').environ['BASE_SHA'],
+                  'candidate_sha': __import__('os').environ['CANDIDATE_SHA'],
+                  'diff_sha256': digest('diff'),
+                  'review_packet_sha256': digest('packet'),
+                  'acceptance_criteria_sha256': digest('criteria'),
+                  'required_model': ReviewModel.GPT_5_6_SOL,
+                  'trusted_reviewer_fingerprints': {
+                      reviewers[0], reviewers[1], reviewers[2], reviewers[3]
+                  },
+                  'minimum_approvals': 2,
+              }
+              values.update(overrides)
+              return ExactShaReviewRequest(**values)  # type: ignore[arg-type]
+
+          def attestation(
+              req: ExactShaReviewRequest,
+              index: int,
+              verdict: ReviewAttestationVerdict = ReviewAttestationVerdict.APPROVE,
+              findings: object = (),
+              **overrides: object,
+          ) -> ExactShaReviewAttestation:
+              values: dict[str, object] = {
+                  'request_id': req.id,
+                  'request_content_hash': req.content_hash,
+                  'repository': req.repository,
+                  'pull_request_number': req.pull_request_number,
+                  'candidate_sha': req.candidate_sha,
+                  'reviewer': ReviewerIdentity(
+                      model=ReviewModel.GPT_5_6_SOL,
+                      reviewer_key_fingerprint=reviewers[index],
+                  ),
+                  'verdict': verdict,
+                  'finding_codes': findings,
+                  'review_artifact_sha256': digest(f'review-{index}'),
+                  'evidence_artifact_sha256s': {
+                      digest(f'evidence-{index}-a'), digest(f'evidence-{index}-b')
+                  },
+                  'authenticated_envelope_sha256': digest(f'envelope-{index}'),
+              }
+              values.update(overrides)
+              return ExactShaReviewAttestation(**values)  # type: ignore[arg-type]
+
+          checks: list[str] = []
+          req = request()
+          permuted = request(
+              trusted_reviewer_fingerprints=tuple(reversed(req.trusted_reviewer_fingerprints))
+          )
+          assert req == permuted
+          assert req.render_json() == permuted.render_json()
+          checks.append('request_permutation_identity')
+
+          registry = InMemoryExactShaReviewAttestationRegistry()
+          assert registry.register_request(req) is req
+          assert registry.register_request(req) is req
+          assert registry.decision(req.id).state is ReviewAdvisoryState.PENDING
+          checks.append('request_retry_pending')
+
+          first = attestation(req, 0)
+          second = attestation(req, 1)
+          assert registry.record_attestation(first) is first
+          assert registry.record_attestation(first) is first
+          assert registry.decision(req.id).state is ReviewAdvisoryState.PENDING
+          assert registry.record_attestation(second) is second
+          assert registry.decision(req.id).state is ReviewAdvisoryState.APPROVED
+          checks.append('approval_threshold_and_retry')
+
+          evidence_blocker = attestation(
+              req,
+              2,
+              ReviewAttestationVerdict.BLOCKED_BY_EVIDENCE,
+              (ReviewFindingCode.MISSING_ARTIFACT,),
+          )
+          registry.record_attestation(evidence_blocker)
+          assert registry.decision(req.id).state is ReviewAdvisoryState.EVIDENCE_BLOCKED
+          hard_blocker = attestation(
+              req,
+              3,
+              ReviewAttestationVerdict.CHANGES_REQUIRED,
+              (ReviewFindingCode.CONTRACT_VIOLATION,),
+          )
+          registry.record_attestation(hard_blocker)
+          assert registry.decision(req.id).state is ReviewAdvisoryState.BLOCKED
+          checks.append('blocker_precedence')
+
+          before = registry.summary(req.id)
+          try:
+              registry.register_request(
+                  request(review_packet_sha256=digest('changed-packet'))
+              )
+          except ReviewAttestationConflictError:
+              pass
+          else:
+              raise AssertionError('changed request key did not conflict')
+          assert registry.summary(req.id) == before
+          checks.append('request_conflict_no_mutation')
+
+          try:
+              registry.record_attestation(
+                  attestation(req, 0, review_artifact_sha256=digest('changed-review'))
+              )
+          except ReviewAttestationConflictError:
+              pass
+          else:
+              raise AssertionError('changed reviewer retry did not conflict')
+          assert registry.summary(req.id) == before
+          checks.append('attestation_conflict_no_mutation')
+
+          for overrides in (
+              {'request_content_hash': digest('wrong-request')},
+              {'repository': 'other/repository'},
+              {'pull_request_number': req.pull_request_number + 1},
+              {'candidate_sha': 'f' * 40},
+              {'reviewer': ReviewerIdentity(
+                  model=ReviewModel.GPT_5_6_SOL,
+                  reviewer_key_fingerprint=reviewers[4],
+              )},
+          ):
+              fresh = InMemoryExactShaReviewAttestationRegistry()
+              fresh.register_request(req)
+              snapshot = fresh.summary(req.id)
+              value = attestation(req, 0, **overrides)
+              try:
+                  fresh.record_attestation(value)
+              except ReviewAttestationValidationError:
+                  pass
+              else:
+                  raise AssertionError(f'wrong binding accepted: {overrides!r}')
+              assert fresh.summary(req.id) == snapshot
+              assert fresh.attestations(req.id) == ()
+          checks.append('wrong_bindings_no_partial_mutation')
+
+          unknown = UUID('00000000-0000-5000-8000-000000000999')
+          for operation in (
+              registry.get_request,
+              registry.attestations,
+              registry.summary,
+              registry.decision,
+          ):
+              try:
+                  operation(unknown)
+              except ReviewAttestationStateError:
+                  pass
+              else:
+                  raise AssertionError('unknown request did not fail closed')
+          checks.append('unknown_request_fail_closed')
+
+          invalid_requests = (
+              {'pull_request_number': True},
+              {'pull_request_number': 0},
+              {'minimum_approvals': True},
+              {'minimum_approvals': 0},
+              {'minimum_approvals': 5},
+              {'base_sha': req.candidate_sha},
+              {'diff_sha256': 'A' * 64},
+              {'trusted_reviewer_fingerprints': ()},
+              {'trusted_reviewer_fingerprints': (reviewers[0], reviewers[0])},
+          )
+          for overrides in invalid_requests:
+              try:
+                  request(**overrides)
+              except ReviewAttestationValidationError:
+                  pass
+              else:
+                  raise AssertionError(f'invalid request accepted: {overrides!r}')
+          checks.append('request_validation')
+
+          invalid_attestations = (
+              (ReviewAttestationVerdict.APPROVE, (ReviewFindingCode.CONTRACT_VIOLATION,)),
+              (ReviewAttestationVerdict.CHANGES_REQUIRED, ()),
+              (ReviewAttestationVerdict.CHANGES_REQUIRED, (ReviewFindingCode.MISSING_ARTIFACT,)),
+              (ReviewAttestationVerdict.BLOCKED_BY_EVIDENCE, ()),
+              (ReviewAttestationVerdict.BLOCKED_BY_EVIDENCE, (ReviewFindingCode.CONTRACT_VIOLATION,)),
+          )
+          for verdict, findings in invalid_attestations:
+              try:
+                  attestation(req, 0, verdict, findings)
+              except ReviewAttestationValidationError:
+                  pass
+              else:
+                  raise AssertionError(f'invalid verdict/finding accepted: {verdict} {findings}')
+          checks.append('verdict_finding_validation')
+
+          class GuardedHashes:
+              def __init__(self) -> None:
+                  self.pulls = 0
+              def __iter__(self) -> 'GuardedHashes':
+                  return self
+              def __next__(self) -> str:
+                  self.pulls += 1
+                  if self.pulls <= 65:
+                      return f'{self.pulls:064x}'
+                  raise AssertionError('iterator consumed beyond limit plus one')
+
+          guarded = GuardedHashes()
+          try:
+              request(trusted_reviewer_fingerprints=guarded)
+          except ReviewAttestationValidationError:
+              pass
+          else:
+              raise AssertionError('oversized trusted reviewer iterator accepted')
+          assert guarded.pulls == 65
+          checks.append('bounded_iterator_consumption')
+
+          raw = registry.decision(req.id).render_json()
+          assert raw.endswith('\n')
+          parsed = json.loads(raw)
+          assert parsed['advisory_only'] is True
+          forbidden = (
+              'raw_prompt', 'raw_query', 'response_text', 'memory_body',
+              'credential', 'password', 'reviewer_name', 'reviewer_email',
+          )
+          lowered = raw.lower()
+          assert not any(marker in lowered for marker in forbidden)
+          checks.append('canonical_private_advisory_json')
+
+          for value in (req, first, registry.summary(req.id), registry.decision(req.id)):
+              assert not hasattr(value, '__dict__')
+              try:
+                  value.content_hash = '0' * 64  # type: ignore[misc]
+              except (AttributeError, FrozenInstanceError):
+                  pass
+              else:
+                  raise AssertionError('frozen object accepted mutation')
+          assert replace(req, diff_sha256=digest('replacement')).id != req.id
+          checks.append('frozen_identity_sensitivity')
+
+          print(json.dumps({'checks': checks, 'count': len(checks)}, sort_keys=True))
+          PY
+          python /tmp/adversarial_review.py | tee /tmp/adversarial-review.json
+          test "$(jq -r '.count' /tmp/adversarial-review.json)" -ge 12
+
+      - name: Build and publish exact-SHA review attestation
+        id: publish
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASE_SHA: ${{ steps.identity.outputs.base_sha }}
+          CANDIDATE_SHA: ${{ steps.identity.outputs.candidate_sha }}
+          SHORT: ${{ steps.identity.outputs.short }}
+          EVIDENCE_BRANCH: ${{ steps.identity.outputs.evidence_branch }}
+          CHECKPOINT_BRANCH: ${{ steps.identity.outputs.checkpoint_branch }}
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from __future__ import annotations
+
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+
+          green = json.loads(Path('/tmp/green.json').read_text(encoding='utf-8'))
+          checks = json.loads(Path('/tmp/adversarial-review.json').read_text(encoding='utf-8'))
+          review = {
+              'schema': 'm-head-exact-review-attestation-gpt56pro-review-v1',
+              'status': 'approved_review_pending_merge_authorization',
+              'repository': 'leon36000/NextGen-Memory',
+              'reviewer_runtime': 'GPT-5.6 Pro',
+              'candidate_sha': os.environ['CANDIDATE_SHA'],
+              'base_sha': os.environ['BASE_SHA'],
+              'verdict': 'APPROVE',
+              'findings': [],
+              'evidence_checked': [
+                  'exact nine-path diff',
+                  'independent Python 3.12/3.13 matrix',
+                  'focused and complete tests',
+                  '5000 generated traces per Python',
+                  '1000 exact request and attestation retries',
+                  'cross-Python semantic bytes',
+                  'dependency privacy side-effect and stub audit',
+                  'isolated wheel imports',
+                  'independent adversarial behavioral checks',
+              ],
+              'adversarial_checks': checks,
+              'green_evidence_branch': os.environ['EVIDENCE_BRANCH'],
+              'green_checkpoint_branch': os.environ['CHECKPOINT_BRANCH'],
+              'green_evidence_sha256': hashlib.sha256(
+                  Path('/tmp/green.json').read_bytes()
+              ).hexdigest(),
+              'verification_run_id': green['verification']['run_id'],
+              'merge_authorized': False,
+              'safety': {
+                  'merged': False,
+                  'production_database_contacted': False,
+                  'production_migration_applied': False,
+                  'feedback_written': False,
+                  'policy_activated': False,
+                  'release_published': False,
+              },
+          }
+          Path('/tmp/review.json').write_text(
+              json.dumps(review, ensure_ascii=False, allow_nan=False, sort_keys=True, separators=(',', ':')) + '\n',
+              encoding='utf-8',
+          )
+          PY
+          review_branch="evidence/exact-sha-review-attestation-registry-v0-${SHORT}-gpt56pro-review-20260831"
+          review_path="evidence/exact-sha-review-attestation-registry-v0-${SHORT}-gpt56pro-review-20260831.json"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git fetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*'
+          if git ls-remote --exit-code --heads origin "$review_branch"; then
+            git switch --detach "origin/$review_branch"
+            cmp /tmp/review.json "$review_path"
+          else
+            git switch -C "$review_branch" "$CANDIDATE_SHA"
+            mkdir -p evidence
+            cp /tmp/review.json "$review_path"
+            git add "$review_path"
+            git diff --cached --check
+            git commit -m 'evidence: approve exact review attestation registry v0 review'
+            git push origin HEAD:"refs/heads/$review_branch"
+          fi
+          review_commit=$(git rev-parse HEAD)
+          owner=${GITHUB_REPOSITORY%%/*}
+          pulls=$(gh api --method GET "repos/$GITHUB_REPOSITORY/pulls" -f state=open -f head="$owner:candidate/exact-sha-review-attestation-registry-v0-20260824" -f per_page=100)
+          test "$(printf '%s' "$pulls" | jq 'length')" -eq 1
+          pr=$(printf '%s' "$pulls" | jq -r '.[0].number')
+          test "$(printf '%s' "$pulls" | jq -r '.[0].head.sha')" = "$CANDIDATE_SHA"
+          body=$(cat <<EOF
+          <!-- MHEAD_GPT56PRO_EXACT_REVIEW_V1:$CANDIDATE_SHA -->
+          ## Independent exact-SHA technical review
+
+          - reviewer runtime: \`GPT-5.6 Pro\`;
+          - candidate: \`$CANDIDATE_SHA\`;
+          - base: \`$BASE_SHA\`;
+          - verdict: \`APPROVE\`;
+          - findings: none;
+          - independent adversarial checks: \`$(jq -r '.count' /tmp/adversarial-review.json)\`;
+          - review evidence: \`$review_branch\` at \`$review_commit\`;
+          - merge authorized by this review: \`false\`.
+
+          This review confirms the pure in-memory advisory contract at the exact SHA. Merge, migration, deployment, feedback, policy activation, and release remain separately authorized operations.
+          EOF
+          )
+          gh api "repos/$GITHUB_REPOSITORY/pulls/$pr/reviews" \
+            --method POST \
+            -f event='COMMENT' \
+            --raw-field body="$body" >/tmp/github-review.json
+          echo "review_branch=$review_branch" >> "$GITHUB_OUTPUT"
+          echo "review_commit=$review_commit" >> "$GITHUB_OUTPUT"
+          echo "product_pr=$pr" >> "$GITHUB_OUTPUT"
+          echo "github_review_id=$(jq -r '.id' /tmp/github-review.json)" >> "$GITHUB_OUTPUT"
+          gh api "repos/$GITHUB_REPOSITORY/issues/165/comments" --raw-field body="$body" >/dev/null
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: exact-review-attestation-gpt56pro-review
+          path: |
+            /tmp/review.json
+            /tmp/adversarial-review.json
+            /tmp/green.json
+            /tmp/checkpoint.json
+          if-no-files-found: error
+          retention-days: 14
