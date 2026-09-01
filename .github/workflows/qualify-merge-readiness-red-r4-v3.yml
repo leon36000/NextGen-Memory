@@ -1,0 +1,246 @@
+name: Qualify Merge Readiness RED R4-v3
+
+on:
+  pull_request:
+
+concurrency:
+  group: merge-readiness-red-r4-v3
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+jobs:
+  qualify:
+    if: github.event.pull_request.head.ref == 'bootstrap/qualify-merge-readiness-red-r4-v3-20260901'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: tdd/exact-sha-merge-readiness-gate-v0-red-r4-v3-20260901
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Freeze prior RED and parent identities
+        id: identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          parent_sha='41b0b104e5a3f06c4d238060ad0fd3dd51dd4446'
+          feature_sha='e48227896b3dec41b43ab2d92b802714b65db1a1'
+          red_v2_sha='be70f08bf1f88e79aec0d4c52de47822e6725946'
+          test "$(git rev-parse HEAD)" = "$red_v2_sha"
+          test "$(git merge-base "$parent_sha" "$feature_sha")" = "$parent_sha"
+          test "$(git merge-base "$feature_sha" HEAD)" = "$feature_sha"
+          printf 'parent_sha=%s\nfeature_sha=%s\nred_v2_sha=%s\n' \
+            "$parent_sha" "$feature_sha" "$red_v2_sha" | tee -a "$GITHUB_OUTPUT"
+
+      - name: Correct only the None-versus-empty dependency helper ambiguity
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+
+          test_path = Path('tests/test_merge_readiness_gate.py')
+          source = test_path.read_text(encoding='utf-8')
+          old = '    values = dependencies or (\n'
+          new = '    values = dependencies if dependencies is not None else (\n'
+          if source.count(old) != 1 or new in source:
+              raise SystemExit(
+                  f'expected exactly one ambiguous helper assignment; old={source.count(old)}'
+              )
+          source = source.replace(old, new, 1)
+          test_path.write_text(source, encoding='utf-8')
+
+          doc = Path('docs/exact-sha-merge-readiness-gate-v0-red.md')
+          text = doc.read_text(encoding='utf-8')
+          section = '''
+
+          ## R4-v3 helper correction
+
+          R4-v3 preserves the complete merge-readiness RED contract and corrects one test-helper ambiguity discovered during the first GREEN execution. `exact_dependencies(dependencies=())` previously used truthiness (`dependencies or default`) and therefore replaced the explicitly supplied empty tuple with a valid default dependency chain before product validation. R4-v3 distinguishes only `None` from an explicit empty tuple (`dependencies if dependencies is not None else default`), allowing the existing assertion that empty dependency tuples fail closed to exercise the product as intended. No assertion, expected reason, generated case, public API requirement, or production behavior is weakened or removed.
+          '''
+          section = '\n'.join(
+              line[10:] if line.startswith('          ') else line
+              for line in section.splitlines()
+          ) + '\n'
+          if '## R4-v3 helper correction' not in text:
+              text += section
+          doc.write_text(text, encoding='utf-8')
+          PY
+
+      - name: Prove exact semantic delta and clean source
+        shell: bash
+        env:
+          RED_V2_SHA: ${{ steps.identity.outputs.red_v2_sha }}
+        run: |
+          set -euo pipefail
+          python -m pip install -e '.[dev]'
+          python -m pip install 'ruff==0.16.4'
+          files=(
+            tests/test_merge_readiness_gate.py
+            tests/test_merge_readiness_gate_properties.py
+            tests/test_merge_readiness_gate_public_api.py
+          )
+          ruff check "${files[@]}"
+          ruff format --check "${files[@]}"
+          python -m py_compile "${files[@]}"
+          git diff --check
+          mapfile -t modified < <(git diff --name-only | sort)
+          expected=(
+            docs/exact-sha-merge-readiness-gate-v0-red.md
+            tests/test_merge_readiness_gate.py
+          )
+          test "${#modified[@]}" -eq 2
+          diff -u <(printf '%s\n' "${expected[@]}" | sort) <(printf '%s\n' "${modified[@]}")
+          test "$(git diff --numstat -- tests/test_merge_readiness_gate.py | awk '{print $1}')" -eq 1
+          test "$(git diff --numstat -- tests/test_merge_readiness_gate.py | awk '{print $2}')" -eq 1
+          git diff -- tests/test_merge_readiness_gate.py \
+            | grep -F -- '-    values = dependencies or (' >/dev/null
+          git diff -- tests/test_merge_readiness_gate.py \
+            | grep -F -- '+    values = dependencies if dependencies is not None else (' >/dev/null
+
+          python - <<'PY'
+          from __future__ import annotations
+
+          import ast
+          import os
+          import subprocess
+          from pathlib import Path
+
+          path = Path('tests/test_merge_readiness_gate.py')
+          before = ast.parse(
+              subprocess.check_output(
+                  ('git', 'show', f'{os.environ["RED_V2_SHA"]}:{path.as_posix()}'),
+                  text=True,
+              ),
+              filename=str(path),
+          )
+          after = ast.parse(path.read_text(encoding='utf-8'), filename=str(path))
+
+          def tests(tree: ast.Module) -> tuple[tuple[str, str], ...]:
+              return tuple(
+                  (
+                      node.name,
+                      ast.dump(node, annotate_fields=True, include_attributes=False),
+                  )
+                  for node in tree.body
+                  if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                  and node.name.startswith('test_')
+              )
+
+          if tests(before) != tests(after):
+              raise SystemExit('test assertion/function ASTs changed')
+          before_helpers = {
+              node.name: node
+              for node in before.body
+              if isinstance(node, ast.FunctionDef) and not node.name.startswith('test_')
+          }
+          after_helpers = {
+              node.name: node
+              for node in after.body
+              if isinstance(node, ast.FunctionDef) and not node.name.startswith('test_')
+          }
+          if set(before_helpers) != set(after_helpers):
+              raise SystemExit('helper inventory changed')
+          differing = [
+              name
+              for name in before_helpers
+              if ast.dump(before_helpers[name], include_attributes=False)
+              != ast.dump(after_helpers[name], include_attributes=False)
+          ]
+          if differing != ['exact_dependencies']:
+              raise SystemExit(f'unexpected helper AST changes: {differing!r}')
+          PY
+
+      - name: Prove each file still reaches only the intended module-absence RED
+        shell: bash
+        env:
+          FEATURE_SHA: ${{ steps.identity.outputs.feature_sha }}
+        run: |
+          set -euo pipefail
+          red_root="$RUNNER_TEMP/merge-readiness-red-r4-v3"
+          rm -rf "$red_root"
+          git worktree add --detach "$red_root" "$FEATURE_SHA"
+          mkdir -p "$red_root/tests" "$red_root/docs"
+          files=(
+            tests/test_merge_readiness_gate.py
+            tests/test_merge_readiness_gate_properties.py
+            tests/test_merge_readiness_gate_public_api.py
+          )
+          for file in "${files[@]}"; do cp "$file" "$red_root/$file"; done
+          cp docs/exact-sha-merge-readiness-gate-v0-red.md "$red_root/docs/"
+          cd "$red_root"
+          test ! -e src/nextgen_memory/merge_readiness_gate.py
+          if grep -F 'merge_readiness_gate' src/nextgen_memory/__init__.py; then
+            echo 'feature unexpectedly exports absent module' >&2
+            exit 1
+          fi
+          for file in "${files[@]}"; do
+            output="/tmp/$(basename "$file" .py)-r4v3-red.txt"
+            set +e
+            PYTHONPATH="$PWD/src" python -m pytest --collect-only -q "$file" >"$output" 2>&1
+            rc=$?
+            set -e
+            test "$rc" -ne 0
+            FILE="$file" OUTPUT="$output" python - <<'PY'
+          from __future__ import annotations
+
+          import os
+          import re
+          from pathlib import Path
+
+          text = Path(os.environ['OUTPUT']).read_text(encoding='utf-8', errors='replace')
+          modules = set(re.findall(r"ModuleNotFoundError: No module named '([^']+)'", text))
+          if modules != {'nextgen_memory.merge_readiness_gate'}:
+              raise SystemExit(
+                  f"{os.environ['FILE']}: unexpected missing modules {sorted(modules)!r}"
+              )
+          for marker in ('SyntaxError', 'IndentationError', 'NameError', 'ERROR at setup', 'fixture '):
+              if marker in text:
+                  raise SystemExit(f"{os.environ['FILE']}: unintended RED marker {marker}")
+          PY
+          done
+
+      - name: Commit immutable RED R4-v3 and close transport without merge
+        id: publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SELF_PR: ${{ github.event.pull_request.number }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add docs/exact-sha-merge-readiness-gate-v0-red.md tests/test_merge_readiness_gate.py
+          git diff --cached --check
+          git commit -m 'test: correct merge readiness empty dependency helper'
+          red_v3_sha=$(git rev-parse HEAD)
+          git push origin HEAD:tdd/exact-sha-merge-readiness-gate-v0-red-r4-v3-20260901
+          body=$(cat <<EOF
+          ## Merge Readiness R4-v3 RED accepted
+
+          - prior RED: \`${{ steps.identity.outputs.red_v2_sha }}\`;
+          - corrected RED: \`$red_v3_sha\`;
+          - test-code delta: exactly one helper assignment line;
+          - test assertion/function ASTs: unchanged;
+          - only changed helper AST: \`exact_dependencies\`;
+          - empty tuple now reaches product validation instead of being replaced by defaults;
+          - Ruff/format/syntax: clean;
+          - each file independently reaches only \`ModuleNotFoundError: nextgen_memory.merge_readiness_gate\`;
+          - tests weakened: false;
+          - merge allowed: false.
+          EOF
+          )
+          gh api "repos/$REPO/issues/166/comments" --raw-field body="$body" >/dev/null
+          gh api --method PATCH "repos/$REPO/pulls/$SELF_PR" -f state=closed >/dev/null
+          echo "red_v3_sha=$red_v3_sha" >> "$GITHUB_OUTPUT"
