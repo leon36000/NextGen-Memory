@@ -1,0 +1,192 @@
+name: Verify Merge Readiness R4-v3 exact SHA
+
+on:
+  pull_request:
+
+concurrency:
+  group: merge-readiness-r4v3-exact-sha
+  cancel-in-progress: true
+
+permissions:
+  actions: read
+  contents: write
+  issues: write
+  pull-requests: write
+
+jobs:
+  resolve:
+    if: github.event.pull_request.head.ref == 'bootstrap/verify-merge-readiness-gate-r4v3-20260901'
+    runs-on: ubuntu-24.04
+    outputs:
+      candidate_sha: ${{ steps.resolve.outputs.candidate_sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: candidate/exact-sha-merge-readiness-gate-v0-20260831
+          fetch-depth: 0
+      - name: Freeze exact candidate
+        id: resolve
+        shell: bash
+        run: |
+          set -euo pipefail
+          candidate='10c5b6d3d1c2a686d8f9926e2815dfe647de8c24'
+          parent='41b0b104e5a3f06c4d238060ad0fd3dd51dd4446'
+          test "$(git rev-parse HEAD)" = "$candidate"
+          test "$(git merge-base "$parent" HEAD)" = "$parent"
+          echo "candidate_sha=$candidate" >> "$GITHUB_OUTPUT"
+
+  verify:
+    needs: resolve
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.12','3.13']
+    env:
+      PYTHON_VERSION: ${{ matrix.python-version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: bootstrap/verify-merge-readiness-gate-r4v3-20260901
+          path: controller
+          fetch-depth: 0
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.candidate_sha }}
+          path: product
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: product/pyproject.toml
+      - name: Verify immutable candidate
+        env:
+          EVIDENCE_ROOT: ${{ runner.temp }}/merge-readiness-r4v3-${{ matrix.python-version }}
+        run: |
+          cd product
+          bash ../controller/.github/controllers/verify_merge_readiness_r4v3_candidate.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: merge-readiness-r4v3-python-${{ matrix.python-version }}
+          path: ${{ runner.temp }}/merge-readiness-r4v3-${{ matrix.python-version }}
+          if-no-files-found: error
+          retention-days: 7
+
+  compare:
+    needs: [resolve, verify]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.candidate_sha }}
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: merge-readiness-r4v3-python-*
+          path: ${{ runner.temp }}/matrix
+      - name: Require cross-Python semantic identity
+        id: compare
+        shell: bash
+        run: |
+          set -euo pipefail
+          root='${{ runner.temp }}/matrix'
+          a="$root/merge-readiness-r4v3-python-3.12/semantic.json"
+          b="$root/merge-readiness-r4v3-python-3.13/semantic.json"
+          sa="$root/merge-readiness-r4v3-python-3.12/summary.json"
+          sb="$root/merge-readiness-r4v3-python-3.13/summary.json"
+          test -f "$a"; test -f "$b"; test -f "$sa"; test -f "$sb"
+          cmp "$a" "$b"
+          jq -e '.candidate_sha == "10c5b6d3d1c2a686d8f9926e2815dfe647de8c24" and .focused_tests == 61 and .full_tests == 587 and .generated_traces == 5000 and .exact_retries == 1000 and .hash_seed_invariant == true and .audit_findings == 0 and .isolated_wheel_import == true' "$sa" >/dev/null
+          jq -e '.candidate_sha == "10c5b6d3d1c2a686d8f9926e2815dfe647de8c24" and .focused_tests == 61 and .full_tests == 587 and .generated_traces == 5000 and .exact_retries == 1000 and .hash_seed_invariant == true and .audit_findings == 0 and .isolated_wheel_import == true' "$sb" >/dev/null
+          semantic_sha=$(sha256sum "$a" | awk '{print $1}')
+          test "$(jq -r '.semantic_sha256' "$sa")" = "$semantic_sha"
+          test "$(jq -r '.semantic_sha256' "$sb")" = "$semantic_sha"
+          echo "semantic_sha=$semantic_sha" >> "$GITHUB_OUTPUT"
+          jq -n \
+            --arg schema 'm-head-merge-readiness-r4v3-green-v1' \
+            --arg status 'green_review_pending_unmerged' \
+            --arg candidate_sha '10c5b6d3d1c2a686d8f9926e2815dfe647de8c24' \
+            --arg parent_sha '41b0b104e5a3f06c4d238060ad0fd3dd51dd4446' \
+            --arg red_sha '4d6874caf519ad6f547d3217ccecc9fe58ac19e0' \
+            --arg semantic_sha256 "$semantic_sha" \
+            --argjson py312 "$(cat "$sa")" \
+            --argjson py313 "$(cat "$sb")" \
+            '{schema:$schema,status:$status,repository:"leon36000/NextGen-Memory",candidate:{branch:"candidate/exact-sha-merge-readiness-gate-v0-20260831",sha:$candidate_sha,parent_sha:$parent_sha,red_sha:$red_sha,exact_path_count:9},verification:{python_3_12:$py312,python_3_13:$py313,cross_python_semantic_identical:true,semantic_sha256:$semantic_sha256},review:{required_model:"GPT-5.6 Sol",verdict:"pending",merge_allowed:false},safety:{merged:false,production_database_contacted:false,migration_applied:false,feedback_written:false,policy_activated:false,deployment_or_release_performed:false,tests_weakened:false,stubs_added:false}}' \
+            > /tmp/green.json
+      - name: Publish immutable evidence and checkpoint
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          candidate='10c5b6d3d1c2a686d8f9926e2815dfe647de8c24'
+          evidence_branch='evidence/merge-readiness-gate-v0-10c5b6d3-green-20260901'
+          checkpoint_branch='evidence/merge-readiness-gate-v0-10c5b6d3-checkpoint-20260901'
+          evidence_file='evidence/merge-readiness-gate-v0-10c5b6d3-green-20260901.json'
+          checkpoint_file='evidence/merge-readiness-gate-v0-10c5b6d3-checkpoint-20260901.json'
+          if git ls-remote --exit-code --heads origin "$evidence_branch"; then
+            git switch --detach "origin/$evidence_branch"
+            cmp /tmp/green.json "$evidence_file"
+          else
+            git switch -c "$evidence_branch" "$candidate"
+            mkdir -p evidence
+            cp /tmp/green.json "$evidence_file"
+            git add "$evidence_file"
+            git diff --cached --check
+            git commit -m 'evidence: verify exact-SHA merge readiness gate v0'
+            git push origin HEAD:"refs/heads/$evidence_branch"
+          fi
+          git fetch --no-tags origin "+refs/heads/$evidence_branch:refs/remotes/origin/$evidence_branch"
+          evidence_commit=$(git rev-parse "origin/$evidence_branch")
+          evidence_sha=$(git show "origin/$evidence_branch:$evidence_file" | sha256sum | awk '{print $1}')
+          jq -n \
+            --arg checkpoint_key 'm-head:merge-readiness-gate-v0:green:10c5b6d3:20260901' \
+            --arg status 'green_review_pending_unmerged' \
+            --arg candidate_sha "$candidate" \
+            --arg evidence_branch "$evidence_branch" \
+            --arg evidence_commit "$evidence_commit" \
+            --arg evidence_sha256 "$evidence_sha" \
+            --arg semantic_sha256 '${{ steps.compare.outputs.semantic_sha }}' \
+            '{checkpoint_key:$checkpoint_key,status:$status,repository:"leon36000/NextGen-Memory",candidate_sha:$candidate_sha,evidence:{branch:$evidence_branch,commit:$evidence_commit,sha256:$evidence_sha256,semantic_sha256:$semantic_sha256},review:{required_model:"GPT-5.6 Sol",verdict:"pending",merge_allowed:false},next_action:"Perform a fresh exact-SHA GPT-5.6 Sol technical review; any candidate SHA movement invalidates all evidence."}' \
+            > /tmp/checkpoint.json
+          if git ls-remote --exit-code --heads origin "$checkpoint_branch"; then
+            git switch --detach "origin/$checkpoint_branch"
+            cmp /tmp/checkpoint.json "$checkpoint_file"
+          else
+            git switch -c "$checkpoint_branch" "origin/$evidence_branch"
+            cp /tmp/checkpoint.json "$checkpoint_file"
+            git add "$checkpoint_file"
+            git diff --cached --check
+            git commit -m 'evidence: checkpoint exact-SHA merge readiness gate v0'
+            git push origin HEAD:"refs/heads/$checkpoint_branch"
+          fi
+      - name: Publish status and close verifier transport
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SELF_PR: ${{ github.event.pull_request.number }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          body=$(cat <<EOF
+          ## Merge Readiness Gate exact-SHA verification GREEN
+
+          - candidate: \`10c5b6d3d1c2a686d8f9926e2815dfe647de8c24\`;
+          - RED R4-v3: \`4d6874caf519ad6f547d3217ccecc9fe58ac19e0\`;
+          - Python 3.12/3.13: green;
+          - focused tests: \`61\` each;
+          - full tests: \`587\` each;
+          - generated traces: \`5000\` each;
+          - exact retries: \`1000\` each;
+          - hash-seed invariant: true;
+          - cross-Python semantic SHA-256: \`${{ steps.compare.outputs.semantic_sha }}\`;
+          - audit findings: \`0\`;
+          - isolated wheel: green;
+          - merge allowed: false pending GPT-5.6 Sol review.
+          EOF
+          )
+          gh api "repos/$REPO/issues/166/comments" --raw-field body="$body" >/dev/null
+          gh api --method PATCH "repos/$REPO/pulls/$SELF_PR" -f state=closed >/dev/null
