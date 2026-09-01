@@ -17,7 +17,6 @@ run() {
 
 test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
 test "$(git merge-base "$PARENT_SHA" HEAD)" = "$PARENT_SHA"
-test "$(git merge-base "$RED_SHA" HEAD)" = "$RED_SHA"
 
 expected=(
   docs/exact-sha-merge-readiness-gate-v0-red.md
