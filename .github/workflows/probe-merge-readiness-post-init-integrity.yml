@@ -1,0 +1,146 @@
+name: Probe Merge Readiness post-init integrity
+
+on:
+  push:
+    branches:
+      - review/merge-readiness-post-init-integrity-20260901
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Install project
+        run: python -m pip install -e '.[dev]'
+      - name: Probe frozen-dataclass escape-hatch bypasses
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from __future__ import annotations
+
+          import json
+          import runpy
+          from dataclasses import replace
+
+          ns = runpy.run_path('tests/test_merge_readiness_gate.py')
+          gate = ns['ExactShaMergeReadinessGate']()
+          ready = ns['MergeReadinessState'].READY
+          blocked = ns['MergeReadinessState'].BLOCKED
+          hold = ns['MergeReadinessState'].HOLD
+          config = ns['exact_config']()
+          baseline = ns['exact_ready_request']()
+          assert gate.evaluate(baseline, config).state is ready
+
+          results = []
+
+          verification = ns['exact_verification'](static_analysis_passed=False)
+          request = replace(baseline, verification=verification)
+          before = gate.evaluate(request, config).state
+          old_hash = verification.content_hash
+          object.__setattr__(verification, 'static_analysis_passed', True)
+          after = gate.evaluate(request, config).state
+          results.append({
+              'probe': 'verification_static_analysis_false_to_true',
+              'before': before.value,
+              'after': after.value,
+              'content_hash_unchanged': verification.content_hash == old_hash,
+              'bypass': before is blocked and after is ready,
+          })
+
+          review = ns['exact_review_evidence'](authentication_verified=False)
+          request = replace(baseline, review=review)
+          before = gate.evaluate(request, config).state
+          old_hash = review.content_hash
+          object.__setattr__(review, 'authentication_verified', True)
+          after = gate.evaluate(request, config).state
+          results.append({
+              'probe': 'review_authentication_false_to_true',
+              'before': before.value,
+              'after': after.value,
+              'content_hash_unchanged': review.content_hash == old_hash,
+              'bypass': before is blocked and after is ready,
+          })
+
+          dependencies = ns['exact_dependencies'](single_writer_reservation_active=False)
+          candidate = ns['exact_candidate'](dependencies)
+          request = ns['MergeReadinessRequest'](
+              candidate=candidate,
+              review=ns['exact_review_evidence'](),
+              verification=ns['exact_verification'](),
+              dependencies=dependencies,
+          )
+          before = gate.evaluate(request, config).state
+          old_hash = dependencies.content_hash
+          object.__setattr__(dependencies, 'single_writer_reservation_active', True)
+          after = gate.evaluate(request, config).state
+          results.append({
+              'probe': 'single_writer_false_to_true',
+              'before': before.value,
+              'after': after.value,
+              'content_hash_unchanged': dependencies.content_hash == old_hash,
+              'bypass': before is blocked and after is ready,
+          })
+
+          candidate = ns['exact_candidate'](
+              ns['exact_dependencies'](),
+              observed_candidate_head_sha=ns['OTHER_GIT_SHA'],
+          )
+          request = ns['MergeReadinessRequest'](
+              candidate=candidate,
+              review=ns['exact_review_evidence'](),
+              verification=ns['exact_verification'](),
+              dependencies=ns['exact_dependencies'](),
+          )
+          before = gate.evaluate(request, config).state
+          old_hash = candidate.content_hash
+          object.__setattr__(
+              candidate,
+              'observed_candidate_head_sha',
+              candidate.expected_candidate_sha,
+          )
+          after = gate.evaluate(request, config).state
+          results.append({
+              'probe': 'candidate_head_drift_to_expected',
+              'before': before.value,
+              'after': after.value,
+              'content_hash_unchanged': candidate.content_hash == old_hash,
+              'bypass': before is blocked and after is ready,
+          })
+
+          stale_config = ns['exact_config'](maximum_evidence_age_seconds=1.0)
+          stale_request = replace(
+              baseline,
+              verification=ns['exact_verification'](evidence_age_seconds=2.0),
+          )
+          before = gate.evaluate(stale_request, stale_config).state
+          old_hash = stale_config.content_hash
+          object.__setattr__(stale_config, 'maximum_evidence_age_seconds', 3600.0)
+          after = gate.evaluate(stale_request, stale_config).state
+          results.append({
+              'probe': 'config_age_limit_1_to_3600',
+              'before': before.value,
+              'after': after.value,
+              'content_hash_unchanged': stale_config.content_hash == old_hash,
+              'bypass': before is hold and after is ready,
+          })
+
+          print(json.dumps(results, sort_keys=True, separators=(',', ':')))
+          bypasses = [item for item in results if item['bypass']]
+          if bypasses:
+              raise SystemExit(
+                  'post-init integrity bypasses: '
+                  + ','.join(item['probe'] for item in bypasses)
+              )
+          PY
