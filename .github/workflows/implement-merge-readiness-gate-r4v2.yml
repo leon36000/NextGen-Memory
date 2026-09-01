@@ -1,0 +1,350 @@
+name: Implement merge readiness gate R4-v2
+
+on:
+  pull_request:
+
+concurrency:
+  group: merge-readiness-r4v2-single-writer
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+jobs:
+  implement:
+    if: github.event.pull_request.head.ref == 'bootstrap/implement-merge-readiness-gate-r4v2-20260831'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: bootstrap/implement-merge-readiness-gate-r4v2-20260831
+          path: controller
+          fetch-depth: 0
+
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/exact-sha-merge-readiness-gate-v0-r4-v2-20260831
+          path: product
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: product/pyproject.toml
+
+      - name: Freeze exact identities and overlay the already-proven RED
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd product
+          feature_sha='e48227896b3dec41b43ab2d92b802714b65db1a1'
+          parent_sha='41b0b104e5a3f06c4d238060ad0fd3dd51dd4446'
+          red_sha='be70f08bf1f88e79aec0d4c52de47822e6725946'
+          test "$(git rev-parse HEAD)" = "$feature_sha"
+          git fetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*'
+          test "$(git merge-base "$parent_sha" HEAD)" = "$parent_sha"
+          git cat-file -e "$red_sha^{commit}"
+          git checkout "$red_sha" -- \
+            docs/exact-sha-merge-readiness-gate-v0-red.md \
+            tests/test_merge_readiness_gate.py \
+            tests/test_merge_readiness_gate_properties.py \
+            tests/test_merge_readiness_gate_public_api.py
+          test ! -e src/nextgen_memory/merge_readiness_gate.py
+          cp ../controller/.github/payloads/merge_readiness_gate.py \
+            src/nextgen_memory/merge_readiness_gate.py
+
+      - name: Add product documentation and package-root exports
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd product
+          cat > docs/exact-sha-merge-readiness-gate-v0.md <<'EOF'
+          # Exact-SHA Merge Readiness Gate v0
+
+          ## Status
+
+          This component is a pure deterministic advisory boundary. It evaluates exact candidate identity, R4 review-registry evidence, verification evidence, ordered dependency readiness, branch controls and bounded freshness policy. It returns `READY`, `HOLD`, or `BLOCKED` and never executes a merge.
+
+          ## Precedence
+
+          Hard blocks suppress all holds. Identity drift, blocked/evidence-blocked review state, unauthenticated approval, verification failures, dependency duplication and branch-control violations are `BLOCKED`. Missing, stale or insufficient but non-contradictory evidence is `HOLD`. `READY` requires every exact identity and verification gate to pass.
+
+          ## Review evidence
+
+          The gate consumes exact R4 `ExactShaReviewRequest`, `ReviewAttestationRegistrySummary`, and `ReviewAttestationDecision` instances. Their canonical identities are revalidated before use. An externally supplied authentication boolean and authenticated-envelope evidence digest are required for an approved review to become ready; this module verifies no signature itself.
+
+          ## Verification and dependencies
+
+          Verification binds exact base/candidate/diff identities, static and compile status, full-suite status/count, artifact integrity, isolated wheel, integration rehearsal, cross-Python semantic identity, optional PostgreSQL replay, migration count, freshness and artifact/checkpoint digests. Dependencies are an exact ordered non-empty tuple with contiguous ordinals and unique component/SHA identities.
+
+          ## Safety boundary
+
+          `READY` is evidence only. The module has no GitHub client, network/database/filesystem/environment/clock/randomness/model/worker/task surface and cannot merge, migrate, deploy, write feedback, activate policy or publish a release.
+          EOF
+          sed -i 's/^          //' docs/exact-sha-merge-readiness-gate-v0.md
+
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('src/nextgen_memory/__init__.py')
+          source = path.read_text(encoding='utf-8')
+          import_block = '''from .merge_readiness_gate import (
+              ExactReviewReadinessEvidence,
+              ExactShaMergeReadinessGate,
+              MergeCandidateIdentity,
+              MergeDependencyIdentity,
+              MergeDependencyReadiness,
+              MergeReadinessConfig,
+              MergeReadinessReason,
+              MergeReadinessRecord,
+              MergeReadinessRequest,
+              MergeReadinessState,
+              MergeReadinessValidationError,
+              MergeVerificationEvidence,
+          )
+          '''
+          import_block = '\n'.join(
+              line[10:] if line.startswith('          ') else line
+              for line in import_block.splitlines()
+          ) + '\n'
+          anchor = 'from .mongodb_retrieval import (\n'
+          if import_block not in source:
+              if source.count(anchor) != 1:
+                  raise SystemExit('package import anchor is absent or duplicated')
+              source = source.replace(anchor, import_block + anchor, 1)
+          names = (
+              'ExactReviewReadinessEvidence',
+              'ExactShaMergeReadinessGate',
+              'MergeCandidateIdentity',
+              'MergeDependencyIdentity',
+              'MergeDependencyReadiness',
+              'MergeReadinessConfig',
+              'MergeReadinessReason',
+              'MergeReadinessRecord',
+              'MergeReadinessRequest',
+              'MergeReadinessState',
+              'MergeReadinessValidationError',
+              'MergeVerificationEvidence',
+          )
+          list_anchor = '    "MemoryCandidate",\n'
+          additions = ''.join(f'    "{name}",\n' for name in names)
+          if all(source.count(f'    "{name}",') == 0 for name in names):
+              if source.count(list_anchor) != 1:
+                  raise SystemExit('__all__ insertion anchor is absent or duplicated')
+              source = source.replace(list_anchor, additions + list_anchor, 1)
+          for name in names:
+              if source.count(f'    "{name}",') != 1:
+                  raise SystemExit(f'public export count differs for {name}')
+          path.write_text(source, encoding='utf-8')
+          PY
+
+      - name: Normalize product code only and preserve RED bytes
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd product
+          python -m pip install -e '.[dev]'
+          python -m pip install 'ruff==0.16.4'
+          red_sha='be70f08bf1f88e79aec0d4c52de47822e6725946'
+          red_paths=(
+            docs/exact-sha-merge-readiness-gate-v0-red.md
+            tests/test_merge_readiness_gate.py
+            tests/test_merge_readiness_gate_properties.py
+            tests/test_merge_readiness_gate_public_api.py
+          )
+          for path in "${red_paths[@]}"; do
+            git show "$red_sha:$path" > "/tmp/$(basename "$path").expected"
+          done
+          ruff check --fix \
+            src/nextgen_memory/merge_readiness_gate.py \
+            src/nextgen_memory/__init__.py
+          ruff format \
+            src/nextgen_memory/merge_readiness_gate.py \
+            src/nextgen_memory/__init__.py
+          ruff check \
+            src/nextgen_memory/merge_readiness_gate.py \
+            src/nextgen_memory/__init__.py \
+            tests/test_merge_readiness_gate.py \
+            tests/test_merge_readiness_gate_properties.py \
+            tests/test_merge_readiness_gate_public_api.py
+          ruff format --check \
+            src/nextgen_memory/merge_readiness_gate.py \
+            src/nextgen_memory/__init__.py \
+            tests/test_merge_readiness_gate.py \
+            tests/test_merge_readiness_gate_properties.py \
+            tests/test_merge_readiness_gate_public_api.py
+          for path in "${red_paths[@]}"; do
+            cmp "$path" "/tmp/$(basename "$path").expected"
+          done
+          python -m compileall -q src scripts
+          git diff --check
+
+      - name: Run focused GREEN suite and generated contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd product
+          set -o pipefail
+          python -m pytest -q \
+            tests/test_merge_readiness_gate.py \
+            tests/test_merge_readiness_gate_properties.py \
+            tests/test_merge_readiness_gate_public_api.py \
+            2>&1 | tee /tmp/merge-readiness-focused.txt
+
+      - name: Run complete repository suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd product
+          set -o pipefail
+          python -m pytest -q 2>&1 | tee /tmp/merge-readiness-full.txt
+
+      - name: Strict product dependency, privacy, side-effect and stub audit
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd product
+          python - <<'PY'
+          from __future__ import annotations
+
+          import ast
+          from pathlib import Path
+
+          path = Path('src/nextgen_memory/merge_readiness_gate.py')
+          source = path.read_text(encoding='utf-8')
+          tree = ast.parse(source, filename=str(path))
+          allowed_imports = {
+              '__future__', 'hashlib', 'json', 're', 'dataclasses', 'enum',
+              'math', 'uuid', 'review_attestation_registry',
+          }
+          findings = []
+          for node in ast.walk(tree):
+              if isinstance(node, ast.Import):
+                  for alias in node.names:
+                      if alias.name.split('.')[0] not in allowed_imports:
+                          findings.append(f'import:{alias.name}')
+              elif isinstance(node, ast.ImportFrom):
+                  module = (node.module or '').lstrip('.')
+                  if module.split('.')[0] not in allowed_imports:
+                      findings.append(f'importfrom:{node.module}')
+              elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+                  if node.func.id in {'open', 'exec', 'eval', 'compile', '__import__'}:
+                      findings.append(f'call:{node.func.id}')
+          for marker in (
+              'NotImplementedError', 'TODO', 'FIXME', '# noqa',
+              'requests.', 'httpx.', 'subprocess.', 'socket.', 'pathlib.',
+              'os.environ', 'time.', 'random.', 'secrets.',
+          ):
+              if marker in source:
+                  findings.append(f'lexical:{marker}')
+          if findings:
+              raise SystemExit(f'merge-readiness audit findings: {sorted(set(findings))!r}')
+          print('merge_readiness_audit_findings=0')
+          PY
+
+      - name: Build and import isolated wheel
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd product
+          wheelhouse="$RUNNER_TEMP/merge-readiness-wheelhouse"
+          venv="$RUNNER_TEMP/merge-readiness-wheel-venv"
+          rm -rf "$wheelhouse" "$venv"
+          mkdir -p "$wheelhouse"
+          python -m pip wheel --no-deps . -w "$wheelhouse"
+          python -m venv "$venv"
+          "$venv/bin/python" -m pip install --no-deps "$wheelhouse"/*.whl
+          "$venv/bin/python" -m pip check
+          cd "$RUNNER_TEMP"
+          "$venv/bin/python" - <<'PY'
+          import nextgen_memory
+          from nextgen_memory import ExactShaMergeReadinessGate, MergeReadinessState
+          assert ExactShaMergeReadinessGate.__module__ == 'nextgen_memory.merge_readiness_gate'
+          assert MergeReadinessState.READY.value == 'READY'
+          assert nextgen_memory.__all__.count('ExactShaMergeReadinessGate') == 1
+          PY
+
+      - name: Prove exact nine-path product surface and publish immutable candidate
+        id: publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd product
+          parent_sha='41b0b104e5a3f06c4d238060ad0fd3dd51dd4446'
+          feature_sha='e48227896b3dec41b43ab2d92b802714b65db1a1'
+          candidate_branch='candidate/exact-sha-merge-readiness-gate-v0-20260831'
+          expected=(
+            docs/exact-sha-merge-readiness-gate-v0-red.md
+            docs/exact-sha-merge-readiness-gate-v0.md
+            docs/superpowers/plans/2026-08-31-exact-sha-merge-readiness-gate-v0.md
+            docs/superpowers/specs/2026-08-31-exact-sha-merge-readiness-gate-v0-design.md
+            src/nextgen_memory/__init__.py
+            src/nextgen_memory/merge_readiness_gate.py
+            tests/test_merge_readiness_gate.py
+            tests/test_merge_readiness_gate_properties.py
+            tests/test_merge_readiness_gate_public_api.py
+          )
+          mapfile -t changed < <(git diff --name-only "$parent_sha" | sort)
+          test "${#changed[@]}" -eq "${#expected[@]}"
+          diff -u <(printf '%s\n' "${expected[@]}" | sort) <(printf '%s\n' "${changed[@]}")
+          test -z "$(git diff --name-only "$parent_sha" -- '.github/workflows/**' 'migrations/**' pyproject.toml 'src/nextgen_memory/corrective_retrieval_*')"
+          git diff --check "$parent_sha"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add "${expected[@]}"
+          git diff --cached --check
+          git commit -m 'feat: add exact-SHA merge readiness gate v0'
+          candidate_sha=$(git rev-parse HEAD)
+          git fetch --no-tags origin "+refs/heads/feat/exact-sha-merge-readiness-gate-v0-r4-v2-20260831:refs/remotes/origin/feat/exact-sha-merge-readiness-gate-v0-r4-v2-20260831"
+          test "$(git rev-parse origin/feat/exact-sha-merge-readiness-gate-v0-r4-v2-20260831)" = "$feature_sha"
+          if git ls-remote --exit-code --heads origin "$candidate_branch"; then
+            remote_sha=$(git ls-remote --heads origin "$candidate_branch" | awk '{print $1}')
+            test "$remote_sha" = "$candidate_sha"
+          else
+            git push origin HEAD:"refs/heads/$candidate_branch"
+          fi
+          echo "candidate_sha=$candidate_sha" >> "$GITHUB_OUTPUT"
+          printf '{"schema":"m-head-merge-readiness-producer-v1","status":"green_candidate_published_unmerged","parent_sha":"%s","feature_sha":"%s","red_sha":"%s","candidate_sha":"%s","exact_path_count":9,"audit_findings":0,"merged":false}\n' \
+            "$parent_sha" "$feature_sha" 'be70f08bf1f88e79aec0d4c52de47822e6725946' "$candidate_sha" \
+            > /tmp/merge-readiness-producer-summary.json
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: merge-readiness-gate-v0-producer
+          path: |
+            /tmp/merge-readiness-focused.txt
+            /tmp/merge-readiness-full.txt
+            /tmp/merge-readiness-producer-summary.json
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Publish status and close transport without merge
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SELF_PR: ${{ github.event.pull_request.number }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          body=$(cat <<EOF
+          ## Merge Readiness Gate product GREEN
+
+          - exact parent: \`41b0b104e5a3f06c4d238060ad0fd3dd51dd4446\`;
+          - feature design: \`e48227896b3dec41b43ab2d92b802714b65db1a1\`;
+          - qualified RED: \`be70f08bf1f88e79aec0d4c52de47822e6725946\`;
+          - immutable candidate: \`${{ steps.publish.outputs.candidate_sha }}\`;
+          - exact product surface: nine paths;
+          - focused/generated/full suites, audit and isolated wheel: green;
+          - merged: false;
+          - merge allowed: false pending independent exact-SHA matrix and Sol review.
+          EOF
+          )
+          gh api "repos/$REPO/issues/166/comments" --raw-field body="$body" >/dev/null
+          gh api --method PATCH "repos/$REPO/pulls/$SELF_PR" -f state=closed >/dev/null
