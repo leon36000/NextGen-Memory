@@ -1,0 +1,18 @@
+{
+  "checkpoint_key": "m-head:merge-readiness-gate-v0:green:10c5b6d3:20260901",
+  "status": "green_review_pending_unmerged",
+  "repository": "leon36000/NextGen-Memory",
+  "candidate_sha": "10c5b6d3d1c2a686d8f9926e2815dfe647de8c24",
+  "evidence": {
+    "branch": "evidence/merge-readiness-gate-v0-10c5b6d3-green-20260901",
+    "commit": "5df49b54ea379d09a13a710110639ca5040d7fd2",
+    "sha256": "5849124e1c6cd950d30f70a09a56bc01795830858ea5aad4d8bf612481f28401",
+    "semantic_sha256": "e9a7fcfa293839feb30fd9ba10ba20630ec78b2b63bf20a16ce945e9b5c83287"
+  },
+  "review": {
+    "required_model": "GPT-5.6 Sol",
+    "verdict": "pending",
+    "merge_allowed": false
+  },
+  "next_action": "Perform a fresh exact-SHA GPT-5.6 Sol technical review; any candidate SHA movement invalidates all evidence."
+}
