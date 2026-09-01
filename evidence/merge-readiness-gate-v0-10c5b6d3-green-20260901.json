@@ -1,0 +1,63 @@
+{
+  "schema": "m-head-merge-readiness-r4v3-green-v1",
+  "status": "green_review_pending_unmerged",
+  "repository": "leon36000/NextGen-Memory",
+  "candidate": {
+    "branch": "candidate/exact-sha-merge-readiness-gate-v0-20260831",
+    "sha": "10c5b6d3d1c2a686d8f9926e2815dfe647de8c24",
+    "parent_sha": "41b0b104e5a3f06c4d238060ad0fd3dd51dd4446",
+    "red_sha": "4d6874caf519ad6f547d3217ccecc9fe58ac19e0",
+    "exact_path_count": 9
+  },
+  "verification": {
+    "python_3_12": {
+      "schema": "m-head-merge-readiness-r4v3-verifier-runtime-v1",
+      "python": "3.12",
+      "candidate_sha": "10c5b6d3d1c2a686d8f9926e2815dfe647de8c24",
+      "parent_sha": "41b0b104e5a3f06c4d238060ad0fd3dd51dd4446",
+      "red_sha": "4d6874caf519ad6f547d3217ccecc9fe58ac19e0",
+      "focused_tests": 61,
+      "full_tests": 587,
+      "generated_traces": 5000,
+      "exact_retries": 1000,
+      "hash_seed_invariant": true,
+      "audit_findings": 0,
+      "isolated_wheel_import": true,
+      "semantic_sha256": "e9a7fcfa293839feb30fd9ba10ba20630ec78b2b63bf20a16ce945e9b5c83287",
+      "wheel_sha256": "56735dbcb33d5dca32c9333b1b4ff970a98078c94cf30646ed734b6fb20c71df"
+    },
+    "python_3_13": {
+      "schema": "m-head-merge-readiness-r4v3-verifier-runtime-v1",
+      "python": "3.13",
+      "candidate_sha": "10c5b6d3d1c2a686d8f9926e2815dfe647de8c24",
+      "parent_sha": "41b0b104e5a3f06c4d238060ad0fd3dd51dd4446",
+      "red_sha": "4d6874caf519ad6f547d3217ccecc9fe58ac19e0",
+      "focused_tests": 61,
+      "full_tests": 587,
+      "generated_traces": 5000,
+      "exact_retries": 1000,
+      "hash_seed_invariant": true,
+      "audit_findings": 0,
+      "isolated_wheel_import": true,
+      "semantic_sha256": "e9a7fcfa293839feb30fd9ba10ba20630ec78b2b63bf20a16ce945e9b5c83287",
+      "wheel_sha256": "c1e896b0ffafaf9b3964f95e83aaf77dcffb24455634ae3779c9ec47741fdc0b"
+    },
+    "cross_python_semantic_identical": true,
+    "semantic_sha256": "e9a7fcfa293839feb30fd9ba10ba20630ec78b2b63bf20a16ce945e9b5c83287"
+  },
+  "review": {
+    "required_model": "GPT-5.6 Sol",
+    "verdict": "pending",
+    "merge_allowed": false
+  },
+  "safety": {
+    "merged": false,
+    "production_database_contacted": false,
+    "migration_applied": false,
+    "feedback_written": false,
+    "policy_activated": false,
+    "deployment_or_release_performed": false,
+    "tests_weakened": false,
+    "stubs_added": false
+  }
+}
