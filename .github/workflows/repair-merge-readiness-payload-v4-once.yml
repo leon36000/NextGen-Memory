@@ -1,0 +1,128 @@
+name: Apply literal merge readiness lint corrections once
+
+on:
+  pull_request:
+
+concurrency:
+  group: merge-readiness-payload-repair-v4-once
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  repair:
+    if: github.event.pull_request.head.ref == 'bootstrap/implement-merge-readiness-gate-r4v2-20260831'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: bootstrap/implement-merge-readiness-gate-r4v2-20260831
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Patch only the three Git-confirmed lint sites
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('.github/payloads/merge_readiness_gate.py')
+          source = path.read_text(encoding='utf-8')
+
+          old = "    ReviewAttestationRegistrySummary,\n)\n"
+          new = (
+              "    ReviewAttestationRegistrySummary,\n"
+              "    ReviewAttestationValidationError,\n"
+              ")\n"
+          )
+          if source.count(old) != 1:
+              raise SystemExit(f'import anchor count={source.count(old)}')
+          source = source.replace(old, new, 1)
+
+          old = "    except Exception:\n        return False\n"
+          new = "    except ReviewAttestationValidationError:\n        return False\n"
+          if source.count(old) != 1:
+              raise SystemExit(f'broad-except count={source.count(old)}')
+          source = source.replace(old, new, 1)
+
+          old = (
+              "            elif decision.state is ReviewAdvisoryState.APPROVED:\n"
+              "                if not review.authentication_verified:\n"
+              "                    _append_once(block, MergeReadinessReason.UNAUTHENTICATED_APPROVAL)\n"
+          )
+          new = (
+              "            elif (\n"
+              "                decision.state is ReviewAdvisoryState.APPROVED\n"
+              "                and not review.authentication_verified\n"
+              "            ):\n"
+              "                _append_once(block, MergeReadinessReason.UNAUTHENTICATED_APPROVAL)\n"
+          )
+          if source.count(old) != 1:
+              raise SystemExit(f'approval-SIM102 count={source.count(old)}')
+          source = source.replace(old, new, 1)
+
+          old = (
+              "        if summary_integrity and request_integrity:\n"
+              "            if (\n"
+              "                summary.approval_count < review_request.minimum_approvals\n"
+              "                or summary.missing_approval_count != 0\n"
+              "            ):\n"
+              "                _append_once(hold, MergeReadinessReason.INSUFFICIENT_APPROVALS)\n"
+          )
+          new = (
+              "        if (\n"
+              "            summary_integrity\n"
+              "            and request_integrity\n"
+              "            and (\n"
+              "                summary.approval_count < review_request.minimum_approvals\n"
+              "                or summary.missing_approval_count != 0\n"
+              "            )\n"
+              "        ):\n"
+              "            _append_once(hold, MergeReadinessReason.INSUFFICIENT_APPROVALS)\n"
+          )
+          if source.count(old) != 1:
+              raise SystemExit(f'summary-SIM102 count={source.count(old)}')
+          source = source.replace(old, new, 1)
+
+          path.write_text(source, encoding='utf-8')
+          PY
+
+          python -m pip install 'ruff==0.16.4'
+          payload='.github/payloads/merge_readiness_gate.py'
+          ruff check "$payload"
+          ruff format "$payload"
+          ruff check "$payload"
+          ruff format --check "$payload"
+          python -m py_compile "$payload"
+          git diff --check
+          git diff -- "$payload" | tee /tmp/payload-repair-v4.diff
+          grep -F '+    ReviewAttestationValidationError,' /tmp/payload-repair-v4.diff >/dev/null
+          grep -F '+    except ReviewAttestationValidationError:' /tmp/payload-repair-v4.diff >/dev/null
+          grep -F 'UNAUTHENTICATED_APPROVAL' /tmp/payload-repair-v4.diff >/dev/null
+          grep -F 'INSUFFICIENT_APPROVALS' /tmp/payload-repair-v4.diff >/dev/null
+          if grep -E '^\+.*(TODO|FIXME|noqa|skip|xfail|NotImplemented)' /tmp/payload-repair-v4.diff; then
+            echo 'unexpected weakening marker in literal repair' >&2
+            exit 1
+          fi
+
+      - name: Commit repair and remove all repair transports
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -f \
+            .github/workflows/repair-merge-readiness-payload-once.yml \
+            .github/workflows/repair-merge-readiness-payload-v2-once.yml \
+            .github/workflows/repair-merge-readiness-payload-v3-once.yml \
+            .github/workflows/repair-merge-readiness-payload-v4-once.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git diff --cached --check
+          git commit -m 'fix: make merge readiness payload lint-clean'
+          git push origin HEAD:bootstrap/implement-merge-readiness-gate-r4v2-20260831
