@@ -241,6 +241,9 @@ assert nextgen_memory.__all__.count('ExactShaMergeReadinessGate') == 1
 PY
 )
 
+# Mark newly created product files as intent-to-add so Git's diff/check machinery
+# sees the complete candidate surface without staging content prematurely.
+run git add -N "${PRODUCT_PATHS[@]}"
 mapfile -t changed < <(git diff --name-only "$PARENT_SHA" | sort)
 test "${#changed[@]}" -eq "${#PRODUCT_PATHS[@]}"
 diff -u \
