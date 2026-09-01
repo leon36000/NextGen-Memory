@@ -44,3 +44,8 @@ RED v2 preserves the complete tests-only contract and every test source byte fro
 ## R4 rebase and canonical formatting
 
 This RED preserves the complete behavior contract from the earlier draft while rebasing onto immutable Review Attestation Registry R4 `41b0b104e5a3f06c4d238060ad0fd3dd51dd4446`. The three test modules receive only canonical Ruff formatting; their parsed ASTs are compared to the source draft before publication. No fixture, assertion, reason, generated case, retry, privacy boundary, or expected state changes.
+
+
+## R4-v3 helper correction
+
+R4-v3 preserves the complete merge-readiness RED contract and corrects one test-helper ambiguity discovered during the first GREEN execution. `exact_dependencies(dependencies=())` previously used truthiness (`dependencies or default`) and therefore replaced the explicitly supplied empty tuple with a valid default dependency chain before product validation. R4-v3 distinguishes only `None` from an explicit empty tuple, allowing the existing assertion that empty dependency tuples fail closed to exercise the product as intended. No assertion, expected reason, generated case, public API requirement, or production behavior is weakened or removed.

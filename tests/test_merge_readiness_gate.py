@@ -181,17 +181,21 @@ def exact_dependencies(
     single_writer_reservation_active: bool = True,
     protected_branch_policy_satisfied: bool = True,
 ) -> MergeDependencyReadiness:
-    values = dependencies or (
-        MergeDependencyIdentity(
-            ordinal=1,
-            component_key="policy-promotion-gate-v0",
-            candidate_sha="5" * 40,
-        ),
-        MergeDependencyIdentity(
-            ordinal=2,
-            component_key="review-attestation-registry-v0",
-            candidate_sha=CANDIDATE_SHA,
-        ),
+    values = (
+        dependencies
+        if dependencies is not None
+        else (
+            MergeDependencyIdentity(
+                ordinal=1,
+                component_key="policy-promotion-gate-v0",
+                candidate_sha="5" * 40,
+            ),
+            MergeDependencyIdentity(
+                ordinal=2,
+                component_key="review-attestation-registry-v0",
+                candidate_sha=CANDIDATE_SHA,
+            ),
+        )
     )
     initial = MergeDependencyReadiness(
         dependencies=values,
