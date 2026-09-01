@@ -1,0 +1,43 @@
+name: Bind Merge Readiness GREEN to RED R4-v3 once
+
+on:
+  pull_request:
+
+concurrency:
+  group: merge-readiness-bind-red-r4-v3-once
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  rebind:
+    if: github.event.pull_request.head.ref == 'bootstrap/implement-merge-readiness-gate-r4v2-20260831'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: bootstrap/implement-merge-readiness-gate-r4v2-20260831
+          fetch-depth: 0
+
+      - name: Replace only the qualified RED SHA in the GREEN controller
+        shell: bash
+        run: |
+          set -euo pipefail
+          workflow='.github/workflows/implement-merge-readiness-gate-r4v2.yml'
+          old='be70f08bf1f88e79aec0d4c52de47822e6725946'
+          new='4d6874caf519ad6f547d3217ccecc9fe58ac19e0'
+          count=$(grep -Foc "$old" "$workflow")
+          test "$count" -ge 2
+          test "$(grep -Foc "$new" "$workflow")" -eq 0
+          sed -i "s/$old/$new/g" "$workflow"
+          test "$(grep -Foc "$old" "$workflow")" -eq 0
+          test "$(grep -Foc "$new" "$workflow")" -eq "$count"
+          rm .github/workflows/rebind-merge-readiness-red-r4-v3-once.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git diff --cached --check
+          git commit -m 'ci: bind merge readiness GREEN to RED R4-v3'
+          git push origin HEAD:bootstrap/implement-merge-readiness-gate-r4v2-20260831

@@ -1,0 +1,54 @@
+name: Diagnose Merge Readiness R4-v3 post-wheel boundary
+
+on:
+  pull_request:
+
+concurrency:
+  group: merge-readiness-r4v3-postwheel-diagnostic
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  diagnose:
+    if: github.event.pull_request.head.ref == 'bootstrap/diagnose-merge-readiness-r4v3-postwheel-20260901'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: bootstrap/diagnose-merge-readiness-r4v3-postwheel-20260901
+          path: controller
+          fetch-depth: 0
+
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/exact-sha-merge-readiness-gate-v0-r4-v2-20260831
+          path: product
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: product/pyproject.toml
+
+      - name: Reproduce exact GREEN with shell tracing
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -o pipefail
+          bash -x controller/.github/controllers/implement_merge_readiness_gate_r4v3.sh \
+            "$GITHUB_WORKSPACE/controller" \
+            "$GITHUB_WORKSPACE/product" \
+            2>&1 | tee /tmp/merge-readiness-r4v3-xtrace.log
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: merge-readiness-r4v3-postwheel-diagnostic
+          path: /tmp/merge-readiness-r4v3-xtrace.log
+          if-no-files-found: error
+          retention-days: 7
