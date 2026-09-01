@@ -1,0 +1,351 @@
+--- a/src/nextgen_memory/merge_readiness_gate.py
++++ b/src/nextgen_memory/merge_readiness_gate.py
+@@ -304,6 +304,7 @@
+         }
+ 
+     def to_dict(self) -> dict[str, object]:
++        _assert_merge_readiness_config_integrity(self)
+         return {**self._payload(), "content_hash": self.content_hash}
+ 
+     def render_json(self) -> str:
+@@ -371,6 +372,7 @@
+         }
+ 
+     def to_dict(self) -> dict[str, object]:
++        _assert_merge_candidate_integrity(self)
+         return {**self._payload(), "content_hash": self.content_hash}
+ 
+     def render_json(self) -> str:
+@@ -419,6 +421,7 @@
+         }
+ 
+     def to_dict(self) -> dict[str, object]:
++        _assert_exact_review_readiness_integrity(self)
+         return {**self._payload(), "content_hash": self.content_hash}
+ 
+     def render_json(self) -> str:
+@@ -516,6 +519,7 @@
+         }
+ 
+     def to_dict(self) -> dict[str, object]:
++        _assert_merge_verification_integrity(self)
+         return {**self._payload(), "content_hash": self.content_hash}
+ 
+     def render_json(self) -> str:
+@@ -544,6 +548,7 @@
+         }
+ 
+     def to_dict(self) -> dict[str, object]:
++        _assert_merge_dependency_identity_integrity(self)
+         return {**self._payload(), "content_hash": self.content_hash}
+ 
+     def render_json(self) -> str:
+@@ -622,6 +627,7 @@
+         }
+ 
+     def to_dict(self) -> dict[str, object]:
++        _assert_merge_dependency_readiness_integrity(self)
+         return {**self._payload(), "content_hash": self.content_hash}
+ 
+     def render_json(self) -> str:
+@@ -660,6 +666,7 @@
+         }
+ 
+     def to_dict(self) -> dict[str, object]:
++        _assert_merge_readiness_request_integrity(self)
+         return {
+             **self._payload(),
+             "content_hash": self.content_hash,
+@@ -738,6 +745,7 @@
+         }
+ 
+     def to_dict(self) -> dict[str, object]:
++        _assert_merge_readiness_record_integrity(self)
+         return {
+             **self._payload(),
+             "content_hash": self.content_hash,
+@@ -748,6 +756,275 @@
+         return _canonical_json(self.to_dict())
+ 
+ 
++def _integrity_failure(kind: str) -> None:
++    _raise(f"{kind} integrity check failed")
++
++
++def _assert_content_hash(kind: str, content_hash: object, payload: object) -> None:
++    if type(content_hash) is not str or _SHA256_RE.fullmatch(content_hash) is None:
++        _integrity_failure(kind)
++    if content_hash != _hash_payload(payload):
++        _integrity_failure(kind)
++
++
++def _assert_identity(
++    kind: str,
++    content_hash: object,
++    identifier: object,
++    payload: object,
++    *,
++    uuid_kind: str,
++) -> None:
++    if type(content_hash) is not str or _SHA256_RE.fullmatch(content_hash) is None:
++        _integrity_failure(kind)
++    if type(identifier) is not UUID:
++        _integrity_failure(kind)
++    expected_hash = _hash_payload(payload)
++    if content_hash != expected_hash or identifier != _stable_uuid(uuid_kind, expected_hash):
++        _integrity_failure(kind)
++
++
++def _assert_merge_readiness_config_integrity(value: MergeReadinessConfig) -> None:
++    kind = "merge-readiness config"
++    if type(value) is not MergeReadinessConfig:
++        _integrity_failure(kind)
++    if (
++        type(value.maximum_evidence_age_seconds) is not float
++        or not isfinite(value.maximum_evidence_age_seconds)
++        or value.maximum_evidence_age_seconds <= 0.0
++        or type(value.minimum_full_suite_test_count) is not int
++        or value.minimum_full_suite_test_count <= 0
++        or type(value.minimum_migration_pass_count) is not int
++        or value.minimum_migration_pass_count < 0
++        or type(value.gate_policy_version) is not str
++        or value.gate_policy_version != _POLICY_VERSION
++    ):
++        _integrity_failure(kind)
++    _assert_content_hash(kind, value.content_hash, value._payload())
++
++
++def _assert_merge_candidate_integrity(value: MergeCandidateIdentity) -> None:
++    kind = "merge candidate"
++    if type(value) is not MergeCandidateIdentity:
++        _integrity_failure(kind)
++    try:
++        _repository(value.repository)
++        _positive_int("pull request number", value.pull_request_number)
++        for name in (
++            "expected_base_sha",
++            "observed_base_head_sha",
++            "expected_candidate_sha",
++            "observed_candidate_head_sha",
++        ):
++            _git_sha(name.replace("_", " "), getattr(value, name))
++        for name in (
++            "expected_diff_sha256",
++            "observed_diff_sha256",
++            "expected_dependency_chain_sha256",
++        ):
++            _sha256(name.replace("_", " "), getattr(value, name))
++        _policy_version(value.merge_policy_version)
++    except MergeReadinessValidationError:
++        _integrity_failure(kind)
++    _assert_content_hash(kind, value.content_hash, value._payload())
++
++
++def _assert_exact_review_readiness_integrity(value: ExactReviewReadinessEvidence) -> None:
++    kind = "exact review readiness evidence"
++    if type(value) is not ExactReviewReadinessEvidence:
++        _integrity_failure(kind)
++    if (
++        type(value.request) is not ExactShaReviewRequest
++        or type(value.summary) is not ReviewAttestationRegistrySummary
++        or type(value.decision) is not ReviewAttestationDecision
++    ):
++        _integrity_failure(kind)
++    try:
++        _optional_sha256(
++            "authenticated envelope evidence",
++            value.authenticated_envelope_evidence_sha256,
++        )
++        _exact_bool("authentication verified", value.authentication_verified)
++        _sha256("review request content hash", value.request.content_hash)
++        _sha256("review summary content hash", value.summary.content_hash)
++        _sha256("review decision content hash", value.decision.content_hash)
++    except MergeReadinessValidationError:
++        _integrity_failure(kind)
++    _assert_content_hash(kind, value.content_hash, value._payload())
++
++
++def _assert_merge_verification_integrity(value: MergeVerificationEvidence) -> None:
++    kind = "merge verification evidence"
++    if type(value) is not MergeVerificationEvidence:
++        _integrity_failure(kind)
++    try:
++        _git_sha("base SHA", value.base_sha)
++        _git_sha("candidate SHA", value.candidate_sha)
++        _sha256("diff SHA-256", value.diff_sha256)
++        for name in (
++            "static_analysis_passed",
++            "compile_passed",
++            "full_suite_passed",
++            "artifact_integrity_passed",
++            "isolated_wheel_passed",
++            "integration_rehearsal_passed",
++            "cross_python_semantic_identity_passed",
++            "postgres_replay_required",
++            "postgres_replay_passed",
++        ):
++            _exact_bool(name.replace("_", " "), getattr(value, name))
++        _nonnegative_int("full-suite test count", value.full_suite_test_count)
++        _nonnegative_int("migration pass count", value.migration_pass_count)
++        _optional_sha256("verification artifact", value.verification_artifact_sha256)
++        _optional_sha256("integration checkpoint", value.integration_checkpoint_sha256)
++    except MergeReadinessValidationError:
++        _integrity_failure(kind)
++    if (
++        type(value.evidence_age_seconds) is not float
++        or not isfinite(value.evidence_age_seconds)
++        or value.evidence_age_seconds < 0.0
++    ):
++        _integrity_failure(kind)
++    _assert_content_hash(kind, value.content_hash, value._payload())
++
++
++def _assert_merge_dependency_identity_integrity(value: MergeDependencyIdentity) -> None:
++    kind = "merge dependency identity"
++    if type(value) is not MergeDependencyIdentity:
++        _integrity_failure(kind)
++    try:
++        _positive_int("ordinal", value.ordinal)
++        _component_key(value.component_key)
++        _git_sha("candidate SHA", value.candidate_sha)
++    except MergeReadinessValidationError:
++        _integrity_failure(kind)
++    _assert_content_hash(kind, value.content_hash, value._payload())
++
++
++def _dependency_chain_hash(dependencies: tuple[MergeDependencyIdentity, ...]) -> str:
++    return _hash_payload(
++        {
++            "dependencies": [
++                {
++                    "candidate_sha": item.candidate_sha,
++                    "component_key": item.component_key,
++                    "ordinal": item.ordinal,
++                }
++                for item in dependencies
++            ],
++            "schema": _SCHEMA,
++        }
++    )
++
++
++def _assert_merge_dependency_readiness_integrity(value: MergeDependencyReadiness) -> None:
++    kind = "merge dependency readiness"
++    if type(value) is not MergeDependencyReadiness:
++        _integrity_failure(kind)
++    dependencies = value.dependencies
++    if (
++        type(dependencies) is not tuple
++        or not dependencies
++        or len(dependencies) > _MAX_DEPENDENCIES
++        or any(type(item) is not MergeDependencyIdentity for item in dependencies)
++    ):
++        _integrity_failure(kind)
++    for item in dependencies:
++        _assert_merge_dependency_identity_integrity(item)
++    if tuple(item.ordinal for item in dependencies) != tuple(range(1, len(dependencies) + 1)):
++        _integrity_failure(kind)
++    component_keys = tuple(item.component_key for item in dependencies)
++    shas = tuple(item.candidate_sha for item in dependencies)
++    if len(component_keys) != len(set(component_keys)) or len(shas) != len(set(shas)):
++        _integrity_failure(kind)
++    try:
++        _sha256("observed dependency chain", value.observed_dependency_chain_sha256)
++        _sha256("computed dependency chain", value.computed_dependency_chain_sha256)
++        for name in (
++            "prerequisites_integrated_into_observed_base",
++            "equivalent_duplicate_refs_excluded",
++            "single_writer_reservation_active",
++            "protected_branch_policy_satisfied",
++        ):
++            _exact_bool(name.replace("_", " "), getattr(value, name))
++    except MergeReadinessValidationError:
++        _integrity_failure(kind)
++    if value.computed_dependency_chain_sha256 != _dependency_chain_hash(dependencies):
++        _integrity_failure(kind)
++    _assert_content_hash(kind, value.content_hash, value._payload())
++
++
++def _assert_merge_readiness_request_integrity(value: MergeReadinessRequest) -> None:
++    kind = "merge-readiness request"
++    if type(value) is not MergeReadinessRequest:
++        _integrity_failure(kind)
++    if (
++        type(value.candidate) is not MergeCandidateIdentity
++        or type(value.review) is not ExactReviewReadinessEvidence
++        or type(value.verification) is not MergeVerificationEvidence
++        or type(value.dependencies) is not MergeDependencyReadiness
++    ):
++        _integrity_failure(kind)
++    _assert_merge_candidate_integrity(value.candidate)
++    _assert_exact_review_readiness_integrity(value.review)
++    _assert_merge_verification_integrity(value.verification)
++    _assert_merge_dependency_readiness_integrity(value.dependencies)
++    _assert_identity(
++        kind,
++        value.content_hash,
++        value.id,
++        value._payload(),
++        uuid_kind="request",
++    )
++
++
++def _assert_merge_readiness_record_integrity(value: MergeReadinessRecord) -> None:
++    kind = "merge-readiness record"
++    if type(value) is not MergeReadinessRecord:
++        _integrity_failure(kind)
++    if type(value.request_id) is not UUID:
++        _integrity_failure(kind)
++    for name in (
++        "request_content_hash",
++        "config_content_hash",
++        "candidate_content_hash",
++        "review_content_hash",
++        "verification_content_hash",
++        "dependency_content_hash",
++    ):
++        try:
++            _sha256(name.replace("_", " "), getattr(value, name))
++        except MergeReadinessValidationError:
++            _integrity_failure(kind)
++    if type(value.state) is not MergeReadinessState:
++        _integrity_failure(kind)
++    reasons = value.reasons
++    if (
++        type(reasons) is not tuple
++        or not reasons
++        or any(type(item) is not MergeReadinessReason for item in reasons)
++        or len(set(reasons)) != len(reasons)
++    ):
++        _integrity_failure(kind)
++    if value.state is MergeReadinessState.BLOCKED:
++        if tuple(item for item in _BLOCK_REASONS if item in reasons) != reasons:
++            _integrity_failure(kind)
++    elif value.state is MergeReadinessState.HOLD:
++        if tuple(item for item in _HOLD_REASONS if item in reasons) != reasons:
++            _integrity_failure(kind)
++    elif reasons != (MergeReadinessReason.ALL_GATES_PASSED,):
++        _integrity_failure(kind)
++    if value.advisory_only is not True:
++        _integrity_failure(kind)
++    _assert_identity(
++        kind,
++        value.content_hash,
++        value.id,
++        value._payload(),
++        uuid_kind="record",
++    )
++
++
+ def _derived_review_state(
+     request: ExactShaReviewRequest,
+     summary: ReviewAttestationRegistrySummary,
+@@ -780,6 +1057,8 @@
+             _raise("request must be an exact MergeReadinessRequest")
+         if type(config) is not MergeReadinessConfig:
+             _raise("config must be an exact MergeReadinessConfig")
++        _assert_merge_readiness_request_integrity(request)
++        _assert_merge_readiness_config_integrity(config)
+ 
+         candidate = request.candidate
+         review = request.review
