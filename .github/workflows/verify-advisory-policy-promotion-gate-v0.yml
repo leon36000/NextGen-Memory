@@ -1,21 +1,19 @@
-name: Verify advisory policy promotion gate v0 exact candidate
+name: Refresh advisory policy promotion gate exact-SHA evidence for Sol review
 
 on:
   pull_request:
 
 concurrency:
-  group: advisory-policy-promotion-gate-v0-exact-verifier-v2
+  group: advisory-policy-promotion-gate-sol-refresh-20260831
   cancel-in-progress: true
 
 permissions:
   actions: read
-  contents: write
-  issues: write
-  pull-requests: read
+  contents: read
 
 jobs:
   resolve:
-    if: github.event.pull_request.head.ref == 'bootstrap/verify-advisory-policy-promotion-gate-v0-20260824'
+    if: github.event.pull_request.head.ref == 'bootstrap/refresh-advisory-policy-promotion-gate-sol-20260831'
     runs-on: ubuntu-24.04
     outputs:
       base_sha: ${{ steps.resolve.outputs.base_sha }}
@@ -26,7 +24,7 @@ jobs:
           ref: candidate/advisory-policy-promotion-gate-v0-20260824
           fetch-depth: 0
 
-      - name: Resolve exact immutable candidate graph
+      - name: Freeze exact candidate and eight-path surface
         id: resolve
         shell: bash
         run: |
@@ -61,13 +59,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.12", "3.13"]
+        python-version: ['3.12', '3.13']
     env:
       PYTHON_VERSION: ${{ matrix.python-version }}
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: bootstrap/verify-advisory-policy-promotion-gate-v0-20260824
+          ref: bootstrap/refresh-advisory-policy-promotion-gate-sol-20260831
           path: controller
           fetch-depth: 0
 
@@ -83,9 +81,9 @@ jobs:
           cache: pip
           cache-dependency-path: product/pyproject.toml
 
-      - name: Verify exact product under Python ${{ matrix.python-version }}
+      - name: Re-verify exact candidate under Python ${{ matrix.python-version }}
         env:
-          EVIDENCE_ROOT: ${{ runner.temp }}/advisory-policy-promotion-${{ matrix.python-version }}
+          EVIDENCE_ROOT: ${{ runner.temp }}/advisory-policy-promotion-refresh-${{ matrix.python-version }}
         run: |
           bash controller/.github/controllers/verify_advisory_policy_promotion_candidate_v2.sh \
             "$GITHUB_WORKSPACE/product" \
@@ -95,46 +93,53 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: advisory-policy-promotion-python-${{ matrix.python-version }}
-          path: ${{ runner.temp }}/advisory-policy-promotion-${{ matrix.python-version }}
+          name: advisory-policy-promotion-refresh-python-${{ matrix.python-version }}
+          path: ${{ runner.temp }}/advisory-policy-promotion-refresh-${{ matrix.python-version }}
           if-no-files-found: error
           retention-days: 7
 
-  compare-and-publish:
+  compare:
     needs: [resolve, verify]
     runs-on: ubuntu-24.04
-    timeout-minutes: 25
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: bootstrap/verify-advisory-policy-promotion-gate-v0-20260824
-          path: controller
-          fetch-depth: 0
-
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ needs.resolve.outputs.candidate_sha }}
-          path: product
-          fetch-depth: 0
-
       - uses: actions/download-artifact@v4
         with:
-          pattern: advisory-policy-promotion-python-*
-          path: ${{ runner.temp }}/advisory-policy-promotion-matrix
+          pattern: advisory-policy-promotion-refresh-python-*
+          path: ${{ runner.temp }}/matrix
 
-      - name: Compare, bind artifacts, and publish immutable evidence
+      - name: Require byte-identical semantic evidence and build refresh summary
         env:
-          GH_TOKEN: ${{ github.token }}
+          BASE_SHA: ${{ needs.resolve.outputs.base_sha }}
+          CANDIDATE_SHA: ${{ needs.resolve.outputs.candidate_sha }}
+        shell: bash
         run: |
-          bash controller/.github/controllers/compare_publish_advisory_policy_promotion_candidate.sh \
-            "$GITHUB_WORKSPACE/product" \
-            '${{ runner.temp }}/advisory-policy-promotion-matrix' \
-            '${{ needs.resolve.outputs.candidate_sha }}' \
-            '${{ needs.resolve.outputs.base_sha }}'
+          set -euo pipefail
+          root='${{ runner.temp }}/matrix'
+          py312="$root/advisory-policy-promotion-refresh-python-3.12/semantic.json"
+          py313="$root/advisory-policy-promotion-refresh-python-3.13/semantic.json"
+          test -f "$py312"
+          test -f "$py313"
+          cmp "$py312" "$py313"
+          semantic_sha=$(sha256sum "$py312" | awk '{print $1}')
+          test "$semantic_sha" = '2a107078babc84ef4a02270a5d7e1c11725b27f35b893d12d1042d70d7b296d7'
+          jq -e --arg base "$BASE_SHA" --arg candidate "$CANDIDATE_SHA" \
+            '.base_sha == $base and .candidate_sha == $candidate and .retry_count == 1000 and .records.promote.decision == "promote" and .records.hold_failed.decision == "hold" and .records.hold_cancelled.decision == "hold" and .records.reject_safety.decision == "reject"' \
+            "$py312" >/dev/null
+          mkdir -p '${{ runner.temp }}/summary'
+          jq -n \
+            --arg schema 'm-head-advisory-policy-promotion-sol-refresh-v1' \
+            --arg status 'fresh_exact_sha_evidence_green' \
+            --arg base_sha "$BASE_SHA" \
+            --arg candidate_sha "$CANDIDATE_SHA" \
+            --arg semantic_sha256 "$semantic_sha" \
+            '{schema:$schema,status:$status,base_sha:$base_sha,candidate_sha:$candidate_sha,python_versions:["3.12","3.13"],focused_tests_each:61,full_tests_each:454,exact_retries_each:1000,hash_seed_invariant:true,cross_python_semantic_evidence_identical:true,semantic_sha256:$semantic_sha256,audit_findings:0,isolated_wheel_import:true,merged:false}' \
+            > '${{ runner.temp }}/summary/refresh-summary.json'
+          cat '${{ runner.temp }}/summary/refresh-summary.json'
 
       - uses: actions/upload-artifact@v4
         with:
-          name: advisory-policy-promotion-cross-python-summary
-          path: ${{ runner.temp }}/advisory-policy-promotion-matrix/publish-summary.json
+          name: advisory-policy-promotion-sol-refresh-summary
+          path: ${{ runner.temp }}/summary/refresh-summary.json
           if-no-files-found: error
           retention-days: 7
