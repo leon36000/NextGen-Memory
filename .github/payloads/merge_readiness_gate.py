@@ -15,6 +15,7 @@ from .review_attestation_registry import (
     ReviewAdvisoryState,
     ReviewAttestationDecision,
     ReviewAttestationRegistrySummary,
+    ReviewAttestationValidationError,
 )
 
 _SCHEMA = "nextgen-memory-exact-sha-merge-readiness-v0"
@@ -261,7 +262,7 @@ def _r4_integrity(value: object) -> bool:
         ):
             return False
         value.to_dict()
-    except Exception:
+    except ReviewAttestationValidationError:
         return False
     return True
 
@@ -278,9 +279,7 @@ class MergeReadinessConfig:
         object.__setattr__(
             self,
             "maximum_evidence_age_seconds",
-            _positive_number(
-                "maximum evidence age", self.maximum_evidence_age_seconds
-            ),
+            _positive_number("maximum evidence age", self.maximum_evidence_age_seconds),
         )
         object.__setattr__(
             self,
@@ -598,14 +597,14 @@ class MergeDependencyReadiness:
             _raise("dependencies must have contiguous ordinals")
         component_keys = tuple(item.component_key for item in dependencies)
         shas = tuple(item.candidate_sha for item in dependencies)
-        if len(component_keys) != len(set(component_keys)) or len(shas) != len(set(shas)):
+        if len(component_keys) != len(set(component_keys)) or len(shas) != len(
+            set(shas)
+        ):
             _raise("dependencies must have unique component keys and candidate SHAs")
         object.__setattr__(
             self,
             "observed_dependency_chain_sha256",
-            _sha256(
-                "observed dependency chain", self.observed_dependency_chain_sha256
-            ),
+            _sha256("observed dependency chain", self.observed_dependency_chain_sha256),
         )
         for name in (
             "prerequisites_integrated_into_observed_base",
@@ -713,7 +712,9 @@ class MergeReadinessRecord:
     content_hash: str = field(init=False)
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "request_id", _exact_uuid("request id", self.request_id))
+        object.__setattr__(
+            self, "request_id", _exact_uuid("request id", self.request_id)
+        )
         for name in (
             "request_content_hash",
             "config_content_hash",
@@ -736,10 +737,16 @@ class MergeReadinessRecord:
         if len(set(self.reasons)) != len(self.reasons):
             _raise("reasons must not contain duplicates")
         if self.state is MergeReadinessState.BLOCKED:
-            if tuple(item for item in _BLOCK_REASONS if item in self.reasons) != self.reasons:
+            if (
+                tuple(item for item in _BLOCK_REASONS if item in self.reasons)
+                != self.reasons
+            ):
                 _raise("blocked reasons are not canonical")
         elif self.state is MergeReadinessState.HOLD:
-            if tuple(item for item in _HOLD_REASONS if item in self.reasons) != self.reasons:
+            if (
+                tuple(item for item in _HOLD_REASONS if item in self.reasons)
+                != self.reasons
+            ):
                 _raise("hold reasons are not canonical")
         elif self.reasons != (MergeReadinessReason.ALL_GATES_PASSED,):
             _raise("ready reasons are invalid")
@@ -911,18 +918,23 @@ class ExactShaMergeReadinessGate:
                 _append_once(block, MergeReadinessReason.REVIEW_BLOCKED)
             elif decision.state is ReviewAdvisoryState.EVIDENCE_BLOCKED:
                 _append_once(block, MergeReadinessReason.REVIEW_EVIDENCE_BLOCKED)
-            elif decision.state is ReviewAdvisoryState.APPROVED:
-                if not review.authentication_verified:
-                    _append_once(block, MergeReadinessReason.UNAUTHENTICATED_APPROVAL)
+            elif (
+                decision.state is ReviewAdvisoryState.APPROVED
+                and not review.authentication_verified
+            ):
+                _append_once(block, MergeReadinessReason.UNAUTHENTICATED_APPROVAL)
             elif decision.state is ReviewAdvisoryState.PENDING:
                 _append_once(hold, MergeReadinessReason.REVIEW_PENDING)
 
-        if summary_integrity and request_integrity:
-            if (
+        if (
+            summary_integrity
+            and request_integrity
+            and (
                 summary.approval_count < review_request.minimum_approvals
                 or summary.missing_approval_count != 0
-            ):
-                _append_once(hold, MergeReadinessReason.INSUFFICIENT_APPROVALS)
+            )
+        ):
+            _append_once(hold, MergeReadinessReason.INSUFFICIENT_APPROVALS)
         if review.authenticated_envelope_evidence_sha256 is None:
             _append_once(hold, MergeReadinessReason.MISSING_AUTHENTICATED_ENVELOPE)
 
@@ -940,18 +952,20 @@ class ExactShaMergeReadinessGate:
             _append_once(block, MergeReadinessReason.INTEGRATION_REHEARSAL_FAILED)
         if not verification.cross_python_semantic_identity_passed:
             _append_once(block, MergeReadinessReason.CROSS_PYTHON_IDENTITY_FAILED)
-        if verification.postgres_replay_required and not verification.postgres_replay_passed:
+        if (
+            verification.postgres_replay_required
+            and not verification.postgres_replay_passed
+        ):
             _append_once(block, MergeReadinessReason.POSTGRES_REPLAY_FAILED)
 
         if verification.evidence_age_seconds > config.maximum_evidence_age_seconds:
             _append_once(hold, MergeReadinessReason.VERIFICATION_EVIDENCE_STALE)
         if (
             verification.full_suite_passed
-            and verification.full_suite_test_count < config.minimum_full_suite_test_count
+            and verification.full_suite_test_count
+            < config.minimum_full_suite_test_count
         ):
-            _append_once(
-                hold, MergeReadinessReason.INSUFFICIENT_FULL_SUITE_TEST_COUNT
-            )
+            _append_once(hold, MergeReadinessReason.INSUFFICIENT_FULL_SUITE_TEST_COUNT)
         if verification.migration_pass_count < config.minimum_migration_pass_count:
             _append_once(hold, MergeReadinessReason.INSUFFICIENT_MIGRATION_PASSES)
         if verification.verification_artifact_sha256 is None:
@@ -960,15 +974,11 @@ class ExactShaMergeReadinessGate:
             _append_once(hold, MergeReadinessReason.MISSING_INTEGRATION_CHECKPOINT)
 
         if not dependencies.equivalent_duplicate_refs_excluded:
-            _append_once(
-                block, MergeReadinessReason.EQUIVALENT_DEPENDENCY_REF_INCLUDED
-            )
+            _append_once(block, MergeReadinessReason.EQUIVALENT_DEPENDENCY_REF_INCLUDED)
         if not dependencies.single_writer_reservation_active:
             _append_once(block, MergeReadinessReason.SINGLE_WRITER_POLICY_VIOLATION)
         if not dependencies.protected_branch_policy_satisfied:
-            _append_once(
-                block, MergeReadinessReason.PROTECTED_BRANCH_POLICY_VIOLATION
-            )
+            _append_once(block, MergeReadinessReason.PROTECTED_BRANCH_POLICY_VIOLATION)
         if not dependencies.prerequisites_integrated_into_observed_base:
             _append_once(hold, MergeReadinessReason.PREREQUISITES_NOT_INTEGRATED)
 
