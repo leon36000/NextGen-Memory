@@ -1,0 +1,3 @@
+trigger=2026-09-01T00:39:00Z
+purpose=rerun exact TDD GREEN after bounded lint-only payload repair
+product_change=false
