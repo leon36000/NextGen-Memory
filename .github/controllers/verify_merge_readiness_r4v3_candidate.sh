@@ -15,7 +15,6 @@ run() {
   "$@"
 }
 
-run git fetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*'
 test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
 test "$(git merge-base "$PARENT_SHA" HEAD)" = "$PARENT_SHA"
 test "$(git merge-base "$RED_SHA" HEAD)" = "$RED_SHA"
