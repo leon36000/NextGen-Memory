@@ -1,0 +1,83 @@
+name: Implement merge readiness gate R4-v3
+
+on:
+  pull_request:
+
+concurrency:
+  group: merge-readiness-r4v3-single-writer
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+jobs:
+  implement:
+    if: github.event.pull_request.head.ref == 'bootstrap/implement-merge-readiness-gate-r4v3-20260901'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: bootstrap/implement-merge-readiness-gate-r4v3-20260901
+          path: controller
+          fetch-depth: 0
+
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/exact-sha-merge-readiness-gate-v0-r4-v2-20260831
+          path: product
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: product/pyproject.toml
+
+      - name: Execute exact R4-v3 TDD GREEN
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          bash controller/.github/controllers/implement_merge_readiness_gate_r4v3.sh \
+            "$GITHUB_WORKSPACE/controller" \
+            "$GITHUB_WORKSPACE/product"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: merge-readiness-gate-v0-r4v3-producer
+          path: |
+            /tmp/merge-readiness-focused.txt
+            /tmp/merge-readiness-full.txt
+            /tmp/merge-readiness-producer-summary.json
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Publish status and close transport without merge
+        if: success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SELF_PR: ${{ github.event.pull_request.number }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          candidate_sha=$(jq -r '.candidate_sha' /tmp/merge-readiness-producer-summary.json)
+          body=$(cat <<EOF
+          ## Merge Readiness Gate R4-v3 product GREEN
+
+          - exact parent: \`41b0b104e5a3f06c4d238060ad0fd3dd51dd4446\`;
+          - design feature: \`e48227896b3dec41b43ab2d92b802714b65db1a1\`;
+          - qualified RED R4-v3: \`4d6874caf519ad6f547d3217ccecc9fe58ac19e0\`;
+          - immutable candidate: \`$candidate_sha\`;
+          - exact product surface: nine paths;
+          - focused/generated/full suites, strict audit and isolated wheel: green;
+          - merged: false;
+          - merge allowed: false pending independent exact-SHA matrix and Sol review.
+          EOF
+          )
+          gh api "repos/$REPO/issues/166/comments" --raw-field body="$body" >/dev/null
+          gh api --method PATCH "repos/$REPO/pulls/$SELF_PR" -f state=closed >/dev/null
